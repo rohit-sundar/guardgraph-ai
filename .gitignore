@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+.env
+data/samples/*
+!data/samples/.gitkeep
+data/models/*
+!data/models/.gitkeep
+data/*.csv
+*.egg-info/
+.DS_Store
