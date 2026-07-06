@@ -65,6 +65,7 @@ def build_obfuscation_signal(
     entropy_threshold: float,
     flattening_zscore: float,
     unanalyzed_native_libs: int = 0,
+    method_parse_failure_rate: float = 0.0,
 ) -> ObfuscationSignal:
     entropy_score = compute_string_pool_entropy(all_strings)
 
@@ -85,6 +86,14 @@ def build_obfuscation_signal(
         coverage_notes.append(f"{reflection_unresolved} reflection call targets not statically resolved")
     if entropy_score >= entropy_threshold:
         coverage_notes.append("high string-pool entropy suggests encrypted/encoded literals — semantic content not recoverable statically")
+    # §9.6: flag method parse failures as a coverage gap — high failure rate
+    # often indicates heavy obfuscation that broke Androguard's block parser.
+    if method_parse_failure_rate >= 0.10:
+        pct = round(method_parse_failure_rate * 100, 1)
+        coverage_notes.append(
+            f"{pct}% of relevant methods failed CFG parsing — "
+            "analysis coverage reduced; possible heavy obfuscation"
+        )
 
     coverage_note = "; ".join(coverage_notes) if coverage_notes else "no significant static coverage gaps detected"
 
@@ -94,5 +103,6 @@ def build_obfuscation_signal(
         flattening_outlier_nodes=flattening_nodes,
         reflection_call_count=reflection_total,
         unresolved_reflection_targets=reflection_unresolved,
+        method_parse_failure_rate=method_parse_failure_rate,
         coverage_note=coverage_note,
     )

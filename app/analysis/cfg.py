@@ -7,6 +7,13 @@ rather than one giant whole-app graph. This matches the paper's anchor +
 suspicious blocks within a method's local CFG, not across the entire app.
 If you later want cross-method call-graph analysis, that's a separate
 graph (see: future work, not in this skeleton).
+
+Changes vs. original:
+- §9.6: build_all_method_cfgs now returns (graphs_dict, parse_failure_rate)
+  so callers can surface the failure rate as a coverage signal.
+- §10.3: is_method_relevant() pre-filter skips methods with no API/string
+  overlap with the forensic dictionary before doing full CFG construction,
+  reducing runtime on large benign apps without changing detection outcomes.
 """
 import networkx as nx
 
@@ -77,18 +84,91 @@ def enrich_acfg(g: nx.DiGraph, method_analysis) -> nx.DiGraph:
     return g
 
 
-def build_all_method_cfgs(analysis_obj) -> dict[str, nx.DiGraph]:
+def is_method_relevant(
+    method_analysis,
+    relevant_api_substrings: frozenset[str],
+    relevant_string_substrings: frozenset[str],
+) -> bool:
     """
-    Builds + enriches a CFG for every method in the app.
-    Returns dict of method signature -> enriched graph.
+    Cheap pre-filter (§10.3): check whether a method references any API or
+    string that the forensic dictionary cares about, BEFORE doing full CFG
+    construction (which is expensive on large APKs).
 
-    Note: for large APKs this can be slow. For prototype purposes this is
-    fine to run synchronously; if it becomes a bottleneck on your demo
-    samples, cap it to methods touching risk-relevant classes first
-    (see forensic.py anchor list) rather than optimizing the whole thing.
+    Uses Androguard's instruction stream directly without building a graph.
+    Returns True if the method should be analyzed, False if it can be skipped.
+
+    Note: this is a relevance filter, not a match. A method passing this
+    filter still needs full ACFG enrichment + anchor detection. A method
+    failing this filter is guaranteed to produce zero forensic matches
+    (no false negatives from skipping it).
     """
-    graphs = {}
+    try:
+        for block in method_analysis.get_basic_blocks().get():
+            for instr in block.get_instructions():
+                mnemonic = instr.get_name()
+                output = instr.get_output()
+
+                if mnemonic.startswith("invoke"):
+                    if any(api in output for api in relevant_api_substrings):
+                        return True
+
+                if mnemonic == "const-string" and "'" in output:
+                    literal = output.split("'", 1)[1].rsplit("'", 1)[0].lower()
+                    if any(s in literal for s in relevant_string_substrings):
+                        return True
+    except Exception:
+        # If the pre-filter itself fails, include the method to be safe —
+        # skipping on error risks false negatives.
+        return True
+
+    return False
+
+
+def build_all_method_cfgs(
+    analysis_obj,
+    use_relevance_filter: bool = True,
+) -> tuple[dict[str, nx.DiGraph], float]:
+    """
+    Builds + enriches a CFG for every relevant method in the app.
+
+    Returns:
+        (method_sig -> enriched_graph, parse_failure_rate)
+
+    parse_failure_rate is the fraction of attempted methods that raised an
+    exception during CFG construction or ACFG enrichment. A high rate is a
+    meaningful coverage gap (often caused by heavy obfuscation) and is
+    surfaced in the obfuscation signal — see §9.6.
+
+    use_relevance_filter (default True): skip methods with no forensic-
+    dictionary API/string overlap before full CFG construction (§10.3).
+    Set to False to replicate original behavior (builds CFG for all methods).
+    """
+    from app.analysis.forensic import FORENSIC_DICTIONARY
+
+    # Build cheap lookup sets for the relevance pre-filter.
+    relevant_apis: frozenset[str] = frozenset(
+        api
+        for rules in FORENSIC_DICTIONARY.values()
+        for api in rules.get("apis", [])
+    )
+    relevant_strings: frozenset[str] = frozenset(
+        s.lower()
+        for rules in FORENSIC_DICTIONARY.values()
+        for s in rules.get("strings", [])
+    )
+
+    graphs: dict[str, nx.DiGraph] = {}
+    attempted = 0
+    failed = 0
+
     for method_analysis in analysis_obj.get_methods():
+        # Relevance pre-filter: skip methods with no forensic-dict overlap.
+        if use_relevance_filter and not is_method_relevant(
+            method_analysis, relevant_apis, relevant_strings
+        ):
+            continue
+
+        attempted += 1
         try:
             g = build_method_cfg(method_analysis)
             g = enrich_acfg(g, method_analysis)
@@ -96,9 +176,9 @@ def build_all_method_cfgs(analysis_obj) -> dict[str, nx.DiGraph]:
             graphs[method_sig] = g
         except Exception:
             # Malformed/obfuscated methods can break Androguard's block
-            # parsing. Skip and continue — one broken method shouldn't
-            # kill analysis of the rest of the app. Consider logging
-            # skipped methods as part of the obfuscation coverage note.
+            # parsing. Count failures for the coverage signal; continue.
+            failed += 1
             continue
 
-    return graphs
+    parse_failure_rate = (failed / attempted) if attempted > 0 else 0.0
+    return graphs, parse_failure_rate

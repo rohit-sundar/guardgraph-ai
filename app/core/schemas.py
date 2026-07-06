@@ -22,6 +22,11 @@ class BehavioralSubgraph(BaseModel):
     primary_behavior_flag: str
     matched_apis: list[str]
     topological_invariants: dict[str, float]
+    # Ratio of subgraph nodes to full method nodes (§9.7 instrumentation).
+    # Use this to validate whether the 4-hop constant is under/over-capturing
+    # on real APKs. 1.0 = subgraph covers entire method (hops too wide);
+    # very low = likely cutting off the behavior chain (hops too narrow).
+    subgraph_size_ratio: float = 0.0
 
 
 class ObfuscationSignal(BaseModel):
@@ -30,6 +35,10 @@ class ObfuscationSignal(BaseModel):
     flattening_outlier_nodes: list[str] = []
     reflection_call_count: int = 0
     unresolved_reflection_targets: int = 0
+    # Rate of methods that failed CFG parsing — 0.0 to 1.0 (§9.6 fix).
+    # A high failure rate is itself an analysis-coverage gap and raises the
+    # obfuscation score, since heavily obfuscated APKs often break parsers.
+    method_parse_failure_rate: float = 0.0
     coverage_note: str  # e.g. "3 native libraries not analyzed"
 
 
@@ -50,6 +59,11 @@ class RiskScoreBreakdown(BaseModel):
     classifier_confidence_component: float
     permission_api_component: float
     ttp_severity_component: float
+    # Deterministic behavioral evidence component (§9.3 fix).
+    # Weighted on matched forensic-dictionary behaviors (proven API presence),
+    # not classifier probability — these are the strongest static predictors
+    # per GUARD paper SHAP analysis.
+    forensic_anchor_component: float
     obfuscation_component: float
     reputation_component: float
     ioc_component: float

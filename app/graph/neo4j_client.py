@@ -14,10 +14,18 @@ class Neo4jClient:
         self._driver = None
 
     def connect(self):
-        self._driver = GraphDatabase.driver(
-            settings.neo4j_uri,
-            auth=(settings.neo4j_user, settings.neo4j_password),
-        )
+        try:
+            self._driver = GraphDatabase.driver(
+                settings.neo4j_uri,
+                auth=(settings.neo4j_user, settings.neo4j_password),
+            )
+        except Exception as e:
+            # Store None so callers can check is_connected() cheaply.
+            self._driver = None
+            raise RuntimeError(
+                f"Neo4j connection failed ({settings.neo4j_uri}): {e}. "
+                "Start Neo4j with: docker compose up -d"
+            ) from e
 
     def close(self):
         if self._driver:
@@ -25,7 +33,7 @@ class Neo4jClient:
 
     def run(self, query: str, **params):
         if self._driver is None:
-            self.connect()
+            self.connect()  # raises RuntimeError if Neo4j is unreachable
         with self._driver.session() as session:
             result = session.run(query, **params)
             return [record.data() for record in result]

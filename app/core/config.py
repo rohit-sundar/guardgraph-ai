@@ -3,6 +3,11 @@ Central config. Loads from .env. Nothing here should be hardcoded secrets.
 
 LLM backend: Ollama running locally (http://localhost:11434).
 To use a different model, set OLLAMA_MODEL in .env.
+
+FAMILY_TO_TTPS is a deliberate bridge: the v1 classifier outputs malware-family
+labels, but ttp_severity_component expects MITRE technique IDs. Without this
+mapping that scoring component is silently dead (always returns DEFAULT). This is
+an honest proxy until per-technique binary classifiers are trained — see §9.2.
 """
 from pydantic_settings import BaseSettings
 
@@ -49,4 +54,17 @@ TTP_SEVERITY_WEIGHTS = {
     "T1409": 0.6,   # Stored Application Data
     "T1471": 0.95,  # Data Encrypted for Impact
     "DEFAULT": 0.5,
+}
+
+# Bridges family classifier output → likely MITRE technique IDs (§9.2 fix).
+# Confidence from the family classifier is propagated to each mapped technique
+# at a per-technique discount (the family→technique mapping is imprecise).
+# Expand as per-technique classifiers replace this proxy.
+FAMILY_TO_TTPS: dict[str, list[str]] = {
+    "banker":           ["T1636", "T1417", "T1624"],  # SMS harvest, input capture, persistence
+    "trojan":           ["T1624", "T1409"],            # persistence, stored data
+    "password_stealer": ["T1417", "T1409"],            # input capture, stored data
+    "coinminer":        ["T1624"],                     # persistence (autostart)
+    "rat":              ["T1417", "T1636", "T1624"],  # input capture, SMS, persistence
+    "keylogger":        ["T1417"],                     # input capture
 }
