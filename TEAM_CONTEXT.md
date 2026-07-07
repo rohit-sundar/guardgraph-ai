@@ -6,7 +6,7 @@
 
 ## Change Log
 
-### Session 3 — 2026-07-06 | Author: AI Assistant (Antigravity) + AI Engineer
+### Session 3 — 2026-07-06 | Author: Ajay
 
 **Files changed:** `app/graph/cache.py`, `app/api/routes.py`, `.gitignore`  
 **Files added:** `scripts/test_rag_pipeline.py`
@@ -23,7 +23,7 @@
 
 ---
 
-### Session 2 — 2026-07-06 | Author: AI Assistant (Antigravity)
+### Session 2 — 2026-07-06 | Author: Ajay
 
 **Files changed:** `app/core/config.py`, `app/core/schemas.py`, `app/analysis/cfg.py`,  
 `app/analysis/obfuscation.py`, `app/reports/scoring.py`, `app/api/routes.py`, `app/graph/neo4j_client.py`
@@ -43,7 +43,7 @@
 
 ---
 
-### Session 1 — 2026-07-06 | Author: AI Assistant (Antigravity)
+### Session 1 — 2026-07-06 | Author: Ajay
 
 Initial prototype skeleton scaffolded and delivered. All files listed in the directory structure were created. See §3 for full build status.
 
