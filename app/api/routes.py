@@ -97,11 +97,14 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             predicted_family=cached.get("family"),
             family_confidence=None,
         )
-        try:
-            narrative, limitations = generate_report(manifest, risk_score)
-        except (RuntimeError, openai.OpenAIError, Exception) as e:
-            narrative = f"[Report generation unavailable: {e}]"
+        narrative = cached.get("narrative", "")
+        limitations = cached.get("limitations", [])
+
+        # Fallback if the cache hit didn't have narrative data (e.g. older schema)
+        if not narrative:
+            narrative = "[Narrative not found in cache. Cached score only.]"
             limitations = ["analysis skipped — known sample (cache hit)"]
+
         return AnalysisReport(
             manifest=manifest,
             risk_score=risk_score,
@@ -256,6 +259,8 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             family=predicted_family,
             risk_score=risk_score.total_score,
             ttps=list(predicted_ttps.keys()),
+            narrative=narrative,
+            limitations=limitations,
         )
 
     return AnalysisReport(

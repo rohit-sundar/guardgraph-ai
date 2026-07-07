@@ -6,7 +6,24 @@
 
 ## Change Log
 
-### Session 2 — 2026-07-06 | Author: AI Assistant (Antigravity)
+### Session 3 — 2026-07-06 | Author: Ajay
+
+**Files changed:** `app/graph/cache.py`, `app/api/routes.py`, `.gitignore`  
+**Files added:** `scripts/test_rag_pipeline.py`
+
+| # | Change | File(s) Changed | Status |
+|---|---|---|---|
+| Hot Path | LLM narrative + limitations now cached in Neo4j `(s:Sample)` node during cold path; hot path serves cached text directly — **`generate_report()` is no longer called on cache hits** | `cache.py`, `routes.py` | ✅ Done |
+| RAG Harness | Standalone test script that injects mock `AnalysisManifest` + `RiskScoreBreakdown` into `generate_report()`, bypassing Androguard + ML. Mocks Neo4j ontology call. Successfully tested against local Ollama (`qwen2.5:7b-instruct-q4_K_M`) | `scripts/test_rag_pipeline.py` | ✅ Done |
+| Obsidian | Added `.obsidian/`, `AI_ENGINEER_TASKS.md`, `*.tasks.md`, `.venv/` to `.gitignore` so personal task tracking and vault settings stay local | `.gitignore` | ✅ Done |
+
+**Key architectural change:** The hot path now achieves the design doc's `<50ms` target by serving pre-computed LLM narratives from Neo4j, eliminating the 5–10s Ollama call on cache hits.
+
+**RAG hallucination spot-check (initial):** The `qwen2.5:7b-instruct` model correctly grounded its report on the mock manifest data and cited confidence values. Minor drift observed in "Recommended Analyst Actions" section — model gave generic IT advice instead of APK-specific analyst actions. Prompt tuning needed.
+
+---
+
+### Session 2 — 2026-07-06 | Author: Ajay
 
 **Files changed:** `app/core/config.py`, `app/core/schemas.py`, `app/analysis/cfg.py`,  
 `app/analysis/obfuscation.py`, `app/reports/scoring.py`, `app/api/routes.py`, `app/graph/neo4j_client.py`
@@ -26,7 +43,7 @@
 
 ---
 
-### Session 1 — 2026-07-06 | Author: AI Assistant (Antigravity)
+### Session 1 — 2026-07-06 | Author: Ajay
 
 Initial prototype skeleton scaffolded and delivered. All files listed in the directory structure were created. See §3 for full build status.
 
@@ -370,11 +387,17 @@ neo4j_client.run(query, **params) -> list[dict]
 
 ---
 
-### `app/graph/cache.py` — NO CHANGES
+### `app/graph/cache.py` — CHANGED SESSION 3
 
 ```python
-lookup_signature(sha256) -> dict | None   # None on miss or any DB error
-store_signature(sha256, family, risk_score, ttps)  # silent pass on DB error
+lookup_signature(sha256) -> dict | None
+    # Now also returns: narrative, limitations alongside sha256, family, base_score, ttps
+    # None on miss or any DB error
+
+store_signature(sha256, family, risk_score, ttps, narrative="", limitations=None)
+    # NEW params: narrative (str) and limitations (list[str])
+    # Stores LLM-generated text in Neo4j so hot path can serve it directly
+    # Silent pass on DB error
 ```
 
 ---
@@ -422,15 +445,17 @@ generate_report(manifest, risk_score) -> tuple[str, list[str]]
 
 ---
 
-### `app/api/routes.py` — CHANGED SESSION 2
+### `app/api/routes.py` — CHANGED SESSION 2 + SESSION 3
 
 ```python
 @router.post("/analyze") -> AnalysisReport
 
-# HOT PATH (cache hit) — truly short-circuits, no CFG work:
+# HOT PATH (cache hit) — NO LLM CALL (Session 3 fix):
 #   ingest_apk → sha256 → lookup_signature → HIT
-#   → compute_risk_score(empty signal, cached score, matched_anchor_behaviors=set())
-#   → generate_report → return
+#   → compute_risk_score(empty signal, cached score)
+#   → narrative = cached["narrative"]          ← served from Neo4j, not Ollama
+#   → limitations = cached["limitations"]
+#   → return AnalysisReport (target: <50ms)
 
 # COLD PATH (cache miss):
 #   ingest_apk
@@ -442,7 +467,7 @@ generate_report(manifest, risk_score) -> tuple[str, list[str]]
 #   → predicted_ttps = {t: family_conf * 0.85 for t in FAMILY_TO_TTPS[predicted_family]}
 #   → graph_density = mean(per_method_density)  [corrected §9.4]
 #   → compute_risk_score(..., matched_anchor_behaviors=set(all_matches.keys()))
-#   → generate_report → store_signature → return
+#   → generate_report → store_signature(narrative=narrative, limitations=limitations) → return
 ```
 
 ---
@@ -528,4 +553,4 @@ python scripts/train_model.py
 
 ---
 
-*Document generated: 2026-07-06 | Maintained by: AI Assistant (Antigravity) on behalf of the GuardGraph AI team*
+*Document generated: 2026-07-06 | Updated: 2026-07-07 | Maintained by: AI Assistant (Antigravity) on behalf of the GuardGraph AI team*

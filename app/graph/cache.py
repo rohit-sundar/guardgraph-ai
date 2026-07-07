@@ -15,6 +15,8 @@ def lookup_signature(sha256: str) -> dict | None:
     RETURN s.sha256 AS sha256,
            f.name AS family,
            s.risk_score AS base_score,
+           s.narrative AS narrative,
+           s.limitations AS limitations,
            collect(DISTINCT t.technique_id) AS ttps
     """
     try:
@@ -27,14 +29,19 @@ def lookup_signature(sha256: str) -> dict | None:
     return rows[0]
 
 
-def store_signature(sha256: str, family: str, risk_score: float, ttps: list[str]):
+def store_signature(sha256: str, family: str, risk_score: float, ttps: list[str], narrative: str = "", limitations: list[str] = None):
     """
     Call this after a cold-path analysis completes, so future uploads of
     the same sample (or re-uploads during a campaign) hit the fast path.
     """
+    if limitations is None:
+        limitations = []
+
     query = """
     MERGE (s:Sample {sha256: $sha256})
-    SET s.risk_score = $risk_score
+    SET s.risk_score = $risk_score,
+        s.narrative = $narrative,
+        s.limitations = $limitations
     MERGE (f:MalwareFamily {name: $family})
     MERGE (s)-[:CLASSIFIED_AS_FAMILY]->(f)
     WITH s
@@ -43,7 +50,15 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: list[str]
     MERGE (s)-[:MAPS_TO_TECHNIQUE]->(t)
     """
     try:
-        neo4j_client.run(query, sha256=sha256, family=family, risk_score=risk_score, ttps=ttps)
+        neo4j_client.run(
+            query, 
+            sha256=sha256, 
+            family=family, 
+            risk_score=risk_score, 
+            ttps=ttps,
+            narrative=narrative,
+            limitations=limitations
+        )
     except Exception:
         # Neo4j not reachable — skip caching silently rather than crashing.
         pass

@@ -10,3 +10,11 @@ data/models/*
 data/*.csv
 *.egg-info/
 .DS_Store
+
+# Obsidian & Local Task Tracking
+.obsidian/
+AI_ENGINEER_TASKS.md
+*.tasks.md
+
+# Virtual Environments
+.venv/
