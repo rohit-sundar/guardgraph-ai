@@ -1,3 +1,14 @@
+import sys
+from loguru import logger
+
+# Suppress verbose debug logs from Androguard (level.no < 30 is below WARNING)
+logger.remove()
+logger.add(
+    sys.stderr,
+    filter=lambda record: "androguard" not in record["name"] or record["level"].no >= 30,
+    level="DEBUG",
+)
+
 from fastapi import FastAPI
 from app.api.routes import router
 

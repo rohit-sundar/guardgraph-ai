@@ -358,3 +358,19 @@ explicit instructions not to.
   a nice-to-have.
 - Do not swap Label Powerset back in for the classifier without discussing
   the class-imbalance tradeoff first.
+
+---
+
+## 11. Refactoring Changes Log (Modular Phases & Local LLM Integration)
+
+### Swap to Local LLM (July 10, 2026)
+- Replaced Anthropic Claude API calls in `app/reports/graphrag.py` with an OpenAI-compatible client pointed at local Ollama (`http://localhost:11434/v1`).
+- Configured local model default to `qwen2.5:7b-instruct-q4_K_M` via `OLLAMA_MODEL` environment settings in `.env` and `app/core/config.py`.
+- Replaced `anthropic` library dependency with `openai` package in `requirements.txt`.
+
+### Modular Processing Phases Refactor (July 10, 2026)
+- Created `app/core/pipeline.py` implementing `AnalysisPipeline` to modularize static analysis execution into seven sequential, clean phases.
+- Refactored `app/api/routes.py` to route execution through `AnalysisPipeline`.
+- Configured loguru filters in `app/main.py` to silence Androguard's verbose debug output, displaying only clean GuardGraph phase timings.
+- Created `tests/test_pipeline_phases.py` to verify phase compliance and contracts.
+

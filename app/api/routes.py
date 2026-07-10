@@ -22,22 +22,12 @@ import shutil
 import tempfile
 import uuid
 
-import openai
-
 from fastapi import APIRouter, UploadFile, File, HTTPException
 
-from app.analysis.ingest import ingest_apk
-from app.analysis.cfg import build_all_method_cfgs
-from app.analysis.forensic import match_anchors, extract_anchor_subgraph
-from app.analysis.topology import compute_topological_invariants
-from app.analysis.obfuscation import build_obfuscation_signal
-from app.ml.classifier import classifier
-from app.ml.features import build_feature_vector
 from app.graph.cache import lookup_signature, store_signature
 from app.reports.scoring import compute_risk_score
-from app.reports.graphrag import generate_report
-from app.core.config import settings, FAMILY_TO_TTPS
-from app.core.schemas import AnalysisManifest, BehavioralSubgraph, AnalysisReport, ObfuscationSignal
+from app.core.config import settings
+from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal
 
 router = APIRouter()
 
@@ -61,19 +51,17 @@ async def analyze(file: UploadFile = File(...)):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+from app.core.pipeline import AnalysisPipeline
+
 def _run_analysis(filepath: str) -> AnalysisReport:
-    # --- Ingestion (needed even on cache hit, for sha256) ---
-    ingestion, apk_obj, dvm, analysis_obj = ingest_apk(filepath)
+    # --- Phase 1: Ingestion & Metadata ---
+    ingestion, apk_obj, dvm, analysis_obj = AnalysisPipeline.run_phase1_ingestion(filepath)
 
     # --- Hot path: cache lookup ---
-    # §9.1 fix: on a cache hit we must truly short-circuit — build_all_method_cfgs
-    # must never be called. The whole point of the hot path is to avoid CFG work.
     cached = lookup_signature(ingestion.sha256)
     cache_hit = cached is not None
 
     if cache_hit:
-        # Known sample — build a minimal report from cached data.
-        # This is the "<50ms" path from the design doc.
         empty_obfuscation = _empty_obfuscation_signal()
         risk_score = compute_risk_score(
             predicted_ttps={},
@@ -100,7 +88,6 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         narrative = cached.get("narrative", "")
         limitations = cached.get("limitations", [])
 
-        # Fallback if the cache hit didn't have narrative data (e.g. older schema)
         if not narrative:
             narrative = "[Narrative not found in cache. Cached score only.]"
             limitations = ["analysis skipped — known sample (cache hit)"]
@@ -112,110 +99,21 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             limitations=limitations,
         )
 
-    # --- Cold path: full static analysis ---
-    # §9.6: unpack (graphs, failure_rate) — failure rate is now a coverage signal.
-    cfgs, parse_failure_rate = build_all_method_cfgs(analysis_obj)
+    # --- Phase 2: Graph Representation ---
+    cfgs, parse_failure_rate = AnalysisPipeline.run_phase2_graph_construction(analysis_obj)
 
-    all_matches: dict[str, list[str]] = {}
-    behavioral_subgraphs: list[BehavioralSubgraph] = []
-    all_strings: list[str] = []
+    # --- Phase 3: Forensic Matching & Subgraph Extraction ---
+    all_matches, behavioral_subgraphs, all_strings = AnalysisPipeline.run_phase3_forensic_matching(cfgs)
 
-    for method_sig, g in cfgs.items():
-        method_node_count = g.number_of_nodes()
-        matches = match_anchors(g)
-        for behavior, anchor_nodes in matches.items():
-            all_matches.setdefault(behavior, []).extend(anchor_nodes)
-
-            for anchor in anchor_nodes:
-                sub = extract_anchor_subgraph(g, anchor, hops=4)
-                invariants = compute_topological_invariants(sub)
-                matched_apis = [
-                    api for _, data in sub.nodes(data=True)
-                    for api in data.get("api_calls", [])
-                ]
-                # §9.7: record how much of the full method the 4-hop subgraph covers.
-                sub_nodes = sub.number_of_nodes()
-                size_ratio = (sub_nodes / method_node_count) if method_node_count > 0 else 0.0
-
-                behavioral_subgraphs.append(
-                    BehavioralSubgraph(
-                        subgraph_id=f"SUB_{method_sig}_{anchor}",
-                        primary_behavior_flag=behavior,
-                        matched_apis=matched_apis[:10],  # cap for report readability
-                        topological_invariants=invariants,
-                        subgraph_size_ratio=round(size_ratio, 4),
-                    )
-                )
-
-        for _, data in g.nodes(data=True):
-            all_strings.extend(data.get("string_literals", []))
-
-    # §9.5/9.6: pass parse_failure_rate so it feeds both coverage note and score.
-    obfuscation = build_obfuscation_signal(
-        all_strings=all_strings,
-        cfgs=cfgs,
-        entropy_threshold=settings.entropy_high_threshold,
-        flattening_zscore=settings.flattening_degree_outlier_zscore,
-        method_parse_failure_rate=parse_failure_rate,
+    # --- Phase 4: Feature Engineering ---
+    obfuscation, feature_vector, mean_density, total_nodes = AnalysisPipeline.run_phase4_feature_engineering(
+        ingestion, cfgs, all_matches, behavioral_subgraphs, all_strings, parse_failure_rate
     )
 
-    # --- Aggregate topology for classifier feature vector (whole-app average) ---
-    if behavioral_subgraphs:
-        agg_invariants = behavioral_subgraphs[0].topological_invariants
-    else:
-        agg_invariants = _empty_topological_invariants()
-
-    feature_vector = build_feature_vector(
-        permissions=ingestion.permissions,
-        matched_behaviors=set(all_matches.keys()),
-        topological_invariants=agg_invariants,
-        obfuscation_entropy=obfuscation.string_entropy_score,
-        obfuscation_flattening=obfuscation.flattening_suspected,
-        obfuscation_reflection_count=obfuscation.reflection_call_count,
+    # --- Phase 5: ML Classification ---
+    predicted_ttps, predicted_family, family_confidence = AnalysisPipeline.run_phase5_ml_classification(
+        feature_vector
     )
-
-    # --- Classifier ---
-    predicted_ttps: dict[str, float] = {}
-    predicted_family = None
-    family_confidence = None
-    try:
-        predictions = classifier.predict(feature_vector)
-        predicted_family = max(predictions, key=predictions.get)
-        family_confidence = predictions[predicted_family]
-
-        # §9.2 fix: bridge family-name keys → MITRE technique IDs so
-        # ttp_severity_component gets real T-numbers, not family names.
-        # Each technique inherits the family's confidence at a discount
-        # (family→technique mapping is imprecise by nature).
-        TECHNIQUE_CONFIDENCE_DISCOUNT = 0.85
-        technique_ids = FAMILY_TO_TTPS.get(predicted_family, [])
-        if technique_ids:
-            predicted_ttps = {
-                t: round(family_confidence * TECHNIQUE_CONFIDENCE_DISCOUNT, 4)
-                for t in technique_ids
-            }
-        else:
-            # Unknown family not in map — pass empty rather than raw family names.
-            predicted_ttps = {}
-
-    except FileNotFoundError:
-        # Model not trained yet — proceed with empty predictions rather than crashing.
-        # The report generator will correctly say "not observed" for classifier findings.
-        pass
-
-    # §9.4 fix: graph_density as mean per-method density (not sum-conflated).
-    # Computing over individual CFGs before combining is the only meaningful number.
-    per_method_densities = []
-    for g in cfgs.values():
-        n = g.number_of_nodes()
-        e = g.number_of_edges()
-        if n > 1:
-            per_method_densities.append(e / (n * (n - 1)))
-    mean_density = (
-        sum(per_method_densities) / len(per_method_densities)
-        if per_method_densities else 0.0
-    )
-    total_nodes = sum(g.number_of_nodes() for g in cfgs.values())
 
     manifest = AnalysisManifest(
         target_package=ingestion.package_name,
@@ -230,28 +128,13 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         family_confidence=family_confidence,
     )
 
-    # §9.3 fix: pass matched_anchor_behaviors (distinct behavior names) so the
-    # forensic anchor component gets the deterministic signal it needs.
-    matched_anchor_behaviors = set(all_matches.keys())
-
-    risk_score = compute_risk_score(
-        predicted_ttps=predicted_ttps,
-        permissions=ingestion.permissions,
-        obfuscation=obfuscation,
-        entropy_threshold=settings.entropy_high_threshold,
-        matched_anchor_behaviors=matched_anchor_behaviors,
-        cache_hit=cache_hit,
-        cached_score=cached.get("base_score") if cached else None,
-        matched_c2_indicators=len(all_matches.get("C2_BEHAVIOR", [])),
+    # --- Phase 6: Risk Scoring ---
+    risk_score = AnalysisPipeline.run_phase6_risk_scoring(
+        predicted_ttps, ingestion.permissions, obfuscation, all_matches, cache_hit, None
     )
 
-    try:
-        narrative, limitations = generate_report(manifest, risk_score)
-    except (RuntimeError, openai.OpenAIError, Exception) as e:
-        # Catch OpenAI/Ollama connectivity errors as well as generic failures.
-        # A broken LLM connection must not crash the entire analysis response.
-        narrative = f"[Report generation unavailable: {e}]"
-        limitations = [obfuscation.coverage_note]
+    # --- Phase 7: Explainable Reporting ---
+    narrative, limitations = AnalysisPipeline.run_phase7_reporting(manifest, risk_score)
 
     if not cache_hit and predicted_family:
         store_signature(
