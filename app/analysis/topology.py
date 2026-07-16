@@ -55,6 +55,32 @@ def compute_topological_invariants(g: nx.DiGraph) -> dict[str, float]:
     return out
 
 
+def aggregate_subgraph_invariants(
+    invariant_dicts: list[dict[str, float]],
+) -> dict[str, float]:
+    """
+    Aggregates per-subgraph topological invariants across ALL anchor subgraphs into
+    one per-sample vector (GUARD's cross-subgraph statistical view).
+
+    The previous pipeline fed only the FIRST anchor subgraph's invariants to the
+    model (`behavioral_subgraphs[0]`), discarding every other suspicious region.
+    This averages each of the 15 topology keys across all subgraphs so the sample's
+    feature vector reflects its whole behavioral footprint, not one arbitrary anchor.
+
+    Length stays 15 (same keys as compute_topological_invariants). Returns the empty
+    (all-zero) invariant dict when there are no subgraphs — never raises.
+    """
+    empty = compute_topological_invariants(nx.DiGraph())
+    if not invariant_dicts:
+        return empty
+
+    out: dict[str, float] = {}
+    for key in empty:  # canonical key set (all 15 topology feature names)
+        vals = [float(d.get(key, 0.0)) for d in invariant_dicts]
+        out[key] = statistics.mean(vals) if vals else 0.0
+    return out
+
+
 def detect_flattening_outlier(g: nx.DiGraph, zscore_threshold: float = 3.0) -> tuple[bool, list[str]]:
     """
     Control-flow flattening signature: a single dispatcher node with
