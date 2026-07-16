@@ -52,7 +52,7 @@ MODEL_LABEL_MAP = [
 ]
 
 # MITRE ATT&CK Mobile TTP severity weights used in risk scoring.
-# Starter values — tune against real analyst judgment before trusting these.
+# Per-technique overrides (checked first). Tune against real analyst judgment.
 TTP_SEVERITY_WEIGHTS = {
     "T1636": 0.9,   # Protected User Data (SMS)
     "T1624": 0.8,   # Event Triggered Execution
@@ -62,10 +62,29 @@ TTP_SEVERITY_WEIGHTS = {
     "DEFAULT": 0.5,
 }
 
-# Bridges family classifier output → likely MITRE technique IDs (§9.2 fix).
-# Confidence from the family classifier is propagated to each mapped technique
-# at a per-technique discount (the family→technique mapping is imprecise).
-# Expand as per-technique classifiers replace this proxy.
+# Tactic-derived severity fallback so EVERY predicted Mobile technique gets a
+# principled severity (not DEFAULT) — used by ttp_severity_component when a
+# technique is not in TTP_SEVERITY_WEIGHTS. Keyed by ATT&CK Mobile tactic display
+# name (see app/ml/labels.TECHNIQUE_TACTIC). Higher = more fraud/impact relevant.
+TACTIC_SEVERITY = {
+    "Impact": 0.95,
+    "Credential Access": 0.90,
+    "Collection": 0.85,
+    "Exfiltration": 0.85,
+    "Privilege Escalation": 0.70,
+    "Command and Control": 0.70,
+    "Persistence": 0.65,
+    "Initial Access": 0.60,
+    "Defense Evasion": 0.60,
+    "Execution": 0.55,
+    "Discovery": 0.40,
+    "Lateral Movement": 0.55,
+}
+
+# LEGACY / hot-path only. The cold path now predicts techniques DIRECTLY via the
+# multi-label TTPClassifier (app/ml/classifier.py) instead of this family→TTP proxy.
+# Kept for the hot path and as a fallback for the untrained-family case; do not use
+# it to derive cold-path predicted_ttps anymore (§9.2 superseded by the TTP model).
 FAMILY_TO_TTPS: dict[str, list[str]] = {
     "banker":           ["T1636", "T1417", "T1624"],  # SMS harvest, input capture, persistence
     "trojan":           ["T1624", "T1409"],            # persistence, stored data

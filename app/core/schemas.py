@@ -108,6 +108,11 @@ class RiskScoreBreakdown(BaseModel):
     ioc_component: float
     total_score: float
     verdict_band: str  # low / suspicious / high / malicious
+    # Zero-day / novel-variant flag: strong deterministic (forensic anchor) and/or
+    # structural (obfuscation/coverage) evidence while model familiarity is low.
+    # A model-free escalation signal for first-seen samples the classifier hasn't
+    # learned — see scoring.compute_risk_score.
+    zero_day_indicator: bool = False
 
 
 class AnalysisReport(BaseModel):

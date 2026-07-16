@@ -30,8 +30,15 @@ placeholder returning a constant. Tune the internals as you validate
 against your demo set, but the formula weights themselves shouldn't drift
 without a documented reason.
 """
-from app.core.config import TTP_SEVERITY_WEIGHTS
+from app.core.config import TTP_SEVERITY_WEIGHTS, TACTIC_SEVERITY
 from app.core.schemas import RiskScoreBreakdown, ObfuscationSignal
+from app.ml.labels import TECHNIQUE_TACTIC
+
+# Zero-day indicator thresholds (§zero-day): strong deterministic/structural evidence
+# while model familiarity is low ⇒ flag as a possible novel/first-seen variant.
+ZERO_DAY_ANCHOR_MIN = 0.5   # forensic_anchor_component (0-1) at/above this = strong proven evidence
+ZERO_DAY_OBF_MIN = 0.5      # obfuscation_component (0-1) at/above this = strong evasion/coverage signal
+ZERO_DAY_CONF_MAX = 0.4     # classifier_confidence_component (0-1) below this = weak model familiarity
 
 RISKY_PERMISSIONS = {
     "android.permission.BIND_ACCESSIBILITY_SERVICE": 1.0,
@@ -72,17 +79,29 @@ def permission_api_risk_component(permissions: list[str]) -> float:
     return min(1.0, sum(matched) / len(matched) + 0.1 * (len(matched) - 1))
 
 
+def _technique_severity(ttp: str) -> float:
+    """
+    Severity for one technique: per-technique override first, then a tactic-derived
+    fallback (so EVERY Mobile technique the multi-label model can predict gets a
+    principled weight), then DEFAULT.
+    """
+    if ttp in TTP_SEVERITY_WEIGHTS:
+        return TTP_SEVERITY_WEIGHTS[ttp]
+    tactic = TECHNIQUE_TACTIC.get(ttp)
+    if tactic and tactic in TACTIC_SEVERITY:
+        return TACTIC_SEVERITY[tactic]
+    return TTP_SEVERITY_WEIGHTS["DEFAULT"]
+
+
 def ttp_severity_component(predicted_ttps: dict[str, float]) -> float:
     """
-    Now fed by MITRE technique IDs (via FAMILY_TO_TTPS bridge in routes.py)
-    instead of raw family-name keys — fixes the §9.2 silent dead-weight.
+    Fed by MITRE technique IDs predicted DIRECTLY by the multi-label TTP classifier
+    (cold path) or the FAMILY_TO_TTPS bridge (legacy/hot path). Severity now covers
+    the full Mobile technique space via _technique_severity, not just 5 hardcoded IDs.
     """
     if not predicted_ttps:
         return 0.0
-    weighted = [
-        prob * TTP_SEVERITY_WEIGHTS.get(ttp, TTP_SEVERITY_WEIGHTS["DEFAULT"])
-        for ttp, prob in predicted_ttps.items()
-    ]
+    weighted = [prob * _technique_severity(ttp) for ttp, prob in predicted_ttps.items()]
     return min(1.0, sum(weighted) / len(weighted))
 
 
@@ -224,6 +243,18 @@ def compute_risk_score(
     else:
         band = "malicious"
 
+    # Zero-day / novel-variant signal: the model-free components (deterministic
+    # forensic anchors, structural obfuscation/coverage) carry strong evidence while
+    # the classifier is unfamiliar (low confidence / empty predictions). This is
+    # exactly the first-seen sample the family/TTP model has not learned yet. It does
+    # not change the numeric weights — the deterministic components already provide
+    # the score floor — it surfaces the situation for the analyst / report.
+    zero_day_indicator = (
+        (c4 >= ZERO_DAY_ANCHOR_MIN or c5 >= ZERO_DAY_OBF_MIN)
+        and c1 < ZERO_DAY_CONF_MAX
+        and not cache_hit
+    )
+
     return RiskScoreBreakdown(
         classifier_confidence_component=round(c1 * 25, 2),
         permission_api_component=round(c2 * 20, 2),
@@ -234,4 +265,5 @@ def compute_risk_score(
         ioc_component=round(c7 * 5, 2),
         total_score=round(total, 2),
         verdict_band=band,
+        zero_day_indicator=zero_day_indicator,
     )

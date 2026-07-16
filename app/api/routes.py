@@ -109,15 +109,17 @@ def _run_analysis(filepath: str) -> AnalysisReport:
     # --- Phase 3: Forensic Matching & Subgraph Extraction ---
     all_matches, behavioral_subgraphs, all_strings = AnalysisPipeline.run_phase3_forensic_matching(cfgs)
 
-    # --- Phase 4: Feature Engineering ---
-    obfuscation, feature_vector, mean_density, total_nodes = AnalysisPipeline.run_phase4_feature_engineering(
-        ingestion, cfgs, all_matches, behavioral_subgraphs, all_strings, parse_failure_rate,
-        sig_yara=sig_yara,
+    # --- Phase 4: Feature Engineering (family 33-vec + multi-label TTP 179-vec) ---
+    obfuscation, feature_vector, ttp_feature_vector, mean_density, total_nodes = (
+        AnalysisPipeline.run_phase4_feature_engineering(
+            ingestion, cfgs, all_matches, behavioral_subgraphs, all_strings, parse_failure_rate,
+            sig_yara=sig_yara,
+        )
     )
 
-    # --- Phase 5: ML Classification ---
+    # --- Phase 5: Multi-label TTP Classification (direct) + auxiliary family label ---
     predicted_ttps, predicted_family, family_confidence = AnalysisPipeline.run_phase5_ml_classification(
-        feature_vector
+        ttp_feature_vector, feature_vector
     )
 
     manifest = AnalysisManifest(

@@ -19,15 +19,19 @@ from loguru import logger
 from app.analysis.ingest import ingest_apk
 from app.analysis.cfg import build_all_method_cfgs
 from app.analysis.forensic import match_anchors, extract_anchor_subgraph
-from app.analysis.topology import compute_topological_invariants
+from app.analysis.topology import compute_topological_invariants, aggregate_subgraph_invariants
 from app.analysis.obfuscation import build_obfuscation_signal
 from app.analysis.signatures import match_signatures
 from app.analysis.yara_engine import scan_file as yara_scan_file
-from app.ml.classifier import classifier
-from app.ml.features import build_feature_vector
+from app.ml.classifier import classifier, ttp_classifier
+from app.ml.features import build_feature_vector, build_ttp_feature_vector
 from app.reports.scoring import compute_risk_score
 from app.reports.graphrag import generate_report
-from app.core.config import settings, FAMILY_TO_TTPS
+from app.core.config import settings
+
+# Min technique probability for a TTP to count as "predicted" in the manifest.
+# Probabilities are retained for risk scoring; this only gates what surfaces.
+TTP_PREDICT_THRESHOLD = 0.5
 from app.core.schemas import (
     IngestionResult,
     AnalysisManifest,
@@ -158,11 +162,19 @@ class AnalysisPipeline:
         all_strings: List[str],
         parse_failure_rate: float,
         sig_yara: Optional[SignatureYaraResult] = None,
-    ) -> Tuple[ObfuscationSignal, List[float], float, int]:
-        """Phase 4: Calculate topological invariants and entropy/flattening/reflection obfuscation signals."""
+    ) -> Tuple[ObfuscationSignal, List[float], List[float], float, int]:
+        """
+        Phase 4: topological invariants + obfuscation signals + feature vectors.
+
+        Builds TWO feature vectors:
+          - `feature_vector` (33)     — legacy family model (unchanged semantics).
+          - `ttp_feature_vector` (179) — multi-label TTP model; GUARD topology stats
+            aggregated across ALL anchor subgraphs (not just the first), plus the
+            DroidTTP-style manifest/API presence vocab.
+        """
         logger.info("[Phase 4] Starting Feature Engineering (Topology & Obfuscation analysis)...")
         start_time = time.time()
-        
+
         obfuscation = build_obfuscation_signal(
             all_strings=all_strings,
             cfgs=cfgs,
@@ -171,12 +183,13 @@ class AnalysisPipeline:
             method_parse_failure_rate=parse_failure_rate,
         )
 
+        # Legacy family (33) vector — unchanged: first-subgraph invariants.
         if behavioral_subgraphs:
             agg_invariants = behavioral_subgraphs[0].topological_invariants
         else:
             agg_invariants = AnalysisPipeline._empty_topological_invariants()
 
-        # Extract sig/YARA features for the feature vector
+        # Extract sig/YARA features (shared by both vectors)
         sig_match_count = 0
         yara_match_count = 0
         yara_max_severity = 0.0
@@ -198,6 +211,33 @@ class AnalysisPipeline:
             yara_max_severity=yara_max_severity,
         )
 
+        # Multi-label TTP (179) vector. GUARD topology aggregated across ALL anchor
+        # subgraphs; sensitive-API presence over every API call observed in the CFGs.
+        # Keep this construction in sync with scripts/build_ttp_dataset.py::extract_ttp_row.
+        all_apis: Set[str] = set()
+        for g in cfgs.values():
+            for _, data in g.nodes(data=True):
+                all_apis.update(data.get("api_calls", []))
+        ttp_agg_invariants = aggregate_subgraph_invariants(
+            [bs.topological_invariants for bs in behavioral_subgraphs]
+        )
+        ttp_feature_vector = build_ttp_feature_vector(
+            permissions=ingestion.permissions,
+            intent_actions=ingestion.intent_actions,
+            api_calls=all_apis,
+            num_activities=len(ingestion.activities),
+            num_services=len(ingestion.services),
+            num_receivers=len(ingestion.receivers),
+            matched_behaviors=set(all_matches.keys()),
+            topological_invariants=ttp_agg_invariants,
+            obfuscation_entropy=obfuscation.string_entropy_score,
+            obfuscation_flattening=obfuscation.flattening_suspected,
+            obfuscation_reflection_count=obfuscation.reflection_call_count,
+            signature_match_count=sig_match_count,
+            yara_rule_match_count=yara_match_count,
+            yara_max_severity=yara_max_severity,
+        )
+
         per_method_densities = []
         for g in cfgs.values():
             n = g.number_of_nodes()
@@ -209,34 +249,50 @@ class AnalysisPipeline:
 
         duration = time.time() - start_time
         logger.info(f"[Phase 4] Completed in {duration:.3f}s. Entropy: {obfuscation.string_entropy_score:.2f}, Suspected Flattening: {obfuscation.flattening_suspected}")
-        return obfuscation, feature_vector, mean_density, total_nodes
+        return obfuscation, feature_vector, ttp_feature_vector, mean_density, total_nodes
 
     @staticmethod
-    def run_phase5_ml_classification(feature_vector: List[float]) -> Tuple[Dict[str, float], Optional[str], Optional[float]]:
-        """Phase 5: Run XGBoost inference and map to MITRE ATT&CK Mobile techniques."""
-        logger.info("[Phase 5] Starting ML Classification...")
+    def run_phase5_ml_classification(
+        ttp_feature_vector: List[float],
+        family_feature_vector: List[float],
+    ) -> Tuple[Dict[str, float], Optional[str], Optional[float]]:
+        """
+        Phase 5: multi-label MITRE ATT&CK Mobile TTP classification.
+
+        PRIMARY: the Binary-Relevance TTP model predicts technique probabilities
+        DIRECTLY (no FAMILY_TO_TTPS proxy). Techniques at/above TTP_PREDICT_THRESHOLD
+        surface in `predicted_ttps` (probabilities retained for risk scoring).
+        AUXILIARY: the legacy family model still supplies `predicted_family` for the
+        report/reputation when trained. Both degrade gracefully if untrained.
+        """
+        logger.info("[Phase 5] Starting Multi-label TTP Classification...")
         start_time = time.time()
         predicted_ttps: Dict[str, float] = {}
         predicted_family = None
         family_confidence = None
 
+        # Primary: direct multi-label technique prediction.
         try:
-            predictions = classifier.predict(feature_vector)
+            ttp_preds = ttp_classifier.predict(ttp_feature_vector)
+            predicted_ttps = {
+                t: p for t, p in ttp_preds.items() if p >= TTP_PREDICT_THRESHOLD
+            }
+        except FileNotFoundError:
+            logger.warning("[Phase 5] TTP model not found. Proceeding with empty TTP predictions.")
+
+        # Auxiliary: legacy family label (best-effort; often untrained in the prototype).
+        try:
+            predictions = classifier.predict(family_feature_vector)
             predicted_family = max(predictions, key=predictions.get)
             family_confidence = predictions[predicted_family]
-
-            TECHNIQUE_CONFIDENCE_DISCOUNT = 0.85
-            technique_ids = FAMILY_TO_TTPS.get(predicted_family, [])
-            if technique_ids:
-                predicted_ttps = {
-                    t: round(family_confidence * TECHNIQUE_CONFIDENCE_DISCOUNT, 4)
-                    for t in technique_ids
-                }
         except FileNotFoundError:
-            logger.warning("[Phase 5] Classifier model not found. Proceeding with empty predictions.")
+            logger.warning("[Phase 5] Family model not found (auxiliary). No family label.")
 
         duration = time.time() - start_time
-        logger.info(f"[Phase 5] Completed in {duration:.3f}s. Family: {predicted_family} (Confidence: {family_confidence})")
+        logger.info(
+            f"[Phase 5] Completed in {duration:.3f}s. "
+            f"Predicted TTPs: {sorted(predicted_ttps)} | Family: {predicted_family}"
+        )
         return predicted_ttps, predicted_family, family_confidence
 
     @staticmethod
