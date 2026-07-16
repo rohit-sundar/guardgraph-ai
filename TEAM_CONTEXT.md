@@ -6,6 +6,31 @@
 
 ## Change Log
 
+### Session 4 — 2026-07-16 | Author: Rohit
+
+**Files changed:** `app/analysis/signatures.py` [NEW], `app/analysis/yara_engine.py` [NEW], `app/core/config.py`, `app/core/schemas.py`, `app/core/pipeline.py`, `app/api/routes.py`, `app/ml/features.py`, `app/reports/scoring.py`, `requirements.txt`  
+**Files added:** `scripts/download_yara_rules.py`, `scripts/test_upload.py`, `data/signatures/known_hashes.json`, `data/yara_rules/` (518 rules), `tests/test_signatures_yara.py`
+
+| # | Change | File(s) Changed | Status |
+|---|---|---|---|
+| Phase 1.5 | New pipeline phase inserted between ingestion and CFG: hash+cert local signature lookup → VirusTotal API triage → MalwareBazaar API triage → YARA rule scanning | `pipeline.py`, `routes.py`, `signatures.py`, `yara_engine.py` | ✅ Done |
+| Signature DB | Local JSON signature database `data/signatures/known_hashes.json` seeded with known banking trojan SHA-256 hashes (Anubis, Cerberus, TeaBot, FluBot, Sharkbot, Octo, Hydra) and certificate thumbprints | `known_hashes.json` | ✅ Done |
+| VirusTotal triage | `_lookup_virustotal()` queries VT API v3 on cache miss. Returns family name, `detection_ratio` (e.g. `"23/74 engines"`), severity scaled by engine count, and a direct clickable `report_url` to `virustotal.com/gui/file/<sha256>` | `signatures.py` | ✅ Done |
+| MalwareBazaar triage | `_lookup_malwarebazaar()` queries the abuse.ch public hash-lookup endpoint (no auth needed for `get_info`). Returns family/ClamAV tag, severity 0.95, and `report_url` to `bazaar.abuse.ch/sample/<sha256>` | `signatures.py` | ✅ Done |
+| YARA engine | `app/analysis/yara_engine.py` compiles 8 built-in banking-trojan rules (SMS interception, C2 command patterns, accessibility abuse, overlay attacks, DEX manipulation, encoded payload, packer stubs, obfuscated class names) + all valid external `.yar` files from `data/yara_rules/`. Validates each community rule individually — broken rules are skipped with a warning instead of crashing the entire engine | `yara_engine.py` | ✅ Done |
+| Community rules | `scripts/download_yara_rules.py` downloads the `Yara-Rules/rules` GitHub repo as a ZIP, filters out rules using `import "androguard"` or `import "cuckoo"` (non-standard modules), and saves 518 clean rules. 455 successfully compile at runtime; 19 have relative include errors and are safely skipped | `download_yara_rules.py`, `data/yara_rules/` | ✅ Done |
+| Schema | Added `SignatureMatch`, `YaraMatch`, `SignatureYaraResult` Pydantic models. `SignatureMatch` includes `report_url` (clickable link) and `detection_ratio` (e.g. `"23/74 engines"`). `AnalysisManifest` now has `signature_yara: SignatureYaraResult` field | `schemas.py` | ✅ Done |
+| Feature vector | Extended from **30 → 33 features** by adding `signature_match_count`, `yara_rule_match_count`, `yara_max_severity`. **Model must be retrained** to use these — existing model still works (XGBoost only checks count, not names; zero-fill is safe for v1 interim) | `features.py` | ✅ Done |
+| Risk scoring | `reputation_component` now jumps to high-risk (score 8+) on any known-malware signature hit. `ioc_component` now scales with combined YARA match count and max severity | `scoring.py` | ✅ Done |
+| Tests | Added `tests/test_signatures_yara.py` covering local hash/cert match, mocked VirusTotal, mocked MalwareBazaar, and YARA scan. Updated `tests/test_features.py` and `tests/test_pipeline_phases.py` for 33-feature vector | `tests/` | ✅ Done |
+| API keys | VT and MalwareBazaar keys added to `.env` and registered in `config.py` as `virustotal_api_key` / `malwarebazaar_api_key`. MalwareBazaar hash lookup is public — key stored but not used for hash queries (only needed for file submission/download) | `.env`, `config.py` | ✅ Done |
+
+**Live test result (2026-07-16):** `f651876e...bbbced.apk` correctly identified as `trojan.ag1587137/abrisk` by VirusTotal (23/74 engines), with 5 YARA rules matched: `android_meterpreter`, `contains_base64`, `possible_includes_base64_packed_functions`, `domain`, `IP`. Clickable VT report URL returned in API response.
+
+**Feature vector schema: CHANGED (30 → 33) — retrain model when ready, but current model still runs safely with zero-filled new columns.**
+
+---
+
 ### Session 3 — 2026-07-06 | Author: Ajay
 
 **Files changed:** `app/graph/cache.py`, `app/api/routes.py`, `.gitignore`  
@@ -71,16 +96,18 @@ guardgraph-ai/
 │   ├── main.py                   FastAPI entrypoint, /health endpoint
 │   ├── api/routes.py             /analyze endpoint — full pipeline orchestrator
 │   ├── core/
-│   │   ├── config.py             Settings, MODEL_LABEL_MAP, TTP_SEVERITY_WEIGHTS, FAMILY_TO_TTPS
-│   │   └── schemas.py            Pydantic contracts (IngestionResult, AnalysisManifest, etc.)
+│   │   ├── config.py             Settings, MODEL_LABEL_MAP, TTP_SEVERITY_WEIGHTS, FAMILY_TO_TTPS, API keys
+│   │   └── schemas.py            Pydantic contracts (IngestionResult, SignatureMatch, YaraMatch, AnalysisManifest, etc.)
 │   ├── analysis/
 │   │   ├── ingest.py             SHA-256, cert thumbprint, Androguard ingestion
+│   │   ├── signatures.py         [NEW S4] Local hash/cert DB + VT + MalwareBazaar online triage
+│   │   ├── yara_engine.py        [NEW S4] YARA compiler + scanner (8 built-in rules + 455 community rules)
 │   │   ├── cfg.py                CFG + ACFG enrichment (NetworkX) + relevance pre-filter
 │   │   ├── forensic.py           Forensic dictionary, anchor detection, 4-hop subgraph extraction
 │   │   ├── topology.py           Centrality/clustering stats, flattening outlier detection
 │   │   └── obfuscation.py        Entropy scoring, reflection counting, coverage notes
 │   ├── ml/
-│   │   ├── features.py           *** SINGLE SOURCE OF TRUTH for feature vector schema ***
+│   │   ├── features.py           *** SINGLE SOURCE OF TRUTH for feature vector schema (33 features as of S4) ***
 │   │   └── classifier.py         XGBoost load/predict wrapper
 │   ├── graph/
 │   │   ├── neo4j_client.py       Thin driver wrapper (graceful connect failure)
@@ -91,12 +118,19 @@ guardgraph-ai/
 │       └── graphrag.py           Ollama-based report generation (anti-hallucination system prompt)
 ├── scripts/
 │   ├── train_model.py            CICMalDroid2020 training script skeleton
-│   └── load_ontology.py          One-time Neo4j ontology seed
+│   ├── load_ontology.py          One-time Neo4j ontology seed
+│   ├── download_yara_rules.py    [NEW S4] Downloads + filters Yara-Rules/rules community repo
+│   └── test_upload.py            [NEW S4] Local test script to POST an APK and pretty-print the report
 ├── tests/
-│   └── test_features.py          Feature vector length invariant test (MUST always pass)
+│   ├── test_features.py          Feature vector length invariant test (MUST always pass — currently 33)
+│   ├── test_pipeline_phases.py   Phase contract and integration tests
+│   └── test_signatures_yara.py   [NEW S4] Signature matching + YARA scan unit tests
 ├── data/
 │   ├── samples/                  (gitignored) APK files for testing
-│   └── models/                   (gitignored) trained XGBoost model goes here
+│   ├── models/                   (gitignored) trained XGBoost model goes here
+│   ├── signatures/
+│   │   └── known_hashes.json     [NEW S4] Local hash+cert signature database (Anubis, Cerberus, TeaBot, etc.)
+│   └── yara_rules/               [NEW S4] 518 community YARA rules (455 compile successfully)
 ├── docker-compose.yml            Neo4j only
 ├── requirements.txt
 ├── .env.example                  Copy to .env and fill in
@@ -122,6 +156,10 @@ guardgraph-ai/
 | Shannon entropy scoring | `obfuscation.py` | Over full string pool |
 | Reflection call counting | `obfuscation.py` | Call sites counted; resolution is stubbed |
 | Coverage note generation | `obfuscation.py` | Includes parse failure rate >= 10% |
+| **[S4] Local signature matching** | `signatures.py` | SHA-256 + cert thumbprint against `data/signatures/known_hashes.json` |
+| **[S4] VirusTotal online triage** | `signatures.py` | VT API v3; returns family, `detection_ratio`, clickable `report_url` |
+| **[S4] MalwareBazaar online triage** | `signatures.py` | Public hash-lookup; returns family, `report_url` |
+| **[S4] YARA scanning** | `yara_engine.py` | 8 built-in rules + 455 community rules; robust per-file compilation |
 | Risk scoring — all 7 components | `scoring.py` | See formula below |
 | Neo4j hot-path cache lookup | `cache.py` | Degrades gracefully on DB outage |
 | MITRE ontology retrieval | `ontology.py` | Used by GraphRAG for grounded context |
@@ -162,6 +200,13 @@ upload → SHA-256 → Neo4j lookup → cache HIT
 ```
 upload → SHA-256 → Neo4j lookup → cache MISS
   → Androguard AnalyzeAPK
+  → [Phase 1.5 NEW S4] match_signatures(sha256, cert_thumbprint)
+      → local DB lookup (data/signatures/known_hashes.json)
+      → VirusTotal API v3 (if no local match + VT key set)
+      → MalwareBazaar API (public endpoint, always queried)
+      → yara_scan_file(filepath, rules_dir="data/yara_rules")
+          → compile_rules(): 8 built-in + 455 community rules (19 broken skipped)
+          → rules.match(filepath) → [YaraMatch, ...]
   → build_all_method_cfgs(use_relevance_filter=True)
       → is_method_relevant() pre-filter [CHEAP]
       → build_method_cfg + enrich_acfg [EXPENSIVE, only for relevant methods]
@@ -210,7 +255,7 @@ Risk Score (0–100) =
 
 ### Feature Vector Schema (NEVER CHANGE WITHOUT RETRAINING)
 
-`app/ml/features.py` → `FEATURE_NAMES` → **30 features** in this order:
+`app/ml/features.py` → `FEATURE_NAMES` → **33 features** in this order (updated Session 4):
 
 ```
 [6 permission flags]      android.permission.BIND_ACCESSIBILITY_SERVICE, READ_SMS,
@@ -221,7 +266,10 @@ Risk Score (0–100) =
                           closeness_centrality × {mean,std,median,min,max}
                           clustering_coefficient × {mean,std,median,min,max}
 [3 obfuscation features]  string_entropy_score, flattening_suspected, reflection_call_count
+[3 signature/YARA — NEW S4] signature_match_count, yara_rule_match_count, yara_max_severity
 ```
+
+> ⚠️ **Retraining note (Session 4):** The current XGBoost model was trained on 30 features. The 3 new columns are zero-filled at inference time — predictions remain valid but do not yet benefit from signature/YARA signal. Retrain once a labelled dataset is available that includes these new features.
 
 XGBoost has no concept of column names at inference time — a column-order mismatch produces confident, wrong predictions with no error raised.
 
@@ -493,12 +541,23 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 # 6. Smoke test
-python tests/test_features.py     # must print "OK: feature vector length 30 matches FEATURE_NAMES"
+python tests/test_features.py        # must print "OK: feature vector length 33 matches FEATURE_NAMES"
+python tests/test_signatures_yara.py # must print "All signature/YARA tests passed successfully!"
 
-# 7. Run API
+# 7. Download community YARA rules (run once, or to refresh)
+python scripts/download_yara_rules.py
+# Downloads 518 rules, filters out androguard/cuckoo imports, saves to data/yara_rules/
+# 455 rules load successfully at runtime; 19 with relative include errors are auto-skipped
+
+# 8. Run API
 uvicorn app.main:app --reload
 # Swagger UI: http://localhost:8000/docs
 # Health:     http://localhost:8000/health
+
+# 9. Test with a real APK (S4 convenience script)
+python scripts/test_upload.py
+# Edit APK_PATH in the script to point to your sample
+# Or: python scripts/test_upload.py /path/to/sample.apk
 ```
 
 ### Training (when CICMalDroid2020 is preprocessed)
@@ -522,8 +581,9 @@ python scripts/train_model.py
 |---|---|---|
 | FastAPI + Androguard + CFG/ACFG pipeline | A | ✅ Complete |
 | Forensic dictionary, obfuscation signals, entropy scoring | B | ✅ Complete |
-| XGBoost training on CICMalDroid2020, risk scoring | C | 🔲 Model not yet trained |
+| XGBoost training on CICMalDroid2020, risk scoring | C | 🔲 Model not yet trained (feature vector now 33 cols — retrain needed) |
 | Neo4j schema + ontology, GraphRAG + report, frontend | D | ✅ Backend complete; frontend TBD |
+| **[S4] Signature detection + YARA + VT/MB online triage** | **Rohit** | **✅ Complete** |
 
 ---
 
@@ -553,4 +613,4 @@ python scripts/train_model.py
 
 ---
 
-*Document generated: 2026-07-06 | Updated: 2026-07-07 | Maintained by: AI Assistant (Antigravity) on behalf of the GuardGraph AI team*
+*Document generated: 2026-07-06 | Updated: 2026-07-16 | Maintained by: AI Assistant (Antigravity) on behalf of the GuardGraph AI team*

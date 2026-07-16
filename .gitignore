@@ -18,3 +18,10 @@ AI_ENGINEER_TASKS.md
 
 # Virtual Environments
 .venv/
+
+# Community YARA rules — downloaded at runtime via scripts/download_yara_rules.py
+# Do not commit — 500+ files, regeneratable, not source code
+data/yara_rules/
+
+# Real malware samples — must never be committed to a public repo
+test_malware_samples/

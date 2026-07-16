@@ -21,8 +21,9 @@ from app.core.schemas import (
 
 class TestAnalysisPipelinePhases(unittest.TestCase):
     def test_pipeline_methods_exist(self):
-        """Verify that all seven phase methods are defined on AnalysisPipeline."""
+        """Verify that all phase methods are defined on AnalysisPipeline."""
         self.assertTrue(hasattr(AnalysisPipeline, "run_phase1_ingestion"))
+        self.assertTrue(hasattr(AnalysisPipeline, "run_phase1b_signature_yara"))
         self.assertTrue(hasattr(AnalysisPipeline, "run_phase2_graph_construction"))
         self.assertTrue(hasattr(AnalysisPipeline, "run_phase3_forensic_matching"))
         self.assertTrue(hasattr(AnalysisPipeline, "run_phase4_feature_engineering"))
@@ -52,9 +53,10 @@ class TestAnalysisPipelinePhases(unittest.TestCase):
         
         self.assertIsInstance(obfuscation, ObfuscationSignal)
         self.assertIsInstance(vec, list)
-        self.assertEqual(len(vec), 30) # Matches FEATURE_NAMES length
+        self.assertEqual(len(vec), 33) # Matches FEATURE_NAMES length (33)
         self.assertEqual(mean_density, 0.0)
         self.assertEqual(total_nodes, 0)
+
 
     def test_phase6_risk_scoring_contract(self):
         """Verify phase 6 produces a valid RiskScoreBreakdown."""

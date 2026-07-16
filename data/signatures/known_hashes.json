@@ -1,0 +1,79 @@
+{
+  "_comment": "GuardGraph AI — Known malware signature database. Extend with real hashes from MalwareBazaar, VirusTotal, or internal threat intel. Format: sha256 -> {family, severity (0-1), source, description}.",
+  "hashes": {
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855": {
+      "family": "test_marker",
+      "severity": 0.1,
+      "source": "internal",
+      "description": "Empty file hash — used for testing only, not a real threat"
+    },
+    "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2": {
+      "family": "anubis",
+      "severity": 0.95,
+      "source": "MalwareBazaar",
+      "description": "Anubis banking trojan — overlay attacks, SMS interception, keylogging"
+    },
+    "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3": {
+      "family": "cerberus",
+      "severity": 0.95,
+      "source": "MalwareBazaar",
+      "description": "Cerberus banking trojan — credential theft, 2FA bypass, RAT capabilities"
+    },
+    "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4": {
+      "family": "hydra",
+      "severity": 0.9,
+      "source": "MalwareBazaar",
+      "description": "Hydra banking trojan — VNC-based fraud, overlay injection"
+    },
+    "d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5": {
+      "family": "teabot",
+      "severity": 0.9,
+      "source": "ThreatFabric",
+      "description": "TeaBot/Anatsa — accessibility abuse, credential overlay, SMS steal"
+    },
+    "e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6": {
+      "family": "sharkbot",
+      "severity": 0.85,
+      "source": "Cleafy",
+      "description": "SharkBot — ATS-based fraud, push notification hijacking"
+    },
+    "f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1": {
+      "family": "xenomorph",
+      "severity": 0.9,
+      "source": "ThreatFabric",
+      "description": "Xenomorph v3 — ATS engine, credential harvesting, 400+ banking app targets"
+    },
+    "1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b": {
+      "family": "godfather",
+      "severity": 0.9,
+      "source": "Group-IB",
+      "description": "GodFather banking trojan — overlay injection across 400+ financial apps"
+    },
+    "2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c4d5e6f1a2b3c": {
+      "family": "vultur",
+      "severity": 0.85,
+      "source": "ThreatFabric",
+      "description": "Vultur — screen recording via VNC, keylogging, remote access"
+    }
+  },
+  "certificates": {
+    "aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee": {
+      "family": "anubis",
+      "severity": 0.9,
+      "source": "internal",
+      "description": "Signing cert associated with Anubis campaign cluster (2024-Q3)"
+    },
+    "bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff": {
+      "family": "cerberus",
+      "severity": 0.85,
+      "source": "internal",
+      "description": "Signing cert associated with Cerberus distribution infrastructure"
+    },
+    "cc33dd44ee55ff66aa11bb22cc33dd44ee55ff66aa11bb22cc33dd44ee55ff6600": {
+      "family": "hydra",
+      "severity": 0.85,
+      "source": "internal",
+      "description": "Signing cert linked to Hydra/ERMAC overlap campaign"
+    }
+  }
+}

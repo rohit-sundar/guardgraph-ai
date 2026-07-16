@@ -47,8 +47,18 @@ OBFUSCATION_FEATURES = [
     "reflection_call_count",
 ]
 
+# Signature detection & YARA scanning features.
+# Added for Phase 1.5 integration — these capture detection-layer signals
+# that the ML model can learn from alongside structural/behavioral features.
+SIGNATURE_YARA_FEATURES = [
+    "signature_match_count",    # number of hash/cert signature hits
+    "yara_rule_match_count",    # number of YARA rules triggered
+    "yara_max_severity",        # highest severity across YARA matches (0.0-1.0)
+]
+
 FEATURE_NAMES = (
-    PERMISSION_FEATURES + BEHAVIOR_FEATURES + TOPOLOGY_FEATURES + OBFUSCATION_FEATURES
+    PERMISSION_FEATURES + BEHAVIOR_FEATURES + TOPOLOGY_FEATURES
+    + OBFUSCATION_FEATURES + SIGNATURE_YARA_FEATURES
 )
 
 
@@ -59,6 +69,9 @@ def build_feature_vector(
     obfuscation_entropy: float,
     obfuscation_flattening: bool,
     obfuscation_reflection_count: int,
+    signature_match_count: int = 0,
+    yara_rule_match_count: int = 0,
+    yara_max_severity: float = 0.0,
 ) -> list[float]:
     """
     Builds a feature vector in FEATURE_NAMES order. Returns a plain list —
@@ -78,6 +91,11 @@ def build_feature_vector(
     vec.append(float(obfuscation_entropy))
     vec.append(1.0 if obfuscation_flattening else 0.0)
     vec.append(float(obfuscation_reflection_count))
+
+    # Signature & YARA features
+    vec.append(float(signature_match_count))
+    vec.append(float(yara_rule_match_count))
+    vec.append(float(yara_max_severity))
 
     assert len(vec) == len(FEATURE_NAMES), (
         f"Feature vector length {len(vec)} != FEATURE_NAMES length {len(FEATURE_NAMES)}. "

@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     model_path: str = "data/models/guardgraph_xgb_v1.json"
     samples_dir: str = "data/samples"
 
+    # Signature detection & YARA scanning
+    signature_db_path: str = "data/signatures/known_hashes.json"
+    yara_rules_dir: str = "data/yara_rules"
+    virustotal_api_key: str = ""
+    malwarebazaar_api_key: str = ""
+
     entropy_high_threshold: float = 7.2
     flattening_degree_outlier_zscore: float = 3.0
 

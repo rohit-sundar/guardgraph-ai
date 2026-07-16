@@ -84,6 +84,7 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             predicted_ttps={},
             predicted_family=cached.get("family"),
             family_confidence=None,
+            signature_yara=None,  # skipped on hot path
         )
         narrative = cached.get("narrative", "")
         limitations = cached.get("limitations", [])
@@ -99,6 +100,9 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             limitations=limitations,
         )
 
+    # --- Phase 1.5: Signature Detection & YARA Scanning ---
+    sig_yara = AnalysisPipeline.run_phase1b_signature_yara(filepath, ingestion)
+
     # --- Phase 2: Graph Representation ---
     cfgs, parse_failure_rate = AnalysisPipeline.run_phase2_graph_construction(analysis_obj)
 
@@ -107,7 +111,8 @@ def _run_analysis(filepath: str) -> AnalysisReport:
 
     # --- Phase 4: Feature Engineering ---
     obfuscation, feature_vector, mean_density, total_nodes = AnalysisPipeline.run_phase4_feature_engineering(
-        ingestion, cfgs, all_matches, behavioral_subgraphs, all_strings, parse_failure_rate
+        ingestion, cfgs, all_matches, behavioral_subgraphs, all_strings, parse_failure_rate,
+        sig_yara=sig_yara,
     )
 
     # --- Phase 5: ML Classification ---
@@ -126,11 +131,13 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         predicted_ttps=predicted_ttps,
         predicted_family=predicted_family,
         family_confidence=family_confidence,
+        signature_yara=sig_yara,
     )
 
     # --- Phase 6: Risk Scoring ---
     risk_score = AnalysisPipeline.run_phase6_risk_scoring(
-        predicted_ttps, ingestion.permissions, obfuscation, all_matches, cache_hit, None
+        predicted_ttps, ingestion.permissions, obfuscation, all_matches, cache_hit, None,
+        sig_yara=sig_yara,
     )
 
     # --- Phase 7: Explainable Reporting ---

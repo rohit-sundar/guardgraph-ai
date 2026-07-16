@@ -42,6 +42,38 @@ class ObfuscationSignal(BaseModel):
     coverage_note: str  # e.g. "3 native libraries not analyzed"
 
 
+# ── Signature Detection & YARA Scanning Results ─────────────────────────
+
+class SignatureMatch(BaseModel):
+    """A single hash-based or certificate-based signature match."""
+    match_type: str          # "sha256" | "certificate"
+    matched_value: str       # the hex digest that matched
+    family: Optional[str] = None
+    severity: float          # 0.0-1.0
+    source: str              # attribution source (e.g. "MalwareBazaar")
+    description: str = ""
+    report_url: Optional[str] = None       # clickable link to the full report
+    detection_ratio: Optional[str] = None  # e.g. "23/73 engines"
+
+
+class YaraMatch(BaseModel):
+    """A single YARA rule match against the APK/DEX binary."""
+    rule_name: str
+    tags: list[str] = []
+    severity: float          # 0.0-1.0 from rule meta
+    description: str = ""
+    category: str = "unknown"
+    matched_strings: list[str] = []  # which string identifiers triggered
+
+
+class SignatureYaraResult(BaseModel):
+    """Combined result from signature detection and YARA scanning."""
+    signature_matches: list[SignatureMatch] = []
+    yara_matches: list[YaraMatch] = []
+    is_known_malware: bool = False   # any signature hash hit → true
+    combined_severity: float = 0.0   # max severity across all matches
+
+
 class AnalysisManifest(BaseModel):
     target_package: Optional[str]
     sha256: str
@@ -53,6 +85,9 @@ class AnalysisManifest(BaseModel):
     predicted_ttps: dict[str, float]  # technique_id -> confidence
     predicted_family: Optional[str]
     family_confidence: Optional[float]
+    # Signature detection + YARA scanning results (Phase 1.5).
+    # None on hot-path cache hits (scanning is skipped).
+    signature_yara: Optional[SignatureYaraResult] = None
 
 
 class RiskScoreBreakdown(BaseModel):

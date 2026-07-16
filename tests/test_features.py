@@ -19,9 +19,14 @@ def test_feature_vector_length():
         obfuscation_entropy=6.5,
         obfuscation_flattening=False,
         obfuscation_reflection_count=2,
+        signature_match_count=1,
+        yara_rule_match_count=2,
+        yara_max_severity=0.85,
     )
     assert len(vec) == len(FEATURE_NAMES)
-    print(f"OK: feature vector length {len(vec)} matches FEATURE_NAMES")
+    assert len(vec) == 33
+    print(f"OK: feature vector length {len(vec)} matches FEATURE_NAMES (33)")
+
 
 
 if __name__ == "__main__":

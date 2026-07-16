@@ -125,20 +125,58 @@ def obfuscation_component(obfuscation: ObfuscationSignal, entropy_threshold: flo
     return min(1.0, score)
 
 
-def reputation_component(cache_hit: bool, cached_score: float | None) -> float:
+def reputation_component(
+    cache_hit: bool,
+    cached_score: float | None,
+    is_known_malware: bool = False,
+) -> float:
     """
     If we got a cache hit, reputation is informed by prior known score.
     If no cache hit (first-seen sample), reputation defaults to neutral —
     it's neither vouched-for nor known-bad on this axis alone.
+
+    §sig: if the sample matches a known-malware signature hash, reputation
+    jumps to near-maximum regardless of cache state.
     """
+    if is_known_malware:
+        return 0.95  # known-bad sample — near-maximum reputation risk
     if cache_hit and cached_score is not None:
         return min(1.0, cached_score / 100.0)
     return 0.3  # neutral-low prior for unknown samples
 
 
-def ioc_component(matched_c2_indicators: int) -> float:
-    """Simple IOC score — scales with number of matched C2/network indicators."""
-    return min(1.0, matched_c2_indicators * 0.3)
+def ioc_component(
+    matched_c2_indicators: int,
+    signature_match_count: int = 0,
+    yara_match_count: int = 0,
+    yara_max_severity: float = 0.0,
+) -> float:
+    """
+    IOC score — combines C2 network indicators with signature detection
+    and YARA scan results.
+
+    §sig: Hash/cert signature matches are strong IOC signals (known-bad
+    sample). YARA rule matches are medium-strength IOC signals, weighted
+    by rule severity. C2 indicators remain as the weakest signal layer.
+
+    The scoring tiers:
+    - Signature hit: +0.5 per match (hash match = near-certain bad)
+    - YARA hit: +severity * 0.3 per match (rule-severity-weighted)
+    - C2 indicator: +0.3 per match (original behavior)
+    """
+    score = 0.0
+
+    # Signature matches — strongest IOC signal
+    score += signature_match_count * 0.5
+
+    # YARA matches — severity-weighted
+    if yara_match_count > 0:
+        score += yara_max_severity * 0.3 * min(yara_match_count, 3)
+
+    # C2 indicators — original behavior
+    score += matched_c2_indicators * 0.3
+
+    return min(1.0, score)
 
 
 def compute_risk_score(
@@ -150,6 +188,11 @@ def compute_risk_score(
     cache_hit: bool = False,
     cached_score: float | None = None,
     matched_c2_indicators: int = 0,
+    # Signature detection & YARA scanning inputs
+    signature_match_count: int = 0,
+    yara_match_count: int = 0,
+    yara_max_severity: float = 0.0,
+    is_known_malware: bool = False,
 ) -> RiskScoreBreakdown:
     if matched_anchor_behaviors is None:
         matched_anchor_behaviors = set()
@@ -159,8 +202,13 @@ def compute_risk_score(
     c3 = ttp_severity_component(predicted_ttps)
     c4 = forensic_anchor_component(matched_anchor_behaviors)
     c5 = obfuscation_component(obfuscation, entropy_threshold)
-    c6 = reputation_component(cache_hit, cached_score)
-    c7 = ioc_component(matched_c2_indicators)
+    c6 = reputation_component(cache_hit, cached_score, is_known_malware)
+    c7 = ioc_component(
+        matched_c2_indicators,
+        signature_match_count=signature_match_count,
+        yara_match_count=yara_match_count,
+        yara_max_severity=yara_max_severity,
+    )
 
     # Revised weights (§9.3): 0.25 + 0.20 + 0.15 + 0.15 + 0.15 + 0.05 + 0.05 = 1.00
     total = (
