@@ -6,6 +6,125 @@
 
 ## Change Log
 
+### Session 5 — 2026-07-16 | Author: Rohit — Multi-label MITRE ATT&CK TTP classifier + zero-day cold-path risk engine
+
+> Replacing the family→TTP proxy (`FAMILY_TO_TTPS`) with a **genuine multi-label MITRE ATT&CK Mobile
+> TTP classifier** (Binary Relevance XGBoost) and turning the cold path into an explicit **zero-day
+> risk engine**. Fuses the **GUARD** paper's graph-invariant topology with **DroidTTP's** multi-label
+> TTP mapping, grounded by a pre-populated ATT&CK Mobile ontology so GraphRAG stays evidence-bounded.
+> Decisions (locked with the team): Binary Relevance default + benchmark CC/LP; hybrid staged dataset;
+> expanded feature schema added **additively** in `features.py` (33-vector invariant preserved).
+
+**Commit 1 — `feat(ontology): build MITRE ATT&CK Mobile TTP label space and full ontology from STIX`**
+- **`app/ml/labels.py`** [NEW]: canonical multi-label output contract. `TTP_LABELS` = 57 curated,
+  real, current Mobile ATT&CK parent techniques (banking-fraud-weighted, 11 tactics), plus
+  `TECHNIQUE_TACTIC` / `TECHNIQUE_NAME` maps. This is to the TTP model what `FEATURE_NAMES` is to the
+  feature vector — **freeze-before-train invariant** documented. `load_full_technique_ontology()`
+  reads the STIX-derived JSON when present, else falls back to the baked-in catalog.
+- **`scripts/build_ttp_label_space.py`** [NEW]: fetches `mobile-attack.json` from
+  `mitre-attack/attack-stix-data`, parses techniques/tactics/software/`uses` relationships, and emits
+  `data/ontology/mobile_techniques.json` + `data/ontology/software_technique_map.json`. Prints a
+  coverage report vs. the frozen `TTP_LABELS` (never auto-rewrites the contract).
+- **`app/graph/ontology.py`** [MOD]: added `load_full_ontology()` — loads the full technique/tactic
+  set + `MalwareFamily-[:USES]->Technique` edges so GraphRAG has a grounded description for **every**
+  predictable TTP. `load_starter_ontology()` kept as a zero-network seed; `get_technique_context()`
+  signature unchanged.
+- **`scripts/load_ontology.py`** [MOD]: defaults to the full ontology; `--starter` for the legacy seed.
+- **Verified:** `app/ml/labels.py` imports cleanly (57 labels, sorted, consistent maps). STIX
+  fetch + Neo4j load require network/DB — not exercised in this environment.
+
+**Commit 2 — `feat(ml): add expanded GUARD+DroidTTP feature schema for multi-label TTP model`**
+- **`app/ml/features.py`** [MOD, additive]: added `TTP_FEATURE_NAMES` (**179 features**) and
+  `build_ttp_feature_vector(...)` — DroidTTP-style binary presence vocab (92 permissions + 25 intent
+  actions + 32 sensitive-API substrings + 3 component counts) **+** the family model's 6 behavior
+  flags + 15 GUARD topology stats + 3 obfuscation + 3 signature/YARA blocks (reused for consistency).
+  The existing `FEATURE_NAMES` (33) and `build_feature_vector` are **not modified** — 33-vector
+  invariant preserved.
+- **`app/analysis/topology.py`** [MOD]: added `aggregate_subgraph_invariants(list_of_dicts)` →
+  per-key mean across **all** anchor subgraphs (fixes the `behavioral_subgraphs[0]`-only bug where
+  only the first suspicious region reached the model). Length stays 15; empty→all-zero, never raises.
+- **Verified:** `build_ttp_feature_vector` emits exactly 179 values (empty + populated); no duplicate
+  feature names; component-count cap (50) works; aggregation mean correct; legacy 33-vector unchanged.
+
+**Commit 3 — `feat(data): add staged multi-label TTP dataset builder (STIX refs + weak-label bootstrap)`**
+- **`scripts/build_ttp_dataset.py`** [NEW]: hybrid dataset builder. **Stage A** — for each software in
+  `software_technique_map.json`, pull Android sample hashes from MalwareBazaar (`get_siginfo`),
+  download+unzip APKs (`get_file`, pwd `infected`), extract features, label with that software's ATT&CK
+  techniques (`label_source="stix_ref"`). **Stage B** — weak-label local CICMalDroid2020 APKs from
+  forensic-dictionary behaviors via `BEHAVIOR_TO_TTPS` (`label_source="weak"`). Emits
+  `data/ttp_dataset.csv` = 179 feature cols + 57 technique cols + 3 meta. Reuses the exact cold-path
+  analysis functions and calls `build_ttp_feature_vector`, so training/inference columns match.
+- **`app/core/schemas.py`** [MOD, additive]: `IngestionResult.intent_actions: list[str] = []`
+  (feeds the TTP intent vocab; legacy family model does not read it).
+- **`app/analysis/ingest.py`** [MOD]: added `extract_intent_actions(apk_obj)` (best-effort, guarded)
+  and populate `IngestionResult.intent_actions` in `ingest_apk`.
+- HTTP uses stdlib `urllib` (matches `signatures.py`) — **no new dependency**.
+- **Verified:** both scripts import cleanly; `_row_dict` produces the exact 239-column contract;
+  `IngestionResult.intent_actions` defaults to `[]`. Network stages (MalwareBazaar + APK download)
+  require an API key + connectivity — not exercised in this environment.
+
+**Commit 4 — `feat(ml): implement Binary-Relevance XGBoost multi-label TTP classifier with LP/CC benchmark`**
+- **`app/ml/classifier.py`** [MOD, additive]: added `BinaryRelevanceXGB` (one XGBoost per technique,
+  per-label `scale_pos_weight`, constant fallback for degenerate columns) + `TTPClassifier` +
+  `ttp_classifier` singleton. `predict()` returns `{technique_id: prob}` over **all 57** `TTP_LABELS`
+  (untrained labels → 0.0). Same loud-stub contract (`FileNotFoundError` until trained). The family
+  `MalwareClassifier`/`classifier` singleton is unchanged.
+- **`scripts/train_model.py`** [MOD, extend]: added `--target ttp` path (family training stays the
+  default). Trains **BR** (shipped, saved to `data/models/guardgraph_ttp_br_v1.joblib`) and
+  **benchmarks Classifier Chains + Label Powerset**, reporting DroidTTP-style metrics (micro/macro
+  F1, sample Jaccard, Hamming loss) to `data/models/ttp_metrics.json`. Multi-label stratified split
+  via `iterative-stratification` when installed, else a graceful random-split fallback.
+- **Verified end-to-end on synthetic signal data (320 rows, 9 labels):** BR trains + saves; benchmarks
+  run — BR micro-F1 **0.90** > CC 0.89 > LP 0.78 (LP worst, consistent with the zero-day rationale);
+  `TTPClassifier.load()+predict()` returns probs over all 57 labels; SMS-driver vector → T1636/T1582
+  top (>0.5); benign vector max 0.03; untrained labels → 0.0. *(Real APK-derived data pending; the
+  synthetic model is a wiring check only.)*
+
+**Commit 5 — `feat(cold-path): wire multi-label TTP classifier into zero-day risk scoring engine`**
+- **`app/core/pipeline.py`** [MOD]: Phase 4 now builds BOTH the legacy family 33-vector (unchanged)
+  and the **179-feature TTP vector** (GUARD topology aggregated across ALL anchor subgraphs; API
+  presence over all CFG calls) — returns a 5-tuple. Phase 5 calls `ttp_classifier.predict()` for
+  `predicted_ttps` **directly** (thresholded at `TTP_PREDICT_THRESHOLD=0.5`, probs retained); the
+  family model is now an **auxiliary** label only. The `FAMILY_TO_TTPS` proxy is no longer used on
+  the cold path.
+- **`app/api/routes.py`** [MOD]: unpack the Phase-4 5-tuple; pass both vectors to Phase 5.
+- **`app/reports/scoring.py`** [MOD]: `ttp_severity_component` now covers the **full** Mobile space
+  via `_technique_severity` (per-technique override → tactic-derived → DEFAULT). Added the
+  **zero-day indicator**: strong deterministic (forensic anchor) and/or structural (obfuscation)
+  evidence + low model confidence + not a cache hit ⇒ `zero_day_indicator=True`. Formula weights
+  unchanged — the model-free components already provide the score floor.
+- **`app/core/config.py`** [MOD]: added `TACTIC_SEVERITY` (per-tactic base severity); marked
+  `FAMILY_TO_TTPS` legacy/hot-path-only.
+- **`app/core/schemas.py`** [MOD, additive]: `RiskScoreBreakdown.zero_day_indicator: bool = False`.
+- **Verified (no APK needed):** Phase 4 returns 5 values with a 179-len TTP vec; Phase 5 emits direct
+  TTPs (T1636/T1582) with the synthetic model and `None` family (graceful); tactic severity correct
+  (T1642 Impact→0.95, T1418 Discovery→0.4); zero-day indicator True on anchors/obfuscation-high +
+  empty model, False when model confident, on cache hit, and on benign.
+
+**Commit 6 — `test(ml): add multi-label TTP tests and update project docs`**
+- **`app/reports/graphrag.py`** [MOD]: added guardrail rule 7 — when `zero_day_indicator` is true,
+  the report prominently flags a POSSIBLE NOVEL / ZERO-DAY VARIANT and states the verdict rests on
+  model-free evidence. Already retrieves `get_technique_context()` for the directly-predicted TTPs, so
+  with the full ontology (Commit 1) every predicted technique is grounded (no ungrounded MITRE text).
+- **`tests/test_features.py`** [MOD]: added `test_ttp_feature_vector_length` (179-vector invariant +
+  no-duplicate-columns + count-cap check), alongside the existing 33-vector test.
+- **`tests/test_pipeline_phases.py`** [MOD]: fixed Phase-4 test for the 5-tuple return (asserts 179-len
+  TTP vec); added `test_phase5_ttp_classification_contract` (keys ⊆ `TTP_LABELS`, probs in [0,1],
+  robust to model presence) and `test_phase6_zero_day_indicator`.
+- **`requirements.txt`** [MOD]: pinned `loguru` (was used unpinned) and added
+  `iterative-stratification` (multi-label stratified split; trainer falls back to random split if absent).
+- **`.gitignore`** [MOD]: ignore `data/ttp_apks/` (downloaded real malware — never commit).
+  `data/models/*` and `data/*.csv` already cover the model + dataset.
+- **`README.md` / `GUARDGRAPH_PROJECT_CONTEXT.md`** [MOD]: documented the multi-label TTP workflow,
+  zero-day engine, and the new commands.
+- **Verified — FULL SUITE GREEN:** `tests/test_features.py` (33 + 179 invariants),
+  `tests/test_pipeline_phases.py` (5 tests: phases exist, Phase-4 5-tuple, Phase-5 TTP contract,
+  Phase-6 risk + zero-day), `tests/test_signatures_yara.py` (regression) all pass. No regressions.
+
+**Feature vector schema: NEW parallel TTP contract (179) added; legacy family vector (33) UNCHANGED.**
+
+---
+
 ### Session 4 — 2026-07-16 | Author: Tarun
 
 **Files changed:** `app/analysis/signatures.py` [NEW], `app/analysis/yara_engine.py` [NEW], `app/core/config.py`, `app/core/schemas.py`, `app/core/pipeline.py`, `app/api/routes.py`, `app/ml/features.py`, `app/reports/scoring.py`, `requirements.txt`  
@@ -107,8 +226,9 @@ guardgraph-ai/
 │   │   ├── topology.py           Centrality/clustering stats, flattening outlier detection
 │   │   └── obfuscation.py        Entropy scoring, reflection counting, coverage notes
 │   ├── ml/
-│   │   ├── features.py           *** SINGLE SOURCE OF TRUTH for feature vector schema (33 features as of S4) ***
-│   │   └── classifier.py         XGBoost load/predict wrapper
+│   │   ├── labels.py             [NEW S5] *** SINGLE SOURCE OF TRUTH for TTP output order (57 Mobile techniques) ***
+│   │   ├── features.py           *** feature schemas: FEATURE_NAMES (33, family) + TTP_FEATURE_NAMES (179, S5) ***
+│   │   └── classifier.py         MalwareClassifier (family) + [S5] BinaryRelevanceXGB / TTPClassifier (multi-label TTP)
 │   ├── graph/
 │   │   ├── neo4j_client.py       Thin driver wrapper (graceful connect failure)
 │   │   ├── cache.py              Hot-path signature lookup/store
@@ -117,8 +237,10 @@ guardgraph-ai/
 │       ├── scoring.py            Risk score formula (7-component, 0-100)
 │       └── graphrag.py           Ollama-based report generation (anti-hallucination system prompt)
 ├── scripts/
-│   ├── train_model.py            CICMalDroid2020 training script skeleton
-│   ├── load_ontology.py          One-time Neo4j ontology seed
+│   ├── train_model.py            family training + [S5] --target ttp (BR + CC/LP benchmark)
+│   ├── build_ttp_label_space.py  [NEW S5] ATT&CK Mobile STIX → label space + ontology JSON
+│   ├── build_ttp_dataset.py      [NEW S5] staged multi-label TTP dataset (MalwareBazaar + weak-label)
+│   ├── load_ontology.py          Neo4j ontology seed ([S5] full Mobile ontology by default)
 │   ├── download_yara_rules.py    [NEW S4] Downloads + filters Yara-Rules/rules community repo
 │   └── test_upload.py            [NEW S4] Local test script to POST an APK and pretty-print the report
 ├── tests/
@@ -272,6 +394,18 @@ Risk Score (0–100) =
 > ⚠️ **Retraining note (Session 4):** The current XGBoost model was trained on 30 features. The 3 new columns are zero-filled at inference time — predictions remain valid but do not yet benefit from signature/YARA signal. Retrain once a labelled dataset is available that includes these new features.
 
 XGBoost has no concept of column names at inference time — a column-order mismatch produces confident, wrong predictions with no error raised.
+
+#### Multi-label TTP contracts (Session 5 — NEVER CHANGE WITHOUT RETRAINING THE TTP MODEL)
+
+Two additional frozen contracts, additive alongside the 33-vector:
+
+- `app/ml/labels.py` → `TTP_LABELS` → **57 MITRE ATT&CK Mobile techniques** (the classifier's output
+  column order — freeze before training). `TECHNIQUE_TACTIC` / `TECHNIQUE_NAME` maps included.
+- `app/ml/features.py` → `TTP_FEATURE_NAMES` / `build_ttp_feature_vector` → **179 features**
+  (92 perms + 25 intents + 32 sensitive APIs + 3 component counts + 6 behaviors + 15 topology +
+  3 obfuscation + 3 signature/YARA). Same silent-mismatch hazard as the 33-vector.
+
+The legacy 33-vector `FEATURE_NAMES` and the family `MalwareClassifier` are unchanged.
 
 ### GraphRAG Guardrails (Never Relax)
 

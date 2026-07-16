@@ -36,6 +36,10 @@ STRICT RULES:
 4. Always include the confidence value alongside any predicted TTP.
 5. End with a "Recommended Analyst Actions" section in priority order.
 6. Do not use hedging filler language beyond what's needed for genuine uncertainty.
+7. If the risk score breakdown has "zero_day_indicator": true, prominently flag this as a
+   POSSIBLE NOVEL / ZERO-DAY VARIANT. Explain that the verdict rests on model-free evidence
+   (deterministic matched APIs/permissions and/or structural obfuscation/coverage signals)
+   while the classifier has low familiarity with this sample — not on classifier confidence.
 Write for a bank fraud-operations audience: clear, direct, actionable.
 """
 

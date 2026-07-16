@@ -249,7 +249,14 @@ guardgraph-ai/
 - GraphRAG prompt enforces all five guardrails from the original design doc (grounded-only, "not observed" for gaps, separate deterministic vs. predicted, confidence values required, prioritized actions).
 
 ### What's stubbed (on purpose, fails loudly rather than faking success)
-- **XGBoost classifier**: raises `FileNotFoundError` until a trained model is dropped at `data/models/guardgraph_xgb_v1.json`. Pipeline degrades gracefully — proceeds without predictions, report correctly says "not observed" for classifier findings.
+- **Multi-label TTP classifier (primary, cold path — Session 5)**: `app/ml/classifier.py`
+  `TTPClassifier` predicts MITRE ATT&CK Mobile techniques *directly* (Binary Relevance XGBoost over
+  `app/ml/labels.TTP_LABELS`), replacing the `FAMILY_TO_TTPS` proxy. Raises `FileNotFoundError` until
+  a model is dropped at `data/models/guardgraph_ttp_br_v1.joblib` (train via
+  `scripts/train_model.py --target ttp`); pipeline degrades gracefully to empty predictions. The cold
+  path is now an explicit **zero-day engine** — deterministic + structural components floor the score
+  and set `RiskScoreBreakdown.zero_day_indicator`. See TEAM_CONTEXT.md Session 5 for full detail.
+- **Family XGBoost classifier (now auxiliary)**: raises `FileNotFoundError` until a trained model is dropped at `data/models/guardgraph_xgb_v1.json`. Pipeline degrades gracefully — proceeds without predictions, report correctly says "not observed" for classifier findings.
 - **Reflection constant-propagation**: call sites are counted but target resolution is not implemented — `unresolved_reflection_targets` always reports conservatively via a placeholder.
 - **Eigenvector/Katz centrality**: intentionally excluded from `topology.py` — expensive/unstable on disconnected subgraphs. Only degree, closeness, and clustering are computed. Add the other two only if specifically needed and tested against real subgraph shapes.
 - **Native (.so) analysis, packer fingerprinting, string-decrypt micro-execution**: not implemented at all, per the explicit obfuscation-coverage priority order (Section 4).

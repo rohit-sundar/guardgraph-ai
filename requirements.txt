@@ -12,4 +12,6 @@ pydantic
 pydantic-settings
 python-dotenv==1.0.1
 pandas
-yara-python>=4.5.0
+yara-python>=4.5.0
+loguru>=0.7.2
+iterative-stratification>=0.1.7

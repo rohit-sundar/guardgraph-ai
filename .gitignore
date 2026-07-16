@@ -25,3 +25,5 @@ data/yara_rules/
 
 # Real malware samples — must never be committed to a public repo
 test_malware_samples/
+# Downloaded APKs from MalwareBazaar (scripts/build_ttp_dataset.py) — real malware
+data/ttp_apks/
