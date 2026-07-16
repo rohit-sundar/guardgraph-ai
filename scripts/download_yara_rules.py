@@ -11,6 +11,7 @@ import re
 import zipfile
 import urllib.request
 from pathlib import Path
+# pyrefly: ignore [missing-import]
 from loguru import logger
 
 # Default repository to download rules from (YARA-Rules community repo)
