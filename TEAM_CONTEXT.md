@@ -6,7 +6,7 @@
 
 ## Change Log
 
-### Session 4 — 2026-07-16 | Author: Rohit
+### Session 4 — 2026-07-16 | Author: Tarun
 
 **Files changed:** `app/analysis/signatures.py` [NEW], `app/analysis/yara_engine.py` [NEW], `app/core/config.py`, `app/core/schemas.py`, `app/core/pipeline.py`, `app/api/routes.py`, `app/ml/features.py`, `app/reports/scoring.py`, `requirements.txt`  
 **Files added:** `scripts/download_yara_rules.py`, `scripts/test_upload.py`, `data/signatures/known_hashes.json`, `data/yara_rules/` (518 rules), `tests/test_signatures_yara.py`
