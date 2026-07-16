@@ -35,6 +35,37 @@ def extract_cert_thumbprint(apk_obj) -> str | None:
         return None
 
 
+def extract_intent_actions(apk_obj) -> list[str]:
+    """
+    Collects declared intent-filter actions across all activities, services, and
+    receivers. Used by the multi-label TTP feature vector's intent vocabulary.
+
+    Best-effort: Androguard's per-component get_intent_filters can vary in shape /
+    raise on malformed manifests, so each lookup is guarded. Returns a de-duplicated
+    sorted list; an empty list is a valid (not-observed) result, not an error.
+    """
+    actions: set[str] = set()
+    component_getters = [
+        ("activity", apk_obj.get_activities),
+        ("service", apk_obj.get_services),
+        ("receiver", apk_obj.get_receivers),
+    ]
+    for itemtype, getter in component_getters:
+        try:
+            names = getter() or []
+        except Exception:
+            continue
+        for name in names:
+            try:
+                filters = apk_obj.get_intent_filters(itemtype, name) or {}
+            except Exception:
+                continue
+            for action in filters.get("action", []) or []:
+                if action:
+                    actions.add(action)
+    return sorted(actions)
+
+
 def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object]:
     """
     Runs Androguard's full analysis pass.
@@ -58,6 +89,7 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object]:
         activities=list(apk_obj.get_activities()),
         services=list(apk_obj.get_services()),
         receivers=list(apk_obj.get_receivers()),
+        intent_actions=extract_intent_actions(apk_obj),
     )
 
     return result, apk_obj, dvm, analysis

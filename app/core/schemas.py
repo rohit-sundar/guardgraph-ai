@@ -15,6 +15,10 @@ class IngestionResult(BaseModel):
     activities: list[str] = []
     services: list[str] = []
     receivers: list[str] = []
+    # Declared intent-filter actions across all components (additive — used by the
+    # multi-label TTP feature vector's intent vocabulary). Empty when extraction
+    # fails; the legacy 33-feature family model does not read this field.
+    intent_actions: list[str] = []
 
 
 class BehavioralSubgraph(BaseModel):
