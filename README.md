@@ -2,7 +2,7 @@
 
 Static-analysis-only Android malware risk-scoring engine. CFG/ACFG graph
 features + XGBoost multi-label classification + Neo4j knowledge graph +
-Claude-based GraphRAG report generation.
+local-LLM GraphRAG report generation (Ollama).
 
 ## Status
 This is a **skeleton**, not a finished product. Every module has a working
@@ -43,24 +43,27 @@ offline via Ollama.
 python -m venv .venv
 source .venv/bin/activate                 # Windows (PowerShell): .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+```
 
+```bash
 # 2. Configure environment — the defaults in .env.example work as-is
 cp .env.example .env                       # Windows (PowerShell): copy .env.example .env
+```
 
+```bash
 # 3. Start the local LLM used for report generation.
 #    Run these in their OWN terminal — `ollama serve` stays running in the foreground.
 ollama pull qwen2.5:7b-instruct-q4_K_M
 ollama serve                               # skip if Ollama already runs as a background service
+```
 
+```bash
 # 4. Start Neo4j (knowledge graph: hot-path cache + report grounding)
 docker compose up -d
+```
 
-# 5. Load the MITRE ATT&CK Mobile ontology into Neo4j (one network fetch, run once).
-#    Grounds the GraphRAG report in real technique/tactic facts.
-python scripts/build_ttp_label_space.py    # fetch + build the ATT&CK Mobile label space
-python scripts/load_ontology.py            # load it into Neo4j (use --starter for an offline 5-technique seed)
-
-# 6. Run the API (leave running; --reload for development)
+```bash
+# 5. Run the API (leave running; --reload for development)
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -77,15 +80,17 @@ curl -X POST http://localhost:8000/analyze -F "file=@data/samples/test.apk"
 | Androguard ingestion | Working (needs `androguard` installed) |
 | CFG construction (NetworkX) | Working |
 | ACFG enrichment | Working |
-| Forensic dictionary / anchor detection | Working, dictionary is a starter set — extend it |
+| Forensic dictionary / anchor detection | Working, but the dictionary is a starter set — currently over-matches common libraries (AndroidX/Glide/Lottie reflection + HTTP read as anchors), so expect false positives until it's tuned/allowlisted |
 | 4-hop subgraph extraction | Working |
 | Topological feature mining | Working (degree/closeness/clustering; eigenvector/Katz stubbed — slow on large graphs, add if needed) |
 | Entropy-based obfuscation scoring | Working |
-| Family XGBoost inference (auxiliary) | Stub — needs `data/models/guardgraph_xgb_v1.json` |
-| Multi-label MITRE ATT&CK TTP classifier (primary, cold path) | Working code; needs `data/models/guardgraph_ttp_br_v1.joblib` from `train_model.py --target ttp`. Degrades gracefully (empty TTPs) until trained |
-| Neo4j cache lookup (hot path) | Working, needs Neo4j running + ontology loaded |
-| Risk scoring formula | Working, weights match the paper's spec |
-| GraphRAG report generation (Claude) | Working, calls Anthropic API — needs API key |
+| Signature + YARA scanning (hash/cert DB, VirusTotal, MalwareBazaar, YARA rules) | Working; online triage (VT/MalwareBazaar) needs API keys in `.env`, otherwise local hash/cert + built-in YARA rules run offline |
+| Family XGBoost inference (auxiliary) | Stub — needs `data/models/guardgraph_xgb_v1.json`. Not loaded by default, so `classifier_confidence` contributes 0 to the score until trained |
+| Multi-label MITRE ATT&CK TTP classifier (primary, cold path) | Working code; needs `data/models/guardgraph_ttp_br_v1.joblib` from `train_model.py --target ttp`. Degrades gracefully (empty TTPs) until trained — until then `ttp_severity` contributes 0 |
+| Neo4j cache lookup (hot path) | Working, needs Neo4j running + ontology loaded. Cold-path caching only writes a `Sample` node when the family model predicts a family, so with the model untrained nothing is cached back |
+| Risk scoring formula | Working, weights match the paper's spec. With both XGBoost models untrained the verdict rests entirely on the deterministic static signals (permissions, forensic anchors, obfuscation, signature/YARA, IOCs) + the zero-day floor |
+| Zero-day risk indicator | Working — strong deterministic/structural evidence + low model confidence + cache miss raises `zero_day_indicator` |
+| GraphRAG report generation (local LLM via Ollama) | Working — calls Ollama (`qwen2.5:7b-instruct-q4_K_M`), no cloud key needed. **Caveat:** the local 7B model drifts under the strict grounding prompt (can invent subgraphs/figures) — prompt hardening / output validation still pending |
 | Auth, queues, multi-user | Not built — out of scope for prototype |
 
 ## Wiring in your trained model
@@ -105,21 +110,28 @@ turns the cold path into a **zero-day risk engine**: deterministic forensic-anch
 structural obfuscation signals set a score floor and raise `zero_day_indicator` when the
 model is unfamiliar with a first-seen sample.
 
-Single sources of truth:
-- `app/ml/labels.py` → `TTP_LABELS` (technique output order — freeze before training).
+Single sources of truth (freeze before training — column order is load-bearing, XGBoost
+validates count not meaning):
+- `app/ml/labels.py` → `TTP_LABELS` (technique output order).
 - `app/ml/features.py` → `TTP_FEATURE_NAMES` / `build_ttp_feature_vector` (179 features).
 
+**Ontology grounding** — run once; needed for grounded reports even without a trained model:
 ```bash
-# 1. Build the ATT&CK Mobile label space + ontology from STIX (one network fetch)
+# Build the ATT&CK Mobile label space + ontology from STIX (one network fetch)
 python scripts/build_ttp_label_space.py
 
-# 2. Load the full Mobile ontology into Neo4j (GraphRAG grounding)
-python scripts/load_ontology.py
+# Load the full Mobile ontology into Neo4j (GraphRAG grounding)
+python scripts/load_ontology.py            # --starter for an offline 5-technique seed
+```
 
-# 3. Build the multi-label TTP dataset (real APKs via MalwareBazaar + weak-label bootstrap)
+**Training the classifier** — optional; needs a labelled dataset:
+```bash
+# Build the multi-label TTP dataset. Stage A pulls real APKs from MalwareBazaar
+# (needs MALWAREBAZAAR_API_KEY in .env + connectivity; downloads live malware);
+# Stage B weak-labels local samples. Skip/limit stages if you lack a key.
 python scripts/build_ttp_dataset.py --stage all --max-per-family 15
 
-# 4. Train Binary Relevance (shipped) and benchmark Classifier Chains / Label Powerset
+# Train Binary Relevance (shipped default) and benchmark Classifier Chains / Label Powerset
 python scripts/train_model.py --target ttp
 #    -> data/models/guardgraph_ttp_br_v1.joblib  +  data/models/ttp_metrics.json
 ```
