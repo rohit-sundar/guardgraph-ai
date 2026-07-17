@@ -32,8 +32,10 @@ def build_method_cfg(method_analysis) -> nx.DiGraph:
         node_id = f"{block.start}"
         g.add_node(node_id, start=block.start, end=block.end)
 
-        # get_childs() is the correct Androguard 4.x API; .childs is not public.
-        for child in block.get_childs():
+        # Androguard 4.1.x exposes successors via the `childs` property
+        # (list of (min_offset, max_offset, BasicBlock) tuples); there is no
+        # get_childs() method on DEXBasicBlock in this version.
+        for child in block.childs:
             # child is a tuple (min_offset, max_offset, BasicBlock)
             child_block = child[2] if isinstance(child, tuple) else child
             if child_block is None:

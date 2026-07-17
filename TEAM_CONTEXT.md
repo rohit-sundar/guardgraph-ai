@@ -6,6 +6,36 @@
 
 ## Change Log
 
+### Session 6 — 2026-07-17 | Author: Rohit — Fix CFG construction crash on Androguard 4.1.2 (cold path was fully dead)
+
+> **Symptom:** `/analyze` returned HTTP 200 but every sample came back with `total_nodes_parsed: 0`,
+> `method_parse_failure_rate: 1.0`, `predicted_family: None`, and empty subgraphs — reported (wrongly)
+> as *"100% of relevant methods failed CFG parsing — possible heavy obfuscation."* The whole cold-path
+> graph pipeline was silently producing nothing.
+
+**Commit — `fix(cfg): use DEXBasicBlock.childs property instead of nonexistent get_childs() on Androguard 4.1.2`**
+- **`app/analysis/cfg.py`** [MOD]: `build_method_cfg()` called `block.get_childs()`, which does **not
+  exist** on `DEXBasicBlock` in the pinned `androguard==4.1.2`. Every relevant method threw
+  `AttributeError`, was caught by the broad `except` in `build_all_method_cfgs`, and counted as a parse
+  failure — so 100% "failure" was a masked API mismatch, not obfuscation. Switched to the `childs`
+  **property** (list of `(min_offset, max_offset, BasicBlock)` tuples); the existing tuple-unpacking
+  logic already handled that shape, so this is a one-line fix + corrected comment.
+- **Root cause note:** the old comment claimed `get_childs()` was "the correct Androguard 4.x API" — it
+  is not for 4.1.x. The broad exception swallow in `build_all_method_cfgs` is what turned a hard API
+  error into a plausible-looking (but false) obfuscation signal. Left the swallow in place (it is the
+  intended obfuscation-resilience behavior) now that the underlying call is correct.
+- **Verified end-to-end on `data/samples/test.apk`:** `total_nodes_parsed` 0 → **924**,
+  `method_parse_failure_rate` 1.0 → **0.0**, **123** behavioral subgraphs, flattening + 124 reflection
+  calls detected, risk score 26.97/low → **44.23/suspicious** with `zero_day_indicator: True`, and a
+  genuine 3964-char Ollama narrative (previously the error stub, also from a `.env` `OLLAMA_BASE_URL`
+  missing `/v1` — corrected locally in `.env`, not tracked). Full test suite **13/13 green**.
+- **Still stubbed by design (unchanged, not regressions):** `predicted_family: None` (no trained family
+  model → cold-path `store_signature` cache write never fires) and `predicted_ttps: []` (no trained TTP
+  model). Neo4j ontology (262 nodes: 124 Technique / 12 Tactic / 126 MalwareFamily) is loaded via the
+  `scripts/` and is independent of this fix.
+
+---
+
 ### Session 5 — 2026-07-16 | Author: Rohit — Multi-label MITRE ATT&CK TTP classifier + zero-day cold-path risk engine
 
 > Replacing the family→TTP proxy (`FAMILY_TO_TTPS`) with a **genuine multi-label MITRE ATT&CK Mobile
