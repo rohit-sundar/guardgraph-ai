@@ -34,20 +34,37 @@ guardgraph-ai/
 
 ## Quickstart
 
+First-time setup, in order. Assumes **Docker**, **Python 3.12**, and
+[**Ollama**](https://ollama.com) are installed. Report generation runs fully
+offline via Ollama.
+
 ```bash
-python -m venv venv && source venv/bin/activate
+# 1. Create + activate a virtualenv and install dependencies
+python -m venv .venv
+source .venv/bin/activate                 # Windows (PowerShell): .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# start Neo4j
+# 2. Configure environment — the defaults in .env.example work as-is
+cp .env.example .env                       # Windows (PowerShell): copy .env.example .env
+
+# 3. Start the local LLM used for report generation.
+#    Run these in their OWN terminal — `ollama serve` stays running in the foreground.
+ollama pull qwen2.5:7b-instruct-q4_K_M
+ollama serve                               # skip if Ollama already runs as a background service
+
+# 4. Start Neo4j (knowledge graph: hot-path cache + report grounding)
 docker compose up -d
 
-cp .env.example .env   # fill in NEO4J + ANTHROPIC_API_KEY
+# 5. Load the MITRE ATT&CK Mobile ontology into Neo4j (one network fetch, run once).
+#    Grounds the GraphRAG report in real technique/tactic facts.
+python scripts/build_ttp_label_space.py    # fetch + build the ATT&CK Mobile label space
+python scripts/load_ontology.py            # load it into Neo4j (use --starter for an offline 5-technique seed)
 
-# run API
+# 6. Run the API (leave running; --reload for development)
 uvicorn app.main:app --reload --port 8000
 ```
 
-Upload an APK:
+Then upload an APK — your sample lives at `data/samples/test.apk`:
 ```bash
 curl -X POST http://localhost:8000/analyze -F "file=@data/samples/test.apk"
 ```
