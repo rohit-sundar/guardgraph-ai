@@ -14,6 +14,7 @@ import urllib.parse
 from pathlib import Path
 from typing import Optional
 
+# pyrefly: ignore [missing-import]
 from loguru import logger
 from app.core.config import settings
 

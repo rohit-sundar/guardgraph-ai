@@ -4,6 +4,7 @@ described in the design doc — downstream report generation depends on
 field names not silently drifting.
 """
 from typing import Optional
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel
 
 
