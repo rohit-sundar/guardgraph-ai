@@ -21,15 +21,18 @@ Usage:
     python scripts/build_ttp_dataset.py --stage a --max-per-family 15
     python scripts/build_ttp_dataset.py --stage b --cic-dir data/cicmaldroid_apks
     python scripts/build_ttp_dataset.py --stage all
+    python scripts/build_ttp_dataset.py --stage a --download-workers 16   # faster network
 """
 import argparse
 import io
 import json
 import os
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pyzipper  # noqa: E402  — MalwareBazaar samples are WinZip-AES encrypted; stdlib zipfile can't decrypt those
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -191,18 +194,58 @@ def _mb_download_apk(sha256: str, dest_dir: str, auth_key: str) -> str | None:
         # MalwareBazaar archives use WinZip AES-256 encryption (compression method 99),
         # which the stdlib zipfile cannot decrypt — pyzipper.AESZipFile handles both
         # AES and legacy ZipCrypto members.
-        with pyzipper.AESZipFile(io.BytesIO(body)) as zf:
-            zf.setpassword(b"infected")
-            inner = zf.namelist()[0]
-            with zf.open(inner) as src, open(out_path, "wb") as dst:
-                dst.write(src.read())
+        #
+        # Unpack to a thread-unique temp file and rename into place: the rename is
+        # atomic, so an interrupted run can never leave a truncated .apk that the
+        # os.path.exists() resume check above would later mistake for a good sample.
+        tmp_path = f"{out_path}.{threading.get_ident()}.part"
+        try:
+            with pyzipper.AESZipFile(io.BytesIO(body)) as zf:
+                zf.setpassword(b"infected")
+                inner = zf.namelist()[0]
+                with zf.open(inner) as src, open(tmp_path, "wb") as dst:
+                    dst.write(src.read())
+            os.replace(tmp_path, out_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
         return out_path
     except Exception as e:
         logger.warning(f"[dataset] MB download failed for {sha256}: {e}")
         return None
 
 
-def stage_a(max_per_family: int, apk_dir: str) -> list[dict]:
+def _download_many(
+    hashes: list[str], dest_dir: str, auth_key: str, workers: int
+) -> list[tuple[str, str]]:
+    """
+    Fetch several samples concurrently and return [(sha256, apk_path)] for the ones
+    that succeeded, in the original `hashes` order so dataset rows stay deterministic.
+
+    Downloads are network-bound, so threads help; feature extraction stays serial in
+    the caller because Androguard is CPU-bound and not thread-safe.
+    """
+    if not hashes:
+        return []
+    paths: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=min(workers, len(hashes))) as pool:
+        futures = {
+            pool.submit(_mb_download_apk, h, dest_dir, auth_key): h for h in hashes
+        }
+        for fut in as_completed(futures):
+            h = futures[fut]
+            try:
+                apk_path = fut.result()
+            except Exception as e:  # _mb_download_apk swallows its own errors; belt and braces
+                logger.warning(f"[dataset] MB download worker failed for {h}: {e}")
+                continue
+            if apk_path:
+                paths[h] = apk_path
+    logger.info(f"[dataset] downloaded {len(paths)}/{len(hashes)} samples ({workers} workers)")
+    return [(h, paths[h]) for h in hashes if h in paths]
+
+
+def stage_a(max_per_family: int, apk_dir: str, download_workers: int = 8) -> list[dict]:
     if not os.path.exists(SOFTWARE_MAP_PATH):
         logger.error(f"[dataset] {SOFTWARE_MAP_PATH} missing — run scripts/build_ttp_label_space.py first.")
         return []
@@ -224,10 +267,9 @@ def stage_a(max_per_family: int, apk_dir: str) -> list[dict]:
             if len(hashes) >= max_per_family:
                 break
             time.sleep(1)  # be polite to the API
-        for h in list(dict.fromkeys(hashes))[:max_per_family]:
-            apk_path = _mb_download_apk(h, apk_dir, auth_key)
-            if not apk_path:
-                continue
+        wanted = list(dict.fromkeys(hashes))[:max_per_family]
+        # Fetch this family's samples in parallel, then extract features one at a time.
+        for _, apk_path in _download_many(wanted, apk_dir, auth_key, download_workers):
             extracted = extract_ttp_row(apk_path)
             if extracted is None:
                 continue
@@ -269,6 +311,10 @@ def main():
     ap.add_argument("--apk-dir", default="data/ttp_apks")
     ap.add_argument("--cic-dir", default="data/cicmaldroid_apks")
     ap.add_argument("--out", default=OUT_CSV)
+    ap.add_argument(
+        "--download-workers", type=int, default=8,
+        help="Concurrent MalwareBazaar downloads (default 8). Lower it if abuse.ch rate-limits you.",
+    )
     args = ap.parse_args()
 
     logger.info(
@@ -278,7 +324,7 @@ def main():
 
     rows: list[dict] = []
     if args.stage in ("a", "all"):
-        rows += stage_a(args.max_per_family, args.apk_dir)
+        rows += stage_a(args.max_per_family, args.apk_dir, args.download_workers)
     if args.stage in ("b", "all"):
         rows += stage_b(args.cic_dir)
 
