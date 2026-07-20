@@ -30,7 +30,7 @@ import sys
 import time
 import urllib.parse
 import urllib.request
-import zipfile
+import pyzipper  # noqa: E402  — MalwareBazaar samples are WinZip-AES encrypted; stdlib zipfile can't decrypt those
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -180,14 +180,21 @@ def _mb_download_apk(sha256: str, dest_dir: str, auth_key: str) -> str | None:
     try:
         req = urllib.request.Request(MB_API, data=data, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=60) as resp:
-            content_type = resp.headers.get("content-type", "")
             body = resp.read()
-        if content_type.startswith("application/json"):
+        # A successful get_file returns the sample as a zip archive (magic "PK").
+        # Any error (bad hash, auth, rate limit) comes back as a small JSON body,
+        # so gate on the actual bytes rather than the Content-Type header — abuse.ch
+        # does not reliably set application/zip on the download response.
+        if not body.startswith(b"PK"):
             logger.warning(f"[dataset] MB download rejected for {sha256}: {body[:200]!r}")
             return None
-        with zipfile.ZipFile(io.BytesIO(body)) as zf:
+        # MalwareBazaar archives use WinZip AES-256 encryption (compression method 99),
+        # which the stdlib zipfile cannot decrypt — pyzipper.AESZipFile handles both
+        # AES and legacy ZipCrypto members.
+        with pyzipper.AESZipFile(io.BytesIO(body)) as zf:
+            zf.setpassword(b"infected")
             inner = zf.namelist()[0]
-            with zf.open(inner, pwd=b"infected") as src, open(out_path, "wb") as dst:
+            with zf.open(inner) as src, open(out_path, "wb") as dst:
                 dst.write(src.read())
         return out_path
     except Exception as e:
