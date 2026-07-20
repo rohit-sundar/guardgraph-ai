@@ -129,6 +129,23 @@ python scripts/load_ontology.py            # --starter for an offline 5-techniqu
 # Build the multi-label TTP dataset. Stage A pulls real APKs from MalwareBazaar
 # (needs MALWAREBAZAAR_API_KEY in .env + connectivity; downloads live malware);
 # Stage B weak-labels local samples. Skip/limit stages if you lack a key.
+#
+# Stage A runs in two phases. Keep them separate: analysis is memory-hungry and can
+# take the process down, and you do not want that to cost you the downloads.
+
+# 1. Download only — network-bound, resumable. Writes data/ttp_apks/_manifest.json.
+#    Downloads run concurrently; lower --download-workers if abuse.ch rate-limits you.
+python scripts/build_ttp_dataset.py --stage a --max-per-family 15 --phase download --download-workers 8
+
+# Reruns are incremental: already-resolved families are not re-queried and existing
+# APKs are not re-fetched. If the run ends with "families still unresolved" (abuse.ch
+# returns transient 502s), just run it again — only those families are retried.
+# Use --force-resolve to deliberately re-sweep every family.
+
+# 2. Analyse — CPU/memory-bound, hours. Reads the manifest, writes data/ttp_dataset.csv.
+python scripts/build_ttp_dataset.py --stage a --phase analyze
+
+# Or both phases back-to-back (default), including Stage B weak-labelling:
 python scripts/build_ttp_dataset.py --stage all --max-per-family 15
 
 # Train Binary Relevance (shipped default) and benchmark Classifier Chains / Label Powerset
