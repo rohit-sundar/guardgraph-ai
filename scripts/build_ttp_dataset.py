@@ -55,6 +55,9 @@ from app.core.config import settings  # noqa: E402
 SOFTWARE_MAP_PATH = "data/ontology/software_technique_map.json"
 OUT_CSV = "data/ttp_dataset.csv"
 MB_API = "https://mb-api.abuse.ch/api/v1/"
+# Written by the download phase, read by the analysis phase: carries each sample's
+# family + ATT&CK techniques so analysis never has to re-query MalwareBazaar.
+MANIFEST_NAME = "_manifest.json"
 
 # Weak-label heuristic: forensic-dictionary behavior -> likely ATT&CK Mobile techniques.
 # Rule-derived on purpose (label_source="weak") — used only to bootstrap coverage.
@@ -150,8 +153,16 @@ def _row_dict(vec: list[float], techniques: set[str], label_source: str,
 
 # ── Stage A: real APKs from MalwareBazaar, labeled by ATT&CK software->technique ──
 
-def _mb_hashes_for_signature(signature: str, limit: int, auth_key: str) -> list[str]:
-    """Return APK sha256 hashes tagged with `signature` on MalwareBazaar."""
+def _mb_hashes_for_signature(
+    signature: str, limit: int, auth_key: str
+) -> tuple[list[str], bool]:
+    """
+    Return (APK sha256 hashes tagged with `signature`, query_ok).
+
+    query_ok distinguishes "MalwareBazaar has no APKs for this name" from "the query
+    errored" (502, timeout). Without that split a transient 502 looks identical to an
+    empty family, and the caller would mark the family done and never retry it.
+    """
     headers = {"Auth-Key": auth_key} if auth_key else {}
     data = urllib.parse.urlencode(
         {"query": "get_siginfo", "signature": signature, "limit": str(limit)}
@@ -162,14 +173,16 @@ def _mb_hashes_for_signature(signature: str, limit: int, auth_key: str) -> list[
             payload = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
         logger.warning(f"[dataset] MalwareBazaar get_siginfo failed for '{signature}': {e}")
-        return []
-    if payload.get("query_status") != "ok":
-        return []
+        return [], False
+    status = payload.get("query_status")
+    if status != "ok":
+        # no_results means the name is genuinely unknown — a real answer, not a failure.
+        return [], status == "no_results"
     return [
         item["sha256_hash"]
         for item in payload.get("data", [])
         if str(item.get("file_type", "")).lower() == "apk"
-    ]
+    ], True
 
 
 def _mb_download_apk(sha256: str, dest_dir: str, auth_key: str) -> str | None:
@@ -245,37 +258,202 @@ def _download_many(
     return [(h, paths[h]) for h in hashes if h in paths]
 
 
-def stage_a(max_per_family: int, apk_dir: str, download_workers: int = 8) -> list[dict]:
+def _manifest_path(apk_dir: str, override: str | None = None) -> str:
+    return override or os.path.join(apk_dir, MANIFEST_NAME)
+
+
+def _read_manifest(path: str) -> dict:
+    """
+    Load the manifest document: {"samples": {sha256: {...}}, "families": {name: {...}}}.
+
+    "families" records which software entries have already been resolved against
+    MalwareBazaar, so a rerun re-queries only the ones that errored.
+    """
+    if not os.path.exists(path):
+        return {"samples": {}, "families": {}}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+        return {
+            "samples": doc.get("samples", {}),
+            "families": doc.get("families", {}),
+        }
+    except Exception as e:
+        logger.error(f"[dataset] could not read manifest {path}: {e}")
+        return {"samples": {}, "families": {}}
+
+
+def _missing_samples(targets: dict[str, dict], apk_dir: str) -> list[str]:
+    """Manifest entries with no APK on disk — i.e. what a rerun still needs to fetch."""
+    return [
+        h for h in targets
+        if not os.path.exists(os.path.join(apk_dir, f"{h}.apk"))
+    ]
+
+
+def _resolve_stage_a_targets(
+    software_map: list[dict],
+    max_per_family: int,
+    auth_key: str,
+    done_families: dict[str, dict] | None = None,
+) -> tuple[dict[str, dict], dict[str, dict]]:
+    """
+    Ask MalwareBazaar which samples represent each ATT&CK software entry.
+
+    Returns (targets, family_status):
+      targets       {sha256: {"family": ..., "techniques": [...]}}. A sample tagged
+                    under two families keeps the first that claimed it, so labels
+                    stay single-valued.
+      family_status {name: {"resolved": bool, "count": int}} — resolved=False when a
+                    query errored, which is what makes the next run retry just that
+                    family instead of sweeping all of them again.
+
+    Families already marked resolved in `done_families` are skipped entirely; the
+    sweep is the slow, flaky part of the download phase and is not worth repeating.
+    """
+    done_families = done_families or {}
+    label_set = set(TTP_LABELS)
+    targets: dict[str, dict] = {}
+    family_status: dict[str, dict] = {}
+    skipped = 0
+
+    for sw in software_map:
+        name = sw["name"]
+        techniques = sorted({t for t in sw["technique_ids"] if t in label_set})
+        if not techniques:
+            continue
+        if done_families.get(name, {}).get("resolved"):
+            skipped += 1
+            continue
+
+        hashes: list[str] = []
+        query_ok = True
+        for sig in [name, *sw.get("aliases", [])]:
+            found, ok = _mb_hashes_for_signature(sig, max_per_family, auth_key)
+            hashes.extend(found)
+            query_ok = query_ok and ok
+            if len(hashes) >= max_per_family:
+                break
+            time.sleep(1)  # be polite to the API
+
+        wanted = list(dict.fromkeys(hashes))[:max_per_family]
+        for h in wanted:
+            targets.setdefault(h, {"family": name, "techniques": techniques})
+        # Only call a family done when every query behind it actually answered.
+        family_status[name] = {"resolved": query_ok, "count": len(wanted)}
+        if wanted:
+            logger.info(f"[dataset] {name}: {len(wanted)} candidate samples")
+        elif not query_ok:
+            logger.warning(f"[dataset] {name}: unresolved (API error) — will retry on rerun")
+
+    if skipped:
+        logger.info(f"[dataset] skipped {skipped} already-resolved families")
+    return targets, family_status
+
+
+# ── Stage A phase 1: download only (network-bound, low memory, fully resumable) ──
+
+def stage_a_download(
+    max_per_family: int,
+    apk_dir: str,
+    download_workers: int,
+    manifest_path: str,
+    force_resolve: bool = False,
+) -> dict[str, dict]:
+    """
+    Resolve every family's sample hashes, fetch the APKs, and persist the manifest.
+
+    Kept deliberately free of Androguard: analysis is the memory-hungry part that can
+    take the whole process down, so all downloads finish and land on disk first.
+
+    Reruns are incremental — already-resolved families are not re-queried and existing
+    APKs are not re-fetched. Pass force_resolve=True to sweep every family again.
+    """
     if not os.path.exists(SOFTWARE_MAP_PATH):
         logger.error(f"[dataset] {SOFTWARE_MAP_PATH} missing — run scripts/build_ttp_label_space.py first.")
-        return []
+        return {}
     with open(SOFTWARE_MAP_PATH, "r", encoding="utf-8") as f:
         software_map = json.load(f)
 
     auth_key = settings.malwarebazaar_api_key
-    label_set = set(TTP_LABELS)
-    rows: list[dict] = []
 
-    for sw in software_map:
-        techniques = {t for t in sw["technique_ids"] if t in label_set}
-        if not techniques:
-            continue
-        candidates = [sw["name"], *sw.get("aliases", [])]
-        hashes: list[str] = []
-        for sig in candidates:
-            hashes.extend(_mb_hashes_for_signature(sig, max_per_family, auth_key))
-            if len(hashes) >= max_per_family:
-                break
-            time.sleep(1)  # be polite to the API
-        wanted = list(dict.fromkeys(hashes))[:max_per_family]
-        # Fetch this family's samples in parallel, then extract features one at a time.
-        for _, apk_path in _download_many(wanted, apk_dir, auth_key, download_workers):
+    # Merge into whatever a previous run already established. Overwriting the manifest
+    # would drop samples whose family happens to error this time, even though their
+    # APKs are on disk — and stage_a_analyze only ever looks at the manifest.
+    prior = {} if force_resolve else _read_manifest(manifest_path)
+    targets: dict[str, dict] = dict(prior.get("samples", {}))
+    families: dict[str, dict] = dict(prior.get("families", {}))
+
+    new_targets, new_status = _resolve_stage_a_targets(
+        software_map, max_per_family, auth_key, done_families=families
+    )
+    targets.update(new_targets)
+    families.update(new_status)
+
+    if not targets:
+        logger.error("[dataset] no candidate samples resolved from MalwareBazaar.")
+        return {}
+
+    os.makedirs(apk_dir, exist_ok=True)
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump({"samples": targets, "families": families}, f, indent=2)
+    unresolved = [n for n, s in families.items() if not s.get("resolved")]
+    logger.info(
+        f"[dataset] manifest: {len(targets)} samples ({len(new_targets)} new), "
+        f"{len(families) - len(unresolved)}/{len(families)} families resolved -> {manifest_path}"
+    )
+
+    # Only fetch what is not already on disk; _mb_download_apk also re-checks.
+    pending = _missing_samples(targets, apk_dir)
+    logger.info(f"[dataset] {len(targets) - len(pending)} already downloaded, {len(pending)} to fetch")
+    _download_many(pending, apk_dir, auth_key, download_workers)
+
+    missing = _missing_samples(targets, apk_dir)
+    have = len(targets) - len(missing)
+    logger.info(f"[dataset] download phase: {have}/{len(targets)} samples on disk")
+    if unresolved:
+        logger.warning(
+            f"[dataset] {len(unresolved)} families still unresolved, rerun to retry just these: {unresolved}"
+        )
+    if missing:
+        logger.warning(
+            f"[dataset] {len(missing)} samples still missing — rerun the download phase "
+            f"to retry them (existing files are skipped): {[h[:12] for h in missing[:10]]}"
+        )
+    return targets
+
+
+# ── Stage A phase 2: analysis only (CPU/memory-bound, reads what phase 1 fetched) ──
+
+def stage_a_analyze(apk_dir: str, manifest_path: str) -> list[dict]:
+    """Extract features for every downloaded sample named in the manifest."""
+    targets = _read_manifest(manifest_path).get("samples", {})
+    if not targets:
+        logger.error(f"[dataset] no manifest at {manifest_path} — run --phase download first.")
+        return []
+
+    rows: list[dict] = []
+    for sha256, info in targets.items():
+        apk_path = os.path.join(apk_dir, f"{sha256}.apk")
+        if not os.path.exists(apk_path):
+            continue  # never downloaded; the download phase reports these
+        try:
             extracted = extract_ttp_row(apk_path)
-            if extracted is None:
-                continue
-            vec, meta = extracted
-            rows.append(_row_dict(vec, techniques, "stix_ref", meta["sha256"], sw["name"]))
-            logger.info(f"[dataset] stage A row: {sw['name']} {meta['sha256'][:12]} techniques={sorted(techniques)}")
+        except Exception as e:
+            # Anchor matching, topology and feature building sit outside the guards
+            # inside extract_ttp_row and can raise on malformed or packed APKs.
+            # One bad sample must not destroy a multi-hour run.
+            logger.exception(f"[dataset] analysis failed for {sha256[:12]}: {e}")
+            continue
+        if extracted is None:
+            continue
+        vec, meta = extracted
+        techniques = set(info["techniques"])
+        rows.append(_row_dict(vec, techniques, "stix_ref", meta["sha256"], info["family"]))
+        logger.info(
+            f"[dataset] stage A row {len(rows)}: {info['family']} "
+            f"{meta['sha256'][:12]} techniques={sorted(techniques)}"
+        )
     return rows
 
 
@@ -289,7 +467,11 @@ def stage_b(cic_dir: str) -> list[dict]:
     rows: list[dict] = []
     apks = [os.path.join(cic_dir, f) for f in os.listdir(cic_dir) if f.endswith(".apk")]
     for apk_path in apks:
-        extracted = extract_ttp_row(apk_path)
+        try:
+            extracted = extract_ttp_row(apk_path)
+        except Exception as e:
+            logger.exception(f"[dataset] analysis failed for {os.path.basename(apk_path)}: {e}")
+            continue
         if extracted is None:
             continue
         vec, meta = extracted
@@ -315,6 +497,21 @@ def main():
         "--download-workers", type=int, default=8,
         help="Concurrent MalwareBazaar downloads (default 8). Lower it if abuse.ch rate-limits you.",
     )
+    ap.add_argument(
+        "--phase", choices=["download", "analyze", "both"], default="both",
+        help="Stage A only. 'download' fetches APKs and writes the manifest; 'analyze' "
+             "runs Androguard over what was fetched. Split them so an analysis crash "
+             "never costs you the downloads.",
+    )
+    ap.add_argument(
+        "--manifest", default=None,
+        help=f"Manifest path (default: <apk-dir>/{MANIFEST_NAME}).",
+    )
+    ap.add_argument(
+        "--force-resolve", action="store_true",
+        help="Re-query MalwareBazaar for every family, ignoring the manifest's "
+             "already-resolved markers (default: retry only families that errored).",
+    )
     args = ap.parse_args()
 
     logger.info(
@@ -322,9 +519,21 @@ def main():
         "reconstructing — prefer it if available."
     )
 
+    manifest_path = _manifest_path(args.apk_dir, args.manifest)
+
+    if args.stage in ("a", "all") and args.phase in ("download", "both"):
+        stage_a_download(
+            args.max_per_family, args.apk_dir, args.download_workers, manifest_path,
+            force_resolve=args.force_resolve,
+        )
+
+    if args.phase == "download":
+        logger.info("[dataset] download phase complete — rerun with --phase analyze.")
+        return
+
     rows: list[dict] = []
     if args.stage in ("a", "all"):
-        rows += stage_a(args.max_per_family, args.apk_dir, args.download_workers)
+        rows += stage_a_analyze(args.apk_dir, manifest_path)
     if args.stage in ("b", "all"):
         rows += stage_b(args.cic_dir)
 
