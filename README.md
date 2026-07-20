@@ -102,56 +102,42 @@ be silently wrong (XGBoost doesn't validate column meaning, only column count).
 
 ## Multi-label MITRE ATT&CK Mobile TTP classifier (cold path)
 
-The cold path predicts MITRE ATT&CK **Mobile techniques directly** as a multi-label
-problem (Binary Relevance = one XGBoost per technique), replacing the old
-family→TTP proxy. It fuses the GUARD paper's graph-invariant topology (aggregated
-across all anchor subgraphs) with DroidTTP-style manifest/API presence features, and
-turns the cold path into a **zero-day risk engine**: deterministic forensic-anchor and
-structural obfuscation signals set a score floor and raise `zero_day_indicator` when the
-model is unfamiliar with a first-seen sample.
+The cold path predicts ATT&CK Mobile techniques directly as a multi-label problem
+(Binary Relevance — one XGBoost per technique), combining GUARD-style graph-invariant
+topology with DroidTTP-style manifest/API presence features. Deterministic forensic-anchor
+and obfuscation signals set a score floor and raise `zero_day_indicator` on first-seen
+samples the model doesn't recognise.
 
-Single sources of truth (freeze before training — column order is load-bearing, XGBoost
-validates count not meaning):
-- `app/ml/labels.py` → `TTP_LABELS` (technique output order).
-- `app/ml/features.py` → `TTP_FEATURE_NAMES` / `build_ttp_feature_vector` (179 features).
+Column order is load-bearing (XGBoost validates count, not meaning) — freeze these before
+training:
+- `app/ml/labels.py` → `TTP_LABELS` (technique output order)
+- `app/ml/features.py` → `TTP_FEATURE_NAMES` / `build_ttp_feature_vector` (179 features)
 
-**Ontology grounding** — run once; needed for grounded reports even without a trained model:
+**Ontology grounding** — run once. Required for grounded reports, even without a trained model.
 ```bash
-# Build the ATT&CK Mobile label space + ontology from STIX (one network fetch)
-python scripts/build_ttp_label_space.py
-
-# Load the full Mobile ontology into Neo4j (GraphRAG grounding)
-python scripts/load_ontology.py            # --starter for an offline 5-technique seed
+python scripts/build_ttp_label_space.py    # ATT&CK Mobile label space + ontology from STIX
+python scripts/load_ontology.py            # into Neo4j; --starter for an offline 5-technique seed
 ```
 
-**Training the classifier** — optional; needs a labelled dataset:
+**Training** — optional. Stage A pulls real APKs from MalwareBazaar (needs
+`MALWAREBAZAAR_API_KEY`; downloads live malware), Stage B weak-labels local samples.
+Run Stage A's two phases separately — analysis is memory-hungry and can crash the
+process, which you don't want to cost you the downloads.
 ```bash
-# Build the multi-label TTP dataset. Stage A pulls real APKs from MalwareBazaar
-# (needs MALWAREBAZAAR_API_KEY in .env + connectivity; downloads live malware);
-# Stage B weak-labels local samples. Skip/limit stages if you lack a key.
-#
-# Stage A runs in two phases. Keep them separate: analysis is memory-hungry and can
-# take the process down, and you do not want that to cost you the downloads.
+# 1. Download — network-bound, resumable, parallelizible. Writes to data/ttp_apks/_manifest.json.
+python scripts/build_ttp_dataset.py --stage a --phase download --max-per-family 15 --download-workers 8
+```
 
-# 1. Download only — network-bound, resumable. Writes data/ttp_apks/_manifest.json.
-#    Downloads run concurrently; lower --download-workers if abuse.ch rate-limits you.
-python scripts/build_ttp_dataset.py --stage a --max-per-family 15 --phase download --download-workers 8
-
-# Reruns are incremental: already-resolved families are not re-queried and existing
-# APKs are not re-fetched. If the run ends with "families still unresolved" (abuse.ch
-# returns transient 502s), just run it again — only those families are retried.
-# Use --force-resolve to deliberately re-sweep every family.
-
-# 2. Analyse — CPU/memory-bound, hours. Reads the manifest, writes data/ttp_dataset.csv.
+```bash
+# 2. Analyse — CPU/memory-bound, takes hours. Writes to data/ttp_dataset.csv.
 python scripts/build_ttp_dataset.py --stage a --phase analyze
-
-# Or both phases back-to-back (default), including Stage B weak-labelling:
-python scripts/build_ttp_dataset.py --stage all --max-per-family 15
-
-# Train Binary Relevance (shipped default) and benchmark Classifier Chains / Label Powerset
-python scripts/train_model.py --target ttp
-#    -> data/models/guardgraph_ttp_br_v1.joblib  +  data/models/ttp_metrics.json
 ```
 
-The multi-label model is built from the GUARD (graph-invariant topology) and DroidTTP
-(multi-label ATT&CK Mobile mapping) methods.
+```bash
+# 3. Train Binary Relevance; benchmarks Classifier Chains / Label Powerset.
+python scripts/train_model.py --target ttp
+#    -> data/models/guardgraph_ttp_br_v1.joblib + data/models/ttp_metrics.json
+```
+
+Reruns of the download phase are incremental. On "families still unresolved" (transient
+abuse.ch 502s), just rerun — only those families are retried; `--force-resolve` re-sweeps all. `--stage all` runs everything back-to-back including Stage B.
