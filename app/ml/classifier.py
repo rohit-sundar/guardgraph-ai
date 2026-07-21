@@ -37,11 +37,34 @@ class MalwareClassifier:
         """
         Returns dict of label -> probability. Caller is responsible for
         deciding what confidence threshold counts as "predicted family".
+
+        Backward-compat: models trained before SIGNATURE_YARA_FEATURES was
+        appended expect 30 dims; the live vector is 33. If the model wants
+        fewer features and the extra dims are a trailing suffix, slice to
+        the trained width so the auxiliary family path still works.
         """
         if self._model is None:
             self.load()
 
-        X = np.array([feature_vector])
+        vec = list(feature_vector)
+        expected = getattr(self._model, "n_features_in_", None)
+        if expected is None:
+            try:
+                expected = int(self._model.get_booster().num_features())
+            except Exception:
+                expected = len(vec)
+
+        if len(vec) != expected:
+            if len(vec) > expected:
+                # Trailing features (e.g. signature/YARA) added after training.
+                vec = vec[:expected]
+            else:
+                raise ValueError(
+                    f"Family feature vector length {len(vec)} < model expected "
+                    f"{expected}. Retrain or rebuild the vector with FEATURE_NAMES."
+                )
+
+        X = np.array([vec])
         probs = self._model.predict_proba(X)[0]
 
         if len(probs) != len(MODEL_LABEL_MAP):

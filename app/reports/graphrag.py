@@ -11,12 +11,22 @@ prompt guardrails:
 
 Runs against a local Ollama instance (OpenAI-compatible API at
 http://localhost:11434/v1). No API key or network calls needed.
-Hallucination-checking is still manual — local 7B models are more prone to
-drifting from the system prompt than Claude; spot-check every new report
-format against the curated demo set before trusting output.
+
+Anti-hallucination measures implemented here:
+  1. temperature=0  — greedy decode; eliminates stochastic drift.
+  2. top_p=1.0      — no nucleus sampling on top of greedy.
+  3. SYSTEM_PROMPT OUTPUT FORMAT section — explicit section contract
+     prevents the model from adding speculative “also consider…” padding.
+  4. Hard prohibition on citing technique IDs / names not in the
+     ## MITRE ATT&CK Mobile Ontology Context block.
+  5. Post-generation grounding check — any T-ID in the narrative that
+     was NOT in the provided ontology context is logged as a warning so
+     the operator can spot-check reports easily.
 """
 import json
+import re
 from openai import OpenAI
+from loguru import logger
 
 from app.core.config import settings
 from app.core.schemas import AnalysisManifest, RiskScoreBreakdown
@@ -25,23 +35,57 @@ from app.graph.ontology import get_technique_context
 SYSTEM_PROMPT = """You are a cybersecurity analyst report generator for GuardGraph AI,
 a banking-focused Android malware analysis engine.
 
-STRICT RULES:
+STRICT RULES — violating ANY of these makes the report unusable:
 1. Only state findings that are explicitly present in the provided JSON manifest,
-   risk score breakdown, or MITRE ontology context. Never invent evidence.
+   risk score breakdown, or MITRE ontology context block. Never invent evidence.
 2. If something is not covered by the provided data (e.g. native code was not
    analyzed, or a technique has low confidence), say so explicitly using
-   phrasing like "not observed" or "not statically resolved" — do not guess.
+   phrasing like "not observed" or "not statically resolved" — do NOT guess.
 3. Clearly separate deterministic findings (hash matches, permission declarations,
    matched APIs) from model predictions (classifier confidence, predicted TTPs).
 4. Always include the confidence value alongside any predicted TTP.
-5. End with a "Recommended Analyst Actions" section in priority order.
-6. Do not use hedging filler language beyond what's needed for genuine uncertainty.
-7. If the risk score breakdown has "zero_day_indicator": true, prominently flag this as a
-   POSSIBLE NOVEL / ZERO-DAY VARIANT. Explain that the verdict rests on model-free evidence
-   (deterministic matched APIs/permissions and/or structural obfuscation/coverage signals)
-   while the classifier has low familiarity with this sample — not on classifier confidence.
+5. Do NOT mention any MITRE technique ID (e.g. T1636) or technique name that is
+   NOT present in the "## MITRE ATT&CK Mobile Ontology Context" section below.
+   If you have general knowledge of a technique but it is absent from that block,
+   do not cite it — say "no ontology context provided for this technique" instead.
+6. End with a "Recommended Analyst Actions" section in priority order.
+7. Do not use hedging filler language beyond what's needed for genuine uncertainty.
+8. If the risk score breakdown has "zero_day_indicator": true, prominently flag
+   this as a POSSIBLE NOVEL / ZERO-DAY VARIANT. Explain that the verdict rests on
+   model-free evidence (deterministic matched APIs/permissions and/or structural
+   obfuscation/coverage signals) while the classifier has low familiarity — not on
+   classifier confidence alone.
+9. Do not add sections, bullet points, or conclusions that go beyond what the data
+   supports. If a section would require invented evidence, omit it entirely.
+
+OUTPUT FORMAT (use exactly these section headers, in this order):
+## Executive Summary
+## Deterministic Findings
+## Model Predictions
+## Risk Score Breakdown
+## Coverage Limitations
+## Recommended Analyst Actions
+
 Write for a bank fraud-operations audience: clear, direct, actionable.
 """
+
+
+def _grounding_check(narrative: str, provided_technique_ids: set) -> None:
+    """
+    Post-generation sanity check. Scans the LLM output for MITRE technique ID
+    references (pattern T\\d{4}(\\.\\d{3})?) and warns if any were cited that
+    were NOT in the provided ontology context block.
+    """
+    cited_ids = set(re.findall(r"\bT\d{4}(?:\.\d{3})?\b", narrative))
+    hallucinated = cited_ids - provided_technique_ids
+    if hallucinated:
+        logger.warning(
+            f"[Phase 7] Grounding check FAILED — LLM cited technique IDs not in "
+            f"provided ontology context: {sorted(hallucinated)}. "
+            "Spot-check this report for fabricated evidence."
+        )
+    else:
+        logger.info("[Phase 7] Grounding check passed — all cited technique IDs are grounded.")
 
 
 def generate_report(
@@ -54,6 +98,10 @@ def generate_report(
     Requires a running Ollama instance:
         ollama serve          # if not already running as a service
         ollama pull qwen2.5:7b-instruct-q4_K_M
+
+    Anti-hallucination: temperature is pinned to 0 (greedy decode).
+    Do NOT raise this without explicit justification — stochastic sampling
+    is the primary driver of LLM drift from the grounded prompt.
     """
     technique_ids = list(manifest.predicted_ttps.keys())
     ontology_context = get_technique_context(technique_ids) if technique_ids else []
@@ -65,24 +113,62 @@ def generate_report(
             "API calls could not be statically resolved to their real target."
         )
 
-    user_prompt = f"""
-Generate an analyst report from the following grounded data. Do not use any
-information beyond what's given here.
+    # Provide only the fields the LLM needs for grounding.
+    # Omitting internal numeric arrays (feature vectors, subgraph topology floats)
+    # reduces the surface area for the model to pattern-match against unrelated data.
+    manifest_summary = {
+        "target_package": manifest.target_package,
+        "sha256": manifest.sha256,
+        "cache_hit": manifest.cache_hit,
+        "predicted_ttps": manifest.predicted_ttps,
+        "predicted_family": manifest.predicted_family,
+        "family_confidence": manifest.family_confidence,
+        "behavioral_subgraphs": [
+            {
+                "primary_behavior_flag": bs.primary_behavior_flag,
+                "matched_apis": bs.matched_apis,
+            }
+            for bs in manifest.behavioral_subgraphs
+        ],
+        "obfuscation": {
+            "string_entropy_score": manifest.obfuscation.string_entropy_score,
+            "flattening_suspected": manifest.obfuscation.flattening_suspected,
+            "reflection_call_count": manifest.obfuscation.reflection_call_count,
+            "unresolved_reflection_targets": manifest.obfuscation.unresolved_reflection_targets,
+            "method_parse_failure_rate": manifest.obfuscation.method_parse_failure_rate,
+            "coverage_note": manifest.obfuscation.coverage_note,
+        },
+        "signature_yara": (
+            {
+                "signature_matches": [m.model_dump() for m in manifest.signature_yara.signature_matches],
+                "yara_matches": [m.model_dump() for m in manifest.signature_yara.yara_matches],
+                "is_known_malware": manifest.signature_yara.is_known_malware,
+                "combined_severity": manifest.signature_yara.combined_severity,
+            }
+            if manifest.signature_yara else None
+        ),
+    }
 
-## JSON Manifest
-{manifest.model_dump_json(indent=2)}
+    user_prompt = f"""Generate an analyst report from the following grounded data ONLY.
+Do not use any information, technique IDs, technique names, or threat intelligence
+that is not explicitly present in the data blocks below.
+
+## JSON Manifest (grounded facts from static analysis)
+{json.dumps(manifest_summary, indent=2)}
 
 ## Risk Score Breakdown
 {risk_score.model_dump_json(indent=2)}
 
-## MITRE ATT&CK Mobile Ontology Context (verified facts, safe to cite)
+## MITRE ATT&CK Mobile Ontology Context (ONLY cite techniques listed here)
 {json.dumps(ontology_context, indent=2)}
 
 ## Known Coverage Limitations (state these explicitly in the report)
 {json.dumps(limitations, indent=2)}
 """
 
-    # Ollama exposes an OpenAI-compatible API — no real key needed.
+    # temperature=0 — greedy decode; eliminates stochastic drift that causes
+    # the model to "helpfully" add technique context it wasn’t given.
+    # Do NOT raise this without explicit justification.
     client = OpenAI(
         base_url=settings.ollama_base_url,
         api_key="ollama",  # required by the client constructor; ignored by Ollama
@@ -91,6 +177,8 @@ information beyond what's given here.
         response = client.chat.completions.create(
             model=settings.ollama_model,
             max_tokens=2000,
+            temperature=0,   # greedy decode — critical for hallucination prevention
+            top_p=1.0,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
@@ -103,5 +191,10 @@ information beyond what's given here.
         ) from e
 
     narrative = response.choices[0].message.content or ""
+
+    # Post-generation grounding check — warn if the LLM cited technique IDs
+    # that were not in the provided ontology context block.
+    provided_ids = {ctx["technique_id"] for ctx in ontology_context}
+    _grounding_check(narrative, provided_ids)
 
     return narrative, limitations

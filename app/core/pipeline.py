@@ -287,6 +287,8 @@ class AnalysisPipeline:
             family_confidence = predictions[predicted_family]
         except FileNotFoundError:
             logger.warning("[Phase 5] Family model not found (auxiliary). No family label.")
+        except (ValueError, Exception) as e:
+            logger.warning(f"[Phase 5] Family model inference failed (auxiliary): {e}")
 
         duration = time.time() - start_time
         logger.info(

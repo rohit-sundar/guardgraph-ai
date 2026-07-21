@@ -24,7 +24,11 @@ def lookup_signature(sha256: str) -> dict | None:
     except Exception:
         # Neo4j not reachable (e.g. Docker not up) — degrade to cold path.
         return None
-    if not rows or rows[0].get("family") is None:
+    # Gate on SHA-256 presence (the Sample node), NOT on family — the family
+    # classifier is often untrained in the prototype so predicted_family may
+    # be None even after a successful cold-path run. Gating on family caused
+    # every second request to fall back to cold path (cache never hit).
+    if not rows or rows[0].get("sha256") is None:
         return None
     return rows[0]
 

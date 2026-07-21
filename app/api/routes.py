@@ -145,10 +145,14 @@ def _run_analysis(filepath: str) -> AnalysisReport:
     # --- Phase 7: Explainable Reporting ---
     narrative, limitations = AnalysisPipeline.run_phase7_reporting(manifest, risk_score)
 
-    if not cache_hit and predicted_family:
+    # Always persist after a cold-path run so the hot path fires on the next
+    # request for the same SHA-256. predicted_family may be None when the
+    # auxiliary family classifier is untrained — that's fine, store "" and
+    # let lookup_signature gate on SHA-256 presence instead of family.
+    if not cache_hit:
         store_signature(
             sha256=ingestion.sha256,
-            family=predicted_family,
+            family=predicted_family or "",
             risk_score=risk_score.total_score,
             ttps=list(predicted_ttps.keys()),
             narrative=narrative,
