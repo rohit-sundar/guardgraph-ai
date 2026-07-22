@@ -47,6 +47,10 @@ RISKY_PERMISSIONS = {
     "android.permission.SEND_SMS": 0.7,
     "android.permission.SYSTEM_ALERT_WINDOW": 0.6,
     "android.permission.REQUEST_INSTALL_PACKAGES": 0.5,
+    "android.permission.PACKAGE_USAGE_STATS": 0.55,
+    "android.permission.QUERY_ALL_PACKAGES": 0.5,
+    "android.permission.BIND_DEVICE_ADMIN": 0.7,
+    "android.permission.RECEIVE_BOOT_COMPLETED": 0.35,
 }
 
 # Per-behavior severity weights for the forensic anchor component (§9.3).
@@ -55,9 +59,26 @@ BEHAVIOR_SEVERITY = {
     "STEALTH_SMS_INTERCEPTION": 1.0,  # proven SMS interception API present
     "OTP_INTERCEPTION":         0.95,  # OTP theft string + SMS permissions
     "CREDENTIAL_HARVESTING":    0.9,   # accessibility/webview overlay pattern
-    "C2_BEHAVIOR":              0.7,   # network contact (also benign, lower weight)
+    "ACCESSIBILITY_ABUSE":      0.9,   # keylogging / gesture control capability
+    "C2_BEHAVIOR":              0.75,  # high-signal C2 channels (telegram/firebase/onion)
+    "DYNAMIC_CODE_LOADING":     0.7,   # dropper / stage-2 loading
     "DYNAMIC_REFLECTION":       0.6,   # evasion capability
     "CRYPTOGRAPHY_USAGE":       0.4,   # present in many benign apps too
+}
+
+# Permission-matrix flag severity (banking-trojan combo patterns from apk_static).
+MATRIX_FLAG_SEVERITY = {
+    "OVERLAY_ATTACK_PATTERN":         0.95,
+    "OVERLAY_BOOT_PERSISTENCE":       0.8,
+    "SMS_OTP_STEALER_PATTERN":        1.0,
+    "SMS_OTP_SENDER_PATTERN":         0.9,
+    "DROPPER_STAGE2_PATTERN":         0.85,
+    "DEVICE_ADMIN_PERSISTENCE":       0.75,
+    "BANKING_TARGET_ENUMERATION":     0.7,
+    "ACCESSIBILITY_FULL_CONTROL":     0.95,
+    "ACCESSIBILITY_WINDOW_CONTENT":   0.9,
+    "ACCESSIBILITY_GESTURE_CONTROL":  0.85,
+    "ACCESSIBILITY_KEYLOGGING_MASK":  0.95,
 }
 
 
@@ -68,15 +89,30 @@ def classifier_confidence_component(predicted_ttps: dict[str, float]) -> float:
     return max(predicted_ttps.values())
 
 
-def permission_api_risk_component(permissions: list[str]) -> float:
-    if not permissions:
+def permission_api_risk_component(
+    permissions: list[str],
+    permission_matrix_flags: list[str] | None = None,
+) -> float:
+    """
+    Single-permission risk plus multi-permission matrix combos
+    (overlay attack, OTP stealer, dropper patterns from apk_static).
+    """
+    if not permissions and not permission_matrix_flags:
         return 0.0
-    scores = [RISKY_PERMISSIONS.get(p, 0.0) for p in permissions]
-    # normalize: average of matched risky permissions, capped at 1.0
+    scores = [RISKY_PERMISSIONS.get(p, 0.0) for p in (permissions or [])]
     matched = [s for s in scores if s > 0]
-    if not matched:
-        return 0.0
-    return min(1.0, sum(matched) / len(matched) + 0.1 * (len(matched) - 1))
+    base = 0.0
+    if matched:
+        base = min(1.0, sum(matched) / len(matched) + 0.1 * (len(matched) - 1))
+
+    # Matrix flags are stronger than individual perms — boost toward 1.0
+    matrix_boost = 0.0
+    for flag in permission_matrix_flags or []:
+        matrix_boost = max(matrix_boost, MATRIX_FLAG_SEVERITY.get(flag, 0.6))
+    if matrix_boost > 0:
+        # Blend: matrix evidence dominates when present
+        return min(1.0, max(base, 0.55 * base + 0.55 * matrix_boost))
+    return base
 
 
 def _technique_severity(ttp: str) -> float:
@@ -169,19 +205,23 @@ def ioc_component(
     signature_match_count: int = 0,
     yara_match_count: int = 0,
     yara_max_severity: float = 0.0,
+    extracted_c2_count: int = 0,
+    cert_anomaly_count: int = 0,
+    secondary_dex_count: int = 0,
+    dropper_signal_count: int = 0,
 ) -> float:
     """
-    IOC score — combines C2 network indicators with signature detection
-    and YARA scan results.
+    IOC score — combines C2 network indicators with signature detection,
+    YARA scan results, certificate anomalies, and dropper payload signals.
 
-    §sig: Hash/cert signature matches are strong IOC signals (known-bad
-    sample). YARA rule matches are medium-strength IOC signals, weighted
-    by rule severity. C2 indicators remain as the weakest signal layer.
-
-    The scoring tiers:
+    Scoring tiers:
     - Signature hit: +0.5 per match (hash match = near-certain bad)
     - YARA hit: +severity * 0.3 per match (rule-severity-weighted)
-    - C2 indicator: +0.3 per match (original behavior)
+    - Extracted C2 IoCs (telegram/firebase/onion/raw IP): +0.35 each
+    - Forensic C2_BEHAVIOR string hits: +0.2 each (weaker than exact IoCs)
+    - Certificate anomalies (debug key / self-signed junk): +0.15 each
+    - Secondary/hidden DEX payloads: +0.2 each (capped)
+    - Dropper signals: +0.1 each (capped)
     """
     score = 0.0
 
@@ -192,8 +232,20 @@ def ioc_component(
     if yara_match_count > 0:
         score += yara_max_severity * 0.3 * min(yara_match_count, 3)
 
-    # C2 indicators — original behavior
-    score += matched_c2_indicators * 0.3
+    # Exact extracted C2 IoCs (telegram bot tokens, firebase, etc.)
+    score += min(0.7, extracted_c2_count * 0.35)
+
+    # Forensic dictionary C2_BEHAVIOR string hits (weaker)
+    score += min(0.3, matched_c2_indicators * 0.2)
+
+    # Certificate anomalies
+    score += min(0.4, cert_anomaly_count * 0.15)
+
+    # Hidden / secondary DEX payloads
+    score += min(0.4, secondary_dex_count * 0.2)
+
+    # Dropper / dynload / overlay-template signals
+    score += min(0.3, dropper_signal_count * 0.1)
 
     return min(1.0, score)
 
@@ -212,12 +264,20 @@ def compute_risk_score(
     yara_match_count: int = 0,
     yara_max_severity: float = 0.0,
     is_known_malware: bool = False,
+    # Advanced Android static anchors
+    permission_matrix_flags: list[str] | None = None,
+    extracted_c2_count: int = 0,
+    cert_anomaly_count: int = 0,
+    secondary_dex_count: int = 0,
+    dropper_signal_count: int = 0,
 ) -> RiskScoreBreakdown:
     if matched_anchor_behaviors is None:
         matched_anchor_behaviors = set()
 
     c1 = classifier_confidence_component(predicted_ttps)
-    c2 = permission_api_risk_component(permissions)
+    c2 = permission_api_risk_component(
+        permissions, permission_matrix_flags=permission_matrix_flags
+    )
     c3 = ttp_severity_component(predicted_ttps)
     c4 = forensic_anchor_component(matched_anchor_behaviors)
     c5 = obfuscation_component(obfuscation, entropy_threshold)
@@ -227,6 +287,10 @@ def compute_risk_score(
         signature_match_count=signature_match_count,
         yara_match_count=yara_match_count,
         yara_max_severity=yara_max_severity,
+        extracted_c2_count=extracted_c2_count,
+        cert_anomaly_count=cert_anomaly_count,
+        secondary_dex_count=secondary_dex_count,
+        dropper_signal_count=dropper_signal_count,
     )
 
     # Revised weights (§9.3): 0.25 + 0.20 + 0.15 + 0.15 + 0.15 + 0.05 + 0.05 = 1.00

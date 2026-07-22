@@ -397,6 +397,7 @@ def scan_file(filepath: str, rules_dir: str = "") -> list[dict]:
             "description": str(meta.get("description", "")),
             "category": str(meta.get("category", "unknown")),
             "matched_strings": list(set(matched_strings))[:20],  # dedupe, cap at 20
+            "scan_target": "apk",
         })
 
     if matches:
@@ -405,10 +406,10 @@ def scan_file(filepath: str, rules_dir: str = "") -> list[dict]:
     return matches
 
 
-def scan_bytes(data: bytes, rules_dir: str = "") -> list[dict]:
+def scan_bytes(data: bytes, rules_dir: str = "", scan_target: str = "bytes") -> list[dict]:
     """
     Scans raw bytes (e.g. extracted DEX content) against compiled YARA rules.
-    Same return format as scan_file().
+    Same return format as scan_file(), plus scan_target label.
     """
     if not YARA_AVAILABLE:
         return []
@@ -420,7 +421,7 @@ def scan_bytes(data: bytes, rules_dir: str = "") -> list[dict]:
     try:
         raw_matches = rules.match(data=data)
     except yara.Error as e:
-        logger.error(f"YARA byte scan failed: {e}")
+        logger.error(f"YARA byte scan failed ({scan_target}): {e}")
         return []
 
     matches: list[dict] = []
@@ -441,6 +442,87 @@ def scan_bytes(data: bytes, rules_dir: str = "") -> list[dict]:
             "description": str(meta.get("description", "")),
             "category": str(meta.get("category", "unknown")),
             "matched_strings": list(set(matched_strings))[:20],
+            "scan_target": scan_target,
         })
 
     return matches
+
+
+def scan_apk_with_payloads(
+    filepath: str,
+    payload_targets: list[tuple[str, bytes]] | None = None,
+    rules_dir: str = "",
+) -> tuple[list[dict], list[str]]:
+    """
+    Defense-in-depth YARA scan that covers:
+
+      1. The outer .apk ZIP container on disk (packed bytes)
+      2. Uncompressed inner streams (classes*.dex, hidden asset DEX/ZIP payloads)
+
+    ZIP compression can hide ASCII/hex strings from rules that match over the
+    raw .apk file; scanning uncompressed DEX/asset bytes closes that gap.
+
+    Returns (deduped_matches, scan_target_labels).
+    Matches for the same rule_name are merged (union of matched_strings,
+    max severity, combined scan_target labels).
+    """
+    all_matches: list[dict] = []
+    targets_scanned: list[str] = []
+
+    # 1) Outer APK file
+    file_matches = scan_file(filepath, rules_dir=rules_dir)
+    for m in file_matches:
+        m.setdefault("scan_target", "apk")
+    all_matches.extend(file_matches)
+    targets_scanned.append("apk")
+
+    # 2) Uncompressed payloads (DEX / disguised assets)
+    for label, data in (payload_targets or []):
+        if not data:
+            continue
+        targets_scanned.append(label)
+        try:
+            byte_matches = scan_bytes(data, rules_dir=rules_dir, scan_target=label)
+            all_matches.extend(byte_matches)
+        except Exception as e:
+            logger.warning(f"YARA payload scan failed for {label}: {e}")
+
+    merged = _dedupe_yara_matches(all_matches)
+    if merged:
+        logger.warning(
+            f"YARA scan matched {len(merged)} rule(s) across {len(targets_scanned)} target(s): "
+            f"{[m['rule_name'] for m in merged]}"
+        )
+    return merged, targets_scanned
+
+
+def _dedupe_yara_matches(matches: list[dict]) -> list[dict]:
+    """Merge matches that share the same rule_name across scan targets."""
+    by_rule: dict[str, dict] = {}
+    for m in matches:
+        name = m.get("rule_name", "")
+        if name not in by_rule:
+            by_rule[name] = {
+                "rule_name": name,
+                "tags": list(m.get("tags") or []),
+                "severity": float(m.get("severity", 0.5)),
+                "description": str(m.get("description", "")),
+                "category": str(m.get("category", "unknown")),
+                "matched_strings": list(m.get("matched_strings") or []),
+                "scan_target": str(m.get("scan_target", "apk")),
+            }
+            continue
+
+        existing = by_rule[name]
+        existing["severity"] = max(existing["severity"], float(m.get("severity", 0.0)))
+        # Union tags / strings
+        existing["tags"] = list(set(existing["tags"]) | set(m.get("tags") or []))
+        existing["matched_strings"] = list(
+            set(existing["matched_strings"]) | set(m.get("matched_strings") or [])
+        )[:20]
+        # Record all targets that hit this rule
+        targets = {t.strip() for t in existing["scan_target"].split("|") if t.strip()}
+        targets.add(str(m.get("scan_target", "")))
+        existing["scan_target"] = "|".join(sorted(t for t in targets if t))
+
+    return list(by_rule.values())

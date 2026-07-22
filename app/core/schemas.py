@@ -20,6 +20,15 @@ class IngestionResult(BaseModel):
     # multi-label TTP feature vector's intent vocabulary). Empty when extraction
     # fails; the legacy 33-feature family model does not read this field.
     intent_actions: list[str] = []
+    # Advanced Android malware static anchors (banking trojans / droppers / OTP theft)
+    c2_indicators: list[str] = []
+    cert_anomalies: list[str] = []
+    permission_matrix_flags: list[str] = []
+    secondary_dex_count: int = 0
+    accessibility_flags: list[str] = []
+    exported_risks: list[str] = []
+    payload_assets: list[str] = []
+    dropper_signals: list[str] = []
 
 
 class BehavioralSubgraph(BaseModel):
@@ -69,6 +78,8 @@ class YaraMatch(BaseModel):
     description: str = ""
     category: str = "unknown"
     matched_strings: list[str] = []  # which string identifiers triggered
+    # Which scan target produced the hit (apk file path, dex:classes.dex, etc.)
+    scan_target: str = "apk"
 
 
 class SignatureYaraResult(BaseModel):
@@ -77,6 +88,8 @@ class SignatureYaraResult(BaseModel):
     yara_matches: list[YaraMatch] = []
     is_known_malware: bool = False   # any signature hash hit → true
     combined_severity: float = 0.0   # max severity across all matches
+    # Targets scanned (apk + uncompressed DEX/asset streams)
+    yara_scan_targets: list[str] = []
 
 
 class AnalysisManifest(BaseModel):
@@ -93,6 +106,15 @@ class AnalysisManifest(BaseModel):
     # Signature detection + YARA scanning results (Phase 1.5).
     # None on hot-path cache hits (scanning is skipped).
     signature_yara: Optional[SignatureYaraResult] = None
+    # Advanced Android malware static anchors (fed to GraphRAG + risk scoring)
+    c2_indicators: list[str] = []
+    cert_anomalies: list[str] = []
+    permission_matrix_flags: list[str] = []
+    secondary_dex_count: int = 0
+    accessibility_flags: list[str] = []
+    exported_risks: list[str] = []
+    payload_assets: list[str] = []
+    dropper_signals: list[str] = []
 
 
 class RiskScoreBreakdown(BaseModel):

@@ -6,6 +6,31 @@
 
 ## Change Log
 
+### Session 7 — 2026-07-22 | Author: Tarun — Android Malware Static Enrichments (C2 IoCs, Permission Matrices, Cert Anomalies, Secondary DEX Payloads, Uncompressed YARA Scanning)
+
+> **Overview:** Comprehensive static malware analysis expansion targeting Android banking trojans, droppers, credential stealers, and evasion techniques. Extracted C2 channels, permission matrix patterns, certificate anomalies, secondary DEX payloads, and accessibility configuration flags directly into the analysis manifest and risk scoring engine.
+
+**Files changed:** `app/analysis/apk_static.py` [NEW], `app/analysis/ingest.py` [MOD], `app/analysis/yara_engine.py` [MOD], `app/core/schemas.py` [MOD], `app/reports/scoring.py` [MOD], `tests/test_apk_enhancements.py` [NEW]
+
+- **`app/analysis/apk_static.py`** [NEW]: Comprehensive Android static malware analyzer for banking trojans, droppers, and OTP stealers:
+  - **C2 Threat Intel Extractor**: Pulls Telegram bot tokens/APIs (`telegram_bot:`), Firebase endpoints (`firebase:`), Discord webhooks (`discord_webhook:`), TOR `.onion` URLs (strictly validated against Tor base32 character encoding `[a-z2-7]`), raw IP:port endpoints (`raw_ip:`), and C2 panel gate URLs (`panel_url:`).
+  - **Permission Matrix Risk Rules**: Detects multi-permission behavioral attack patterns:
+    - `OVERLAY_ATTACK_PATTERN` (`SYSTEM_ALERT_WINDOW` + `PACKAGE_USAGE_STATS` / `QUERY_ALL_PACKAGES`)
+    - `SMS_OTP_STEALER_PATTERN` (`BIND_ACCESSIBILITY_SERVICE` + `READ_SMS` / `RECEIVE_SMS`)
+    - `DROPPER_STAGE2_PATTERN` (`REQUEST_INSTALL_PACKAGES` + `INTERNET`)
+    - `DEVICE_ADMIN_PERSISTENCE` (`BIND_DEVICE_ADMIN`)
+    - `BANKING_TARGET_ENUMERATION` (`QUERY_ALL_PACKAGES` + `INTERNET`)
+  - **Certificate Anomaly Parser**: Analyzes X.509 certificates for debug keys (`CN=Android Debug`), generic/test subjects (`CN=test`), self-signed junk fields, and expired/future validity dates.
+  - **Secondary DEX & Asset Payload Inspection**: Walks APK ZIP entries to count secondary DEX files (`classes2.dex`, `classes3.dex`) and assets with hidden `dex\n` / `PK\x03\x04` magic bytes, HTML banking overlay templates, and disguised native libraries.
+  - **Accessibility Config XML Parser**: Parses XML accessibility resources for `canRetrieveWindowContent="true"`, `canPerformGestures="true"`, and event listening masks.
+- **`app/analysis/ingest.py`** [MOD]: Integrated static enrichments into Phase 1 ingestion (`ingest_apk`), returning populated static anchor fields and uncompressed payload targets for Phase 1.5 YARA scanning.
+- **`app/analysis/yara_engine.py`** [MOD]: Enhanced `scan_apk_with_payloads` to scan uncompressed DEX and asset byte streams in addition to the outer `.apk` ZIP file, eliminating ZIP compression evasion.
+- **`app/core/schemas.py`** [MOD, additive]: Extended `IngestionResult` and `AnalysisManifest` with `c2_indicators`, `cert_anomalies`, `permission_matrix_flags`, `secondary_dex_count`, `accessibility_flags`, `exported_risks`, `payload_assets`, and `dropper_signals`.
+- **`app/reports/scoring.py`** [MOD]: Integrated matrix flags, C2 counts, cert anomalies, secondary DEX counts, and dropper signals into `permission_api_component`, `reputation_component`, and `ioc_component`.
+- **`tests/test_apk_enhancements.py`** [NEW]: Unit test suite covering C2 extraction, permission matrices, cert anomalies, Tor base32 validation, and schema validation. Full test suite passing (8/8 green).
+
+---
+
 ### Session 6 — 2026-07-17 | Author: Rohit — Fix CFG construction crash on Androguard 4.1.2 (cold path was fully dead)
 
 > **Symptom:** `/analyze` returned HTTP 200 but every sample came back with `total_nodes_parsed: 0`,

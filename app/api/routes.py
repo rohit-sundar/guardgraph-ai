@@ -54,8 +54,10 @@ async def analyze(file: UploadFile = File(...)):
 from app.core.pipeline import AnalysisPipeline
 
 def _run_analysis(filepath: str) -> AnalysisReport:
-    # --- Phase 1: Ingestion & Metadata ---
-    ingestion, apk_obj, dvm, analysis_obj = AnalysisPipeline.run_phase1_ingestion(filepath)
+    # --- Phase 1: Ingestion & Metadata (+ Android malware static enrichments) ---
+    ingestion, apk_obj, dvm, analysis_obj, yara_targets = (
+        AnalysisPipeline.run_phase1_ingestion(filepath)
+    )
 
     # --- Hot path: cache lookup ---
     cached = lookup_signature(ingestion.sha256)
@@ -72,6 +74,11 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             cache_hit=True,
             cached_score=cached.get("base_score"),
             matched_c2_indicators=0,
+            permission_matrix_flags=ingestion.permission_matrix_flags,
+            extracted_c2_count=len(ingestion.c2_indicators),
+            cert_anomaly_count=len(ingestion.cert_anomalies),
+            secondary_dex_count=ingestion.secondary_dex_count,
+            dropper_signal_count=len(ingestion.dropper_signals),
         )
         manifest = AnalysisManifest(
             target_package=ingestion.package_name,
@@ -85,6 +92,14 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             predicted_family=cached.get("family"),
             family_confidence=None,
             signature_yara=None,  # skipped on hot path
+            c2_indicators=ingestion.c2_indicators,
+            cert_anomalies=ingestion.cert_anomalies,
+            permission_matrix_flags=ingestion.permission_matrix_flags,
+            secondary_dex_count=ingestion.secondary_dex_count,
+            accessibility_flags=ingestion.accessibility_flags,
+            exported_risks=ingestion.exported_risks,
+            payload_assets=ingestion.payload_assets,
+            dropper_signals=ingestion.dropper_signals,
         )
         narrative = cached.get("narrative", "")
         limitations = cached.get("limitations", [])
@@ -100,14 +115,19 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             limitations=limitations,
         )
 
-    # --- Phase 1.5: Signature Detection & YARA Scanning ---
-    sig_yara = AnalysisPipeline.run_phase1b_signature_yara(filepath, ingestion)
+    # --- Phase 1.5: Signature Detection & YARA (APK + uncompressed DEX/assets) ---
+    sig_yara = AnalysisPipeline.run_phase1b_signature_yara(
+        filepath, ingestion, yara_targets=yara_targets
+    )
 
     # --- Phase 2: Graph Representation ---
     cfgs, parse_failure_rate = AnalysisPipeline.run_phase2_graph_construction(analysis_obj)
 
     # --- Phase 3: Forensic Matching & Subgraph Extraction ---
     all_matches, behavioral_subgraphs, all_strings = AnalysisPipeline.run_phase3_forensic_matching(cfgs)
+
+    # Merge C2 IoCs found in DEX string literals into ingestion
+    ingestion = AnalysisPipeline.merge_c2_from_strings(ingestion, all_strings)
 
     # --- Phase 4: Feature Engineering (family 33-vec + multi-label TTP 179-vec) ---
     obfuscation, feature_vector, ttp_feature_vector, mean_density, total_nodes = (
@@ -134,12 +154,21 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         predicted_family=predicted_family,
         family_confidence=family_confidence,
         signature_yara=sig_yara,
+        c2_indicators=ingestion.c2_indicators,
+        cert_anomalies=ingestion.cert_anomalies,
+        permission_matrix_flags=ingestion.permission_matrix_flags,
+        secondary_dex_count=ingestion.secondary_dex_count,
+        accessibility_flags=ingestion.accessibility_flags,
+        exported_risks=ingestion.exported_risks,
+        payload_assets=ingestion.payload_assets,
+        dropper_signals=ingestion.dropper_signals,
     )
 
-    # --- Phase 6: Risk Scoring ---
+    # --- Phase 6: Risk Scoring (includes static malware anchors) ---
     risk_score = AnalysisPipeline.run_phase6_risk_scoring(
         predicted_ttps, ingestion.permissions, obfuscation, all_matches, cache_hit, None,
         sig_yara=sig_yara,
+        ingestion=ingestion,
     )
 
     # --- Phase 7: Explainable Reporting ---

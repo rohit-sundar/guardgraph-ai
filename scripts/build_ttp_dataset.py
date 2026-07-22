@@ -78,7 +78,7 @@ def extract_ttp_row(apk_path: str) -> tuple[list[float], dict] | None:
     Returns None if the APK cannot be parsed. Keep in sync with pipeline Phase 4.
     """
     try:
-        ingestion, apk_obj, dvm, analysis_obj = ingest_apk(apk_path)
+        ingestion, apk_obj, dvm, analysis_obj, _yara_targets = ingest_apk(apk_path)
     except Exception as e:
         logger.error(f"[dataset] ingest failed for {apk_path}: {e}")
         return None

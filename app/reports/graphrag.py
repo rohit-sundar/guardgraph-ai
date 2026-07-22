@@ -42,30 +42,36 @@ STRICT RULES — violating ANY of these makes the report unusable:
    analyzed, or a technique has low confidence), say so explicitly using
    phrasing like "not observed" or "not statically resolved" — do NOT guess.
 3. Clearly separate deterministic findings (hash matches, permission declarations,
-   matched APIs) from model predictions (classifier confidence, predicted TTPs).
+   matched APIs, extracted C2 IoCs, permission matrix flags, certificate anomalies,
+   accessibility config flags, secondary DEX / dropper signals, exported component risks)
+   from model predictions (classifier confidence, predicted TTPs).
 4. Always include the confidence value alongside any predicted TTP.
-5. Do NOT mention any MITRE technique ID (e.g. T1636) or technique name that is
+5. When present, explicitly cite:
+   - c2_indicators (Telegram bots, Firebase, Discord webhooks, TOR, raw IP:port)
+   - permission_matrix_flags (OVERLAY_ATTACK_PATTERN, SMS_OTP_STEALER_PATTERN, etc.)
+   - accessibility_flags (canRetrieveWindowContent, typeAllMasks keylogging masks)
+   - cert_anomalies (debug keys, self-signed, expired)
+   - secondary_dex_count / payload_assets / dropper_signals
+   - exported_risks (unprotected exported receivers/services)
+6. Do NOT mention any MITRE technique ID (e.g. T1636) or technique name that is
    NOT present in the "## MITRE ATT&CK Mobile Ontology Context" section below.
    If you have general knowledge of a technique but it is absent from that block,
    do not cite it — say "no ontology context provided for this technique" instead.
-6. End with a "Recommended Analyst Actions" section in priority order.
-7. Do not use hedging filler language beyond what's needed for genuine uncertainty.
-8. If the risk score breakdown has "zero_day_indicator": true, prominently flag
+7. End with a "Recommended Analyst Actions" section in priority order.
+8. Do not use hedging filler language beyond what's needed for genuine uncertainty.
+9. If the risk score breakdown has "zero_day_indicator": true, prominently flag
    this as a POSSIBLE NOVEL / ZERO-DAY VARIANT. Explain that the verdict rests on
    model-free evidence (deterministic matched APIs/permissions and/or structural
    obfuscation/coverage signals) while the classifier has low familiarity — not on
    classifier confidence alone.
-9. Do not add sections, bullet points, or conclusions that go beyond what the data
+10. Do not add sections, bullet points, or conclusions that go beyond what the data
    supports. If a section would require invented evidence, omit it entirely.
-
-OUTPUT FORMAT (use exactly these section headers, in this order):
-## Executive Summary
-## Deterministic Findings
-## Model Predictions
-## Risk Score Breakdown
-## Coverage Limitations
-## Recommended Analyst Actions
-
+7. Do not use hedging filler language beyond what's needed for genuine uncertainty.
+8. If the risk score breakdown has "zero_day_indicator": true, prominently flag this as a
+   POSSIBLE NOVEL / ZERO-DAY VARIANT. Explain that the verdict rests on model-free evidence
+   (deterministic matched APIs/permissions and/or structural obfuscation/coverage signals)
+   while the classifier has low familiarity with this sample — not on classifier confidence.
+>>>>>>> 364c1bf (feat(analysis): add static malware anchors (C2 IoCs, permission matrices, cert anomalies, secondary DEX payloads, uncompressed YARA byte scanning))
 Write for a bank fraud-operations audience: clear, direct, actionable.
 """
 

@@ -37,7 +37,45 @@ FORENSIC_DICTIONARY = {
     "C2_BEHAVIOR": {
         "apis": ["Ljava/net/HttpURLConnection;->connect"],
         "permissions": [],
-        "strings": ["http://", "https://"],  # refine: flag non-standard TLDs / raw IPs specifically
+        # Prefer high-signal C2 channels over bare http(s):// (too many benign SDK hits).
+        # Exact IoCs are extracted separately by apk_static.extract_c2_indicators.
+        "strings": [
+            "api.telegram.org/bot",
+            "firebaseio.com",
+            "firebaseapp.com",
+            "discord.com/api/webhooks",
+            "discordapp.com/api/webhooks",
+            ".onion",
+            "sendMessage",
+            "gate.php",
+            "/panel/",
+            "InMemoryDexClassLoader",
+            "DexClassLoader",
+        ],
+    },
+    "DYNAMIC_CODE_LOADING": {
+        "apis": [],
+        "permissions": [],
+        "strings": [
+            "DexClassLoader",
+            "PathClassLoader",
+            "InMemoryDexClassLoader",
+            "openDexFile",
+            "dalvik.system.DexClassLoader",
+        ],
+    },
+    "ACCESSIBILITY_ABUSE": {
+        "apis": [
+            "Landroid/accessibilityservice/AccessibilityService",
+            "Landroid/view/accessibility/AccessibilityNodeInfo",
+        ],
+        "permissions": ["android.permission.BIND_ACCESSIBILITY_SERVICE"],
+        "strings": [
+            "onAccessibilityEvent",
+            "canRetrieveWindowContent",
+            "typeAllMasks",
+            "performGlobalAction",
+        ],
     },
 }
 

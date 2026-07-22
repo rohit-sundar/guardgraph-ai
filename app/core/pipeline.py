@@ -22,7 +22,8 @@ from app.analysis.forensic import match_anchors, extract_anchor_subgraph
 from app.analysis.topology import compute_topological_invariants, aggregate_subgraph_invariants
 from app.analysis.obfuscation import build_obfuscation_signal
 from app.analysis.signatures import match_signatures
-from app.analysis.yara_engine import scan_file as yara_scan_file
+from app.analysis.yara_engine import scan_apk_with_payloads
+from app.analysis.apk_static import extract_c2_indicators
 from app.ml.classifier import classifier, ttp_classifier
 from app.ml.features import build_feature_vector, build_ttp_feature_vector
 from app.reports.scoring import compute_risk_score
@@ -46,18 +47,31 @@ from app.core.schemas import (
 
 class AnalysisPipeline:
     @staticmethod
-    def run_phase1_ingestion(filepath: str) -> Tuple[IngestionResult, Any, Any, Any]:
-        """Phase 1: Hashing, certificate extraction, and basic structure identification."""
+    def run_phase1_ingestion(
+        filepath: str,
+    ) -> Tuple[IngestionResult, Any, Any, Any, List[Tuple[str, bytes]]]:
+        """Phase 1: Hashing, cert, structure, and Android malware static enrichments."""
         logger.info("[Phase 1] Starting Ingestion & Metadata Extraction...")
         start_time = time.time()
-        ingestion, apk_obj, dvm, analysis_obj = ingest_apk(filepath)
+        ingestion, apk_obj, dvm, analysis_obj, yara_targets = ingest_apk(filepath)
         duration = time.time() - start_time
-        logger.info(f"[Phase 1] Completed in {duration:.3f}s. Package: {ingestion.package_name}")
-        return ingestion, apk_obj, dvm, analysis_obj
+        logger.info(
+            f"[Phase 1] Completed in {duration:.3f}s. Package: {ingestion.package_name} | "
+            f"C2={len(ingestion.c2_indicators)} matrix={ingestion.permission_matrix_flags} "
+            f"secondary_dex={ingestion.secondary_dex_count}"
+        )
+        return ingestion, apk_obj, dvm, analysis_obj, yara_targets
 
     @staticmethod
-    def run_phase1b_signature_yara(filepath: str, ingestion: IngestionResult) -> SignatureYaraResult:
-        """Phase 1.5: Run signature hash/cert matching and YARA rule scanning."""
+    def run_phase1b_signature_yara(
+        filepath: str,
+        ingestion: IngestionResult,
+        yara_targets: Optional[List[Tuple[str, bytes]]] = None,
+    ) -> SignatureYaraResult:
+        """
+        Phase 1.5: Signature hash/cert matching + YARA over the APK *and*
+        uncompressed inner DEX/asset streams (ZIP compression evasion guard).
+        """
         logger.info("[Phase 1.5] Starting Signature Detection & YARA Scanning...")
         start_time = time.time()
 
@@ -71,8 +85,12 @@ class AnalysisPipeline:
             SignatureMatch(**m) for m in sig_matches_raw
         ]
 
-        # YARA scanning (APK binary)
-        yara_matches_raw = yara_scan_file(filepath, rules_dir=settings.yara_rules_dir)
+        # YARA: outer APK + uncompressed DEX/asset payloads
+        yara_matches_raw, scan_targets = scan_apk_with_payloads(
+            filepath,
+            payload_targets=yara_targets or [],
+            rules_dir=settings.yara_rules_dir,
+        )
         yara_matches = [
             YaraMatch(**m) for m in yara_matches_raw
         ]
@@ -92,13 +110,14 @@ class AnalysisPipeline:
             yara_matches=yara_matches,
             is_known_malware=is_known,
             combined_severity=round(combined_severity, 4),
+            yara_scan_targets=scan_targets,
         )
 
         duration = time.time() - start_time
         logger.info(
             f"[Phase 1.5] Completed in {duration:.3f}s. "
             f"Signature matches: {len(sig_matches)}, YARA matches: {len(yara_matches)}, "
-            f"Known malware: {is_known}"
+            f"YARA targets: {len(scan_targets)}, Known malware: {is_known}"
         )
         return result
 
@@ -152,6 +171,21 @@ class AnalysisPipeline:
         duration = time.time() - start_time
         logger.info(f"[Phase 3] Completed in {duration:.3f}s. Matched {len(behavioral_subgraphs)} suspicious behavioral subgraphs.")
         return all_matches, behavioral_subgraphs, all_strings
+
+    @staticmethod
+    def merge_c2_from_strings(ingestion: IngestionResult, all_strings: List[str]) -> IngestionResult:
+        """
+        Re-run C2 regex extraction over CFG string literals and merge into
+        ingestion.c2_indicators (assets were already scanned at ingest time).
+        """
+        extra = extract_c2_indicators(all_strings)
+        if not extra:
+            return ingestion
+        merged = sorted(set(list(ingestion.c2_indicators) + extra))
+        if merged != list(ingestion.c2_indicators):
+            logger.info(f"[Phase 3+] Merged C2 IoCs from DEX strings: {merged}")
+            return ingestion.model_copy(update={"c2_indicators": merged})
+        return ingestion
 
     @staticmethod
     def run_phase4_feature_engineering(
@@ -306,6 +340,7 @@ class AnalysisPipeline:
         cache_hit: bool = False,
         cached_score: Optional[float] = None,
         sig_yara: Optional[SignatureYaraResult] = None,
+        ingestion: Optional[IngestionResult] = None,
     ) -> RiskScoreBreakdown:
         """Phase 6: Calculate weighted risk score component breakdown and verdict."""
         logger.info("[Phase 6] Starting Risk Scoring...")
@@ -324,6 +359,19 @@ class AnalysisPipeline:
                 yara_max_severity = max(m.severity for m in sig_yara.yara_matches)
             is_known_malware = sig_yara.is_known_malware
 
+        # Advanced static anchors from ingestion (C2 IoCs, cert, dropper, matrix)
+        matrix_flags: List[str] = []
+        extracted_c2 = 0
+        cert_anoms = 0
+        secondary_dex = 0
+        dropper_sigs = 0
+        if ingestion is not None:
+            matrix_flags = list(ingestion.permission_matrix_flags or [])
+            extracted_c2 = len(ingestion.c2_indicators or [])
+            cert_anoms = len(ingestion.cert_anomalies or [])
+            secondary_dex = int(ingestion.secondary_dex_count or 0)
+            dropper_sigs = len(ingestion.dropper_signals or [])
+
         risk_score = compute_risk_score(
             predicted_ttps=predicted_ttps,
             permissions=permissions,
@@ -337,6 +385,11 @@ class AnalysisPipeline:
             yara_match_count=yara_match_count,
             yara_max_severity=yara_max_severity,
             is_known_malware=is_known_malware,
+            permission_matrix_flags=matrix_flags,
+            extracted_c2_count=extracted_c2,
+            cert_anomaly_count=cert_anoms,
+            secondary_dex_count=secondary_dex,
+            dropper_signal_count=dropper_sigs,
         )
         duration = time.time() - start_time
         logger.info(f"[Phase 6] Completed in {duration:.3f}s. Risk Score: {risk_score.total_score} ({risk_score.verdict_band})")
