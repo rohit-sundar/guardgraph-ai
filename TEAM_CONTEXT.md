@@ -273,9 +273,10 @@ guardgraph-ai/
 │   │   ├── config.py             Settings, MODEL_LABEL_MAP, TTP_SEVERITY_WEIGHTS, FAMILY_TO_TTPS, API keys
 │   │   └── schemas.py            Pydantic contracts (IngestionResult, SignatureMatch, YaraMatch, AnalysisManifest, etc.)
 │   ├── analysis/
-│   │   ├── ingest.py             SHA-256, cert thumbprint, Androguard ingestion
+│   │   ├── ingest.py             SHA-256, cert thumbprint, Androguard ingestion, static enrichments
+│   │   ├── apk_static.py         [NEW S7] C2 regex extractor, permission matrices, cert anomalies, secondary DEX payloads, a11y config XML
 │   │   ├── signatures.py         [NEW S4] Local hash/cert DB + VT + MalwareBazaar online triage
-│   │   ├── yara_engine.py        [NEW S4] YARA compiler + scanner (8 built-in rules + 455 community rules)
+│   │   ├── yara_engine.py        [NEW S4] YARA compiler + scanner (outer APK + uncompressed DEX/asset byte streams)
 │   │   ├── cfg.py                CFG + ACFG enrichment (NetworkX) + relevance pre-filter
 │   │   ├── forensic.py           Forensic dictionary, anchor detection, 4-hop subgraph extraction
 │   │   ├── topology.py           Centrality/clustering stats, flattening outlier detection
@@ -301,7 +302,8 @@ guardgraph-ai/
 ├── tests/
 │   ├── test_features.py          Feature vector length invariant test (MUST always pass — currently 33)
 │   ├── test_pipeline_phases.py   Phase contract and integration tests
-│   └── test_signatures_yara.py   [NEW S4] Signature matching + YARA scan unit tests
+│   ├── test_signatures_yara.py   [NEW S4] Signature matching + YARA scan unit tests
+│   └── test_apk_enhancements.py  [NEW S7] Static malware enrichments unit tests
 ├── data/
 │   ├── samples/                  (gitignored) APK files for testing
 │   ├── models/                   (gitignored) trained XGBoost model goes here
@@ -336,7 +338,8 @@ guardgraph-ai/
 | **[S4] Local signature matching** | `signatures.py` | SHA-256 + cert thumbprint against `data/signatures/known_hashes.json` |
 | **[S4] VirusTotal online triage** | `signatures.py` | VT API v3; returns family, `detection_ratio`, clickable `report_url` |
 | **[S4] MalwareBazaar online triage** | `signatures.py` | Public hash-lookup; returns family, `report_url` |
-| **[S4] YARA scanning** | `yara_engine.py` | 8 built-in rules + 455 community rules; robust per-file compilation |
+| **[S4] YARA scanning** | `yara_engine.py` | 8 built-in rules + 455 community rules; outer APK + uncompressed inner DEX/asset streams |
+| **[S7] Static Malware Enrichments** | `apk_static.py` | C2 IoCs (Telegram, Firebase, raw IP, TOR), permission matrices, cert anomalies, secondary DEX payloads |
 | Risk scoring — all 7 components | `scoring.py` | See formula below |
 | Neo4j hot-path cache lookup | `cache.py` | Degrades gracefully on DB outage |
 | MITRE ontology retrieval | `ontology.py` | Used by GraphRAG for grounded context |
