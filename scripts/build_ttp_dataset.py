@@ -24,6 +24,7 @@ Usage:
     python scripts/build_ttp_dataset.py --stage a --download-workers 16   # faster network
 """
 import argparse
+import csv
 import datetime
 import io
 import json
@@ -41,7 +42,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pandas as pd  # noqa: E402
 from loguru import logger  # noqa: E402
 
-from app.analysis.ingest import ingest_apk  # noqa: E402
+from app.analysis.ingest import ingest_apk, compute_sha256  # noqa: E402
 from app.analysis.cfg import build_all_method_cfgs  # noqa: E402
 from app.analysis.forensic import match_anchors, extract_anchor_subgraph  # noqa: E402
 from app.analysis.topology import (  # noqa: E402
@@ -450,22 +451,118 @@ def stage_a_download(
     return targets
 
 
+# ── Incremental CSV output ──
+
+def dataset_columns() -> list[str]:
+    return TTP_FEATURE_NAMES + TTP_LABELS + ["label_source", "sha256", "source_family"]
+
+
+class IncrementalCsvWriter:
+    """
+    Append rows to the dataset CSV as each APK finishes, instead of once at the end.
+
+    Analysis runs for hours and a single OOM used to discard every completed row.
+    Writing per-sample means a crash costs you one APK. The file also doubles as the
+    resume log: `completed` holds the sha256s already present, so a rerun skips them.
+
+    Reopening an existing CSV whose header does not match the current feature set is
+    refused — TTP_FEATURE_NAMES has changed before, and blindly appending would
+    silently misalign every column in the older rows.
+    """
+
+    def __init__(self, path: str, columns: list[str], overwrite: bool = False):
+        self.path = path
+        self.columns = columns
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
+        resumable = os.path.exists(path) and os.path.getsize(path) > 0
+        if resumable and overwrite:
+            os.remove(path)
+            resumable = False
+            logger.warning(f"[dataset] --overwrite: discarded existing {path}")
+
+        self.completed: set[str] = set()
+        if resumable:
+            self._check_header()
+            self.completed = self._read_completed()
+            logger.info(f"[dataset] resuming {path}: {len(self.completed)} rows already written")
+
+        self._fh = open(path, "a", newline="", encoding="utf-8")
+        self._writer = csv.DictWriter(self._fh, fieldnames=columns)
+        if not resumable:
+            self._writer.writeheader()
+            self._fh.flush()
+        self.written = 0
+
+    def _check_header(self) -> None:
+        with open(self.path, newline="", encoding="utf-8") as f:
+            header = next(csv.reader(f), [])
+        if header != self.columns:
+            raise SystemExit(
+                f"[dataset] {self.path} has {len(header)} columns but this build produces "
+                f"{len(self.columns)}. Appending would corrupt the dataset — rerun with "
+                f"--overwrite, or point --out at a new file."
+            )
+
+    def _read_completed(self) -> set[str]:
+        try:
+            with open(self.path, newline="", encoding="utf-8") as f:
+                return {
+                    r["sha256"].lower()
+                    for r in csv.DictReader(f)
+                    if r.get("sha256")
+                }
+        except Exception as e:
+            logger.error(f"[dataset] could not read completed rows from {self.path}: {e}")
+            return set()
+
+    def is_done(self, sha256: str) -> bool:
+        return sha256.lower() in self.completed
+
+    def write(self, row: dict) -> None:
+        self._writer.writerow(row)
+        # flush() hands the bytes to the OS, which is what survives the process being
+        # OOM-killed. fsync would only add protection against power loss, at a cost
+        # paid on every row.
+        self._fh.flush()
+        self.completed.add(str(row["sha256"]).lower())
+        self.written += 1
+
+    def close(self) -> None:
+        self._fh.close()
+
+    def __enter__(self) -> "IncrementalCsvWriter":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+
 # ── Stage A phase 2: analysis only (CPU/memory-bound, reads what phase 1 fetched) ──
 
-def stage_a_analyze(apk_dir: str, manifest_path: str) -> list[dict]:
-    """Extract features for every downloaded sample named in the manifest."""
+def stage_a_analyze(apk_dir: str, manifest_path: str, writer: IncrementalCsvWriter) -> int:
+    """
+    Extract features for every downloaded sample named in the manifest, writing each
+    row to `writer` as it completes. Returns the number of rows written.
+    """
     targets = _read_manifest(manifest_path).get("samples", {})
     if not targets:
         logger.error(f"[dataset] no manifest at {manifest_path} — run --phase download first.")
-        return []
+        return 0
 
     on_disk = [(h, i) for h, i in targets.items()
                if os.path.exists(os.path.join(apk_dir, f"{h}.apk"))]
-    total = len(on_disk)
-    logger.info(f"[dataset] analysing {total}/{len(targets)} downloaded samples")
+    pending = [(h, i) for h, i in on_disk if not writer.is_done(h)]
+    total = len(pending)
+    logger.info(
+        f"[dataset] stage A: {len(on_disk)}/{len(targets)} samples downloaded, "
+        f"{len(on_disk) - total} already in CSV, {total} to analyse"
+    )
 
-    rows: list[dict] = []
-    for idx, (sha256, info) in enumerate(on_disk, 1):
+    written = 0
+    for idx, (sha256, info) in enumerate(pending, 1):
         apk_path = os.path.join(apk_dir, f"{sha256}.apk")
         # Log BEFORE analysis: if a heavy CFG OOM-kills the process, this line is the
         # last thing in the file and names the sample that did it.
@@ -482,28 +579,43 @@ def stage_a_analyze(apk_dir: str, manifest_path: str) -> list[dict]:
             continue
         vec, meta = extracted
         techniques = set(info["techniques"])
-        rows.append(_row_dict(vec, techniques, "stix_ref", meta["sha256"], info["family"]))
+        writer.write(_row_dict(vec, techniques, "stix_ref", meta["sha256"], info["family"]))
+        written += 1
         logger.info(
-            f"[dataset] stage A row {len(rows)}: {info['family']} "
+            f"[dataset] [{idx}/{total}] row written: {info['family']} "
             f"{meta['sha256'][:12]} techniques={sorted(techniques)}"
         )
-    return rows
+    return written
 
 
 # ── Stage B: weak-labeled CICMalDroid2020 / local APKs ──
 
-def stage_b(cic_dir: str) -> list[dict]:
+def stage_b(cic_dir: str, writer: IncrementalCsvWriter) -> int:
+    """Weak-label local APKs, writing each row as it completes. Returns rows written."""
     if not cic_dir or not os.path.isdir(cic_dir):
         logger.warning(f"[dataset] CIC dir '{cic_dir}' not found — skipping stage B.")
-        return []
+        return 0
     label_set = set(TTP_LABELS)
-    rows: list[dict] = []
     apks = [os.path.join(cic_dir, f) for f in os.listdir(cic_dir) if f.endswith(".apk")]
-    for apk_path in apks:
+    total = len(apks)
+    logger.info(f"[dataset] stage B: {total} local APKs to consider")
+
+    written = 0
+    for idx, apk_path in enumerate(apks, 1):
+        name = os.path.basename(apk_path)
+        # These files are not named by hash, so hash first to honour the resume set —
+        # a file read is trivial next to a full CFG build.
+        try:
+            if writer.is_done(compute_sha256(apk_path)):
+                continue
+        except Exception as e:
+            logger.warning(f"[dataset] could not hash {name}: {e}")
+            continue
+        logger.info(f"[dataset] [{idx}/{total}] analysing {name}")
         try:
             extracted = extract_ttp_row(apk_path)
         except Exception as e:
-            logger.exception(f"[dataset] analysis failed for {os.path.basename(apk_path)}: {e}")
+            logger.exception(f"[dataset] analysis failed for {name}: {e}")
             continue
         if extracted is None:
             continue
@@ -514,9 +626,10 @@ def stage_b(cic_dir: str) -> list[dict]:
         techniques &= label_set
         if not techniques:
             continue  # no weak signal -> not a useful positive row
-        rows.append(_row_dict(vec, techniques, "weak", meta["sha256"], "cicmaldroid"))
+        writer.write(_row_dict(vec, techniques, "weak", meta["sha256"], "cicmaldroid"))
+        written += 1
         logger.info(f"[dataset] stage B row: {meta['sha256'][:12]} weak techniques={sorted(techniques)}")
-    return rows
+    return written
 
 
 def main():
@@ -545,6 +658,11 @@ def main():
         help="Re-query MalwareBazaar for every family, ignoring the manifest's "
              "already-resolved markers (default: retry only families that errored).",
     )
+    ap.add_argument(
+        "--overwrite", action="store_true",
+        help="Discard an existing --out CSV and rebuild it from scratch (default: "
+             "append, skipping samples already present).",
+    )
     args = ap.parse_args()
 
     _setup_logging(args.phase)
@@ -565,22 +683,29 @@ def main():
         logger.info("[dataset] download phase complete — rerun with --phase analyze.")
         return
 
-    rows: list[dict] = []
-    if args.stage in ("a", "all"):
-        rows += stage_a_analyze(args.apk_dir, manifest_path)
-    if args.stage in ("b", "all"):
-        rows += stage_b(args.cic_dir)
+    columns = dataset_columns()
+    written = 0
+    with IncrementalCsvWriter(args.out, columns, overwrite=args.overwrite) as writer:
+        if args.stage in ("a", "all"):
+            written += stage_a_analyze(args.apk_dir, manifest_path, writer)
+        if args.stage in ("b", "all"):
+            written += stage_b(args.cic_dir, writer)
 
-    if not rows:
+    if not os.path.exists(args.out) or os.path.getsize(args.out) == 0:
         logger.error("[dataset] No rows produced. Nothing written.")
         return
 
-    columns = TTP_FEATURE_NAMES + TTP_LABELS + ["label_source", "sha256", "source_family"]
-    df = pd.DataFrame(rows, columns=columns)
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    df.to_csv(args.out, index=False)
-    pos_per_label = {t: int(df[t].sum()) for t in TTP_LABELS if df[t].sum() > 0}
-    logger.info(f"[dataset] Wrote {len(df)} rows x {len(columns)} cols -> {args.out}")
+    # Summarise from the file, not from this run's rows: on a resumed run most of the
+    # dataset was written by earlier invocations and never passed through memory here.
+    df = pd.read_csv(args.out)
+    if df.empty:
+        logger.error("[dataset] No rows produced. Nothing written.")
+        return
+    pos_per_label = {t: int(df[t].sum()) for t in TTP_LABELS if t in df and df[t].sum() > 0}
+    logger.info(
+        f"[dataset] Wrote {written} new rows this run; {len(df)} rows x "
+        f"{len(df.columns)} cols total -> {args.out}"
+    )
     logger.info(f"[dataset] Labels with >=1 positive: {len(pos_per_label)} -> {pos_per_label}")
 
 
