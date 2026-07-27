@@ -124,7 +124,7 @@ python scripts/load_ontology.py            # into Neo4j; --starter for an offlin
 Run Stage A's two phases separately — analysis is memory-hungry and can crash the
 process, which you don't want to cost you the downloads.
 ```bash
-# 1. Download — network-bound, resumable, parallelizible. Writes to data/ttp_apks/_manifest.json.
+# 1. Download — network-bound, resumable, parallelizable. Writes to data/ttp_apks/_manifest.json.
 python scripts/build_ttp_dataset.py --stage a --phase download --max-per-family 15 --download-workers 8
 ```
 
@@ -141,3 +141,10 @@ python scripts/train_model.py --target ttp
 
 Reruns of the download phase are incremental. On "families still unresolved" (transient
 abuse.ch 502s), just rerun — only those families are retried; `--force-resolve` re-sweeps all. `--stage all` runs everything back-to-back including Stage B.
+
+The analyse phase is incremental too: rows are appended as each APK finishes, so a crash
+costs one sample rather than the whole pass, and a rerun skips what is already in the CSV.
+`--overwrite` rebuilds from scratch — needed if the CSV predates a `TTP_FEATURE_NAMES`
+change, since appending mismatched columns is refused rather than silently misaligned.
+Both phases tee their output to `logs/build_ttp_dataset_<phase>_<timestamp>.log`, which is
+what survives if the terminal dies with the process.

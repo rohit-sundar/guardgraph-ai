@@ -6,6 +6,30 @@
 
 ## Change Log
 
+### Session 8 — 2026-07-27 | Author: Rohit — Make the TTP dataset builder actually produce a dataset (AES extraction, parallel downloads, crash-resumable phases)
+
+> **Overview:** `scripts/build_ttp_dataset.py` silently produced zero Stage A rows — every MalwareBazaar download was discarded before Androguard ever saw it. Fixed the download path, then made the whole builder survivable: downloads and analysis are now separate resumable phases, progress is logged to disk, and dataset rows are written as they are produced instead of once at the end.
+
+**Files changed:** `scripts/build_ttp_dataset.py` [MOD], `requirements.txt` [MOD], `.gitignore` [MOD], `README.md` [MOD], `logs/.gitkeep` [NEW]
+
+- **Download was broken two ways** — Stage A had never yielded a sample:
+  - The success check rejected any response with a JSON `Content-Type`, which fired on **valid** zip downloads (abuse.ch does not reliably set `application/zip`). Now gated on the `PK` zip magic bytes; genuine errors still arrive as small JSON bodies and fail the check.
+  - MalwareBazaar archives use **WinZip AES-256** (compression method 99), which stdlib `zipfile` cannot decrypt — extraction would have raised even past the first bug. Now uses `pyzipper.AESZipFile` (password `infected`), added as the one new dependency.
+- **Parallel downloads** — `_download_many()` fetches a family's samples through a `ThreadPoolExecutor` and returns them in the original hash order so row order stays deterministic. Feature extraction is deliberately left serial: Androguard is CPU-bound and not thread-safe. Measured 15.3s → 7.4s on 4 live samples at 8 workers. `--download-workers` (default 8).
+- **Atomic writes** — samples unpack to a thread-unique `.part` file then `os.replace()` into position. Required for concurrency, but it also fixes a latent bug: an interrupted run previously left a **truncated `.apk`** that the `os.path.exists()` resume check would reuse forever as a good sample.
+- **Stage A split into two phases** (`--phase download|analyze|both`) — an OOM or Androguard crash during feature extraction used to kill the run and discard every downloaded APK's work:
+  - `stage_a_download()` resolves hashes, fetches APKs, persists the manifest. Touches no Androguard.
+  - `stage_a_analyze()` reads the manifest and extracts features from whatever landed on disk.
+  - `data/ttp_apks/_manifest.json` carries `sha256 → {family, techniques}`; those labels previously lived only in a loop variable and could not survive the phase boundary.
+- **Resolve sweep is now resumable** — `_mb_hashes_for_signature()` returns `(hashes, query_ok)`. A 502 and a genuinely empty family both returned `[]`, so transient failures were indistinguishable from real answers and were never retried. Per-family resolution status is recorded in the manifest, already-resolved families are skipped on rerun, and the manifest is **merged** rather than overwritten (overwriting dropped samples whose family errored on a later run, even with their APKs on disk).
+- **Crash-survivable logging** — every run tees to `logs/build_ttp_dataset_<phase>_<timestamp>.log` (`enqueue=False`, so each record is flushed and survives a hard kill). Downloads log `[n/total] ok|fail <sha>`; analysis logs `[n/total] analysing <sha>` **before** each extraction, so an OOM leaves the offending sample as the last line in the file.
+- **Incremental CSV** — `IncrementalCsvWriter` appends and flushes each row as its APK completes, so a crash costs one sample instead of the whole pass. The CSV doubles as the resume log: already-present `sha256`s are skipped before analysis (Stage B hashes each file first to do the same). Appending to a CSV whose header does not match the current 239 columns is **refused** — `TTP_FEATURE_NAMES` has changed before and appending would silently misalign every older row; `--overwrite` rebuilds from scratch. Final label stats are read back from the file, since a resumed run never holds most of the dataset in memory.
+- **Per-sample exception guards** — `extract_ttp_row` calls in both stages are wrapped. Anchor matching, topology, and feature building sit outside that function's internal guards and can raise on malformed or packed APKs; one bad sample must not destroy a multi-hour run.
+- **`.gitignore`**: `logs/*` with a tracked `logs/.gitkeep`. `data/ttp_apks/` (live malware **and** the regenerable manifest) stays fully ignored.
+- **Verified:** AES download+extract against live MalwareBazaar (2.3 MB valid APK); serial-vs-parallel timing; manifest roundtrip and missing-sample reporting; only-failed-families re-queried on rerun (simulated 502); rows survive `os._exit(137)` with no cleanup; resume detects prior rows case-insensitively and appends no duplicate header; stale-header append raises; end-to-end `--phase analyze` on a real APK produces a correctly labelled row and a rerun adds no duplicates.
+
+---
+
 ### Session 7 — 2026-07-22 | Author: Tarun — Android Malware Static Enrichments (C2 IoCs, Permission Matrices, Cert Anomalies, Secondary DEX Payloads, Uncompressed YARA Scanning)
 
 > **Overview:** Comprehensive static malware analysis expansion targeting Android banking trojans, droppers, credential stealers, and evasion techniques. Extracted C2 channels, permission matrix patterns, certificate anomalies, secondary DEX payloads, and accessibility configuration flags directly into the analysis manifest and risk scoring engine.
@@ -295,7 +319,8 @@ guardgraph-ai/
 ├── scripts/
 │   ├── train_model.py            family training + [S5] --target ttp (BR + CC/LP benchmark)
 │   ├── build_ttp_label_space.py  [NEW S5] ATT&CK Mobile STIX → label space + ontology JSON
-│   ├── build_ttp_dataset.py      [NEW S5] staged multi-label TTP dataset (MalwareBazaar + weak-label)
+│   ├── build_ttp_dataset.py      [S5, S8] staged multi-label TTP dataset (MalwareBazaar + weak-label);
+│   │                             [S8] two resumable phases (--phase download|analyze), manifest, incremental CSV
 │   ├── load_ontology.py          Neo4j ontology seed ([S5] full Mobile ontology by default)
 │   ├── download_yara_rules.py    [NEW S4] Downloads + filters Yara-Rules/rules community repo
 │   └── test_upload.py            [NEW S4] Local test script to POST an APK and pretty-print the report
@@ -307,9 +332,11 @@ guardgraph-ai/
 ├── data/
 │   ├── samples/                  (gitignored) APK files for testing
 │   ├── models/                   (gitignored) trained XGBoost model goes here
+│   ├── ttp_apks/                 (gitignored) [S8] Stage A downloads + _manifest.json — live malware, never commit
 │   ├── signatures/
 │   │   └── known_hashes.json     [NEW S4] Local hash+cert signature database (Anubis, Cerberus, TeaBot, etc.)
 │   └── yara_rules/               [NEW S4] 518 community YARA rules (455 compile successfully)
+├── logs/                         [NEW S8] (contents gitignored) per-run build_ttp_dataset logs; .gitkeep tracked
 ├── docker-compose.yml            Neo4j only
 ├── requirements.txt
 ├── .env.example                  Copy to .env and fill in
@@ -340,6 +367,7 @@ guardgraph-ai/
 | **[S4] MalwareBazaar online triage** | `signatures.py` | Public hash-lookup; returns family, `report_url` |
 | **[S4] YARA scanning** | `yara_engine.py` | 8 built-in rules + 455 community rules; outer APK + uncompressed inner DEX/asset streams |
 | **[S7] Static Malware Enrichments** | `apk_static.py` | C2 IoCs (Telegram, Firebase, raw IP, TOR), permission matrices, cert anomalies, secondary DEX payloads |
+| **[S8] TTP dataset builder** | `build_ttp_dataset.py` | Stage A downloads (AES-decrypted, parallel) and analysis are separate resumable phases; manifest + incremental CSV survive a crash |
 | Risk scoring — all 7 components | `scoring.py` | See formula below |
 | Neo4j hot-path cache lookup | `cache.py` | Degrades gracefully on DB outage |
 | MITRE ontology retrieval | `ontology.py` | Used by GraphRAG for grounded context |
@@ -775,7 +803,6 @@ python scripts/train_model.py
 | Forensic dictionary, obfuscation signals, entropy scoring | B | ✅ Complete |
 | XGBoost training on CICMalDroid2020, risk scoring | C | 🔲 Model not yet trained (feature vector now 33 cols — retrain needed) |
 | Neo4j schema + ontology, GraphRAG + report, frontend | D | ✅ Backend complete; frontend TBD |
-| **[S4] Signature detection + YARA + VT/MB online triage** | **Rohit** | **✅ Complete** |
 
 ---
 
