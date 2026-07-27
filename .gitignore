@@ -27,3 +27,8 @@ data/yara_rules/
 test_malware_samples/
 # Downloaded APKs from MalwareBazaar (scripts/build_ttp_dataset.py) — real malware
 data/ttp_apks/
+
+# Run logs (scripts/build_ttp_dataset.py writes a per-run file sink here) —
+# keep the directory in the repo, ignore everything written into it
+logs/*
+!logs/.gitkeep

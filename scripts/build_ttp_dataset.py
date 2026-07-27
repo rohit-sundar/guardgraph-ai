@@ -24,6 +24,7 @@ Usage:
     python scripts/build_ttp_dataset.py --stage a --download-workers 16   # faster network
 """
 import argparse
+import datetime
 import io
 import json
 import os
@@ -52,12 +53,32 @@ from app.ml.features import build_ttp_feature_vector, TTP_FEATURE_NAMES  # noqa:
 from app.ml.labels import TTP_LABELS  # noqa: E402
 from app.core.config import settings  # noqa: E402
 
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SOFTWARE_MAP_PATH = "data/ontology/software_technique_map.json"
 OUT_CSV = "data/ttp_dataset.csv"
 MB_API = "https://mb-api.abuse.ch/api/v1/"
 # Written by the download phase, read by the analysis phase: carries each sample's
 # family + ATT&CK techniques so analysis never has to re-query MalwareBazaar.
 MANIFEST_NAME = "_manifest.json"
+LOGS_DIR = os.path.join(PROJECT_ROOT, "logs")
+
+
+def _setup_logging(phase: str) -> str:
+    """
+    Tee the run to a timestamped file in logs/ alongside the console.
+
+    A crash during analysis (a large CFG can OOM the process) takes the terminal
+    with it, so the on-screen progress is gone. The file sink is what survives, and
+    together with the manifest it tells you exactly which samples still need work on
+    resume. enqueue=False keeps loguru flushing each record, so a hard crash loses
+    at most the line in flight rather than a buffer's worth of history.
+    """
+    os.makedirs(LOGS_DIR, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(LOGS_DIR, f"build_ttp_dataset_{phase}_{ts}.log")
+    logger.add(log_path, level="INFO", enqueue=False, backtrace=True, diagnose=False)
+    logger.info(f"[dataset] logging this run to {log_path}")
+    return log_path
 
 # Weak-label heuristic: forensic-dictionary behavior -> likely ATT&CK Mobile techniques.
 # Rule-derived on purpose (label_source="weak") — used only to bootstrap coverage.
@@ -240,21 +261,27 @@ def _download_many(
     """
     if not hashes:
         return []
+    total = len(hashes)
     paths: dict[str, str] = {}
-    with ThreadPoolExecutor(max_workers=min(workers, len(hashes))) as pool:
+    logger.info(f"[dataset] fetching {total} samples with {workers} workers")
+    with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
         futures = {
             pool.submit(_mb_download_apk, h, dest_dir, auth_key): h for h in hashes
         }
-        for fut in as_completed(futures):
+        # as_completed is drained on this thread, so the counter needs no lock.
+        for done, fut in enumerate(as_completed(futures), 1):
             h = futures[fut]
             try:
                 apk_path = fut.result()
             except Exception as e:  # _mb_download_apk swallows its own errors; belt and braces
                 logger.warning(f"[dataset] MB download worker failed for {h}: {e}")
-                continue
+                apk_path = None
             if apk_path:
                 paths[h] = apk_path
-    logger.info(f"[dataset] downloaded {len(paths)}/{len(hashes)} samples ({workers} workers)")
+                logger.info(f"[dataset] [{done}/{total}] ok   {h[:12]} ({len(paths)} on disk)")
+            else:
+                logger.warning(f"[dataset] [{done}/{total}] fail {h[:12]}")
+    logger.info(f"[dataset] downloaded {len(paths)}/{total} samples ({workers} workers)")
     return [(h, paths[h]) for h in hashes if h in paths]
 
 
@@ -432,11 +459,17 @@ def stage_a_analyze(apk_dir: str, manifest_path: str) -> list[dict]:
         logger.error(f"[dataset] no manifest at {manifest_path} — run --phase download first.")
         return []
 
+    on_disk = [(h, i) for h, i in targets.items()
+               if os.path.exists(os.path.join(apk_dir, f"{h}.apk"))]
+    total = len(on_disk)
+    logger.info(f"[dataset] analysing {total}/{len(targets)} downloaded samples")
+
     rows: list[dict] = []
-    for sha256, info in targets.items():
+    for idx, (sha256, info) in enumerate(on_disk, 1):
         apk_path = os.path.join(apk_dir, f"{sha256}.apk")
-        if not os.path.exists(apk_path):
-            continue  # never downloaded; the download phase reports these
+        # Log BEFORE analysis: if a heavy CFG OOM-kills the process, this line is the
+        # last thing in the file and names the sample that did it.
+        logger.info(f"[dataset] [{idx}/{total}] analysing {sha256[:12]} ({info['family']})")
         try:
             extracted = extract_ttp_row(apk_path)
         except Exception as e:
@@ -514,6 +547,7 @@ def main():
     )
     args = ap.parse_args()
 
+    _setup_logging(args.phase)
     logger.info(
         "[dataset] NOTE: check whether DroidTTP has released a public dataset before "
         "reconstructing — prefer it if available."
