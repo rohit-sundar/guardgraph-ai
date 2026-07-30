@@ -106,6 +106,11 @@ class AnalysisManifest(BaseModel):
     # Signature detection + YARA scanning results (Phase 1.5).
     # None on hot-path cache hits (scanning is skipped).
     signature_yara: Optional[SignatureYaraResult] = None
+    # Declared manifest permissions (e.g. "android.permission.CAMERA"). Fed to
+    # GraphRAG so the LLM has real permissions to cite instead of back-deriving
+    # a plausible-looking list from predicted TTPs (see PIPELINE_TEST_REPORT.md
+    # finding 2 — RECORD_AUDIO was fabricated this way).
+    permissions: list[str] = []
     # Advanced Android malware static anchors (fed to GraphRAG + risk scoring)
     c2_indicators: list[str] = []
     cert_anomalies: list[str] = []

@@ -32,6 +32,7 @@ from loguru import logger
 from app.core.config import settings
 from app.core.schemas import AnalysisManifest, RiskScoreBreakdown
 from app.graph.ontology import get_technique_context
+from app.ml.features import TTP_PERMISSION_VOCAB
 
 SYSTEM_PROMPT = """You are a cybersecurity analyst report generator for GuardGraph AI,
 a banking-focused Android malware analysis engine.
@@ -110,6 +111,47 @@ def _summarize_behavioral_subgraphs(behavioral_subgraphs: list) -> dict:
     }
 
 
+_PERM_RE = re.compile(r"android\.permission\.[A-Z_]+")
+
+# Bare permission-constant citations (e.g. "RECORD_AUDIO" instead of
+# "android.permission.RECORD_AUDIO" — observed in testing: the model dropped
+# the prefix while still citing real/fabricated permission names). Matched
+# ONLY against this known-permission vocabulary, not treated as freeform
+# ALL-CAPS text — otherwise GuardGraph's own behavior-flag / matrix-flag
+# vocabulary (e.g. ACCESSIBILITY_ABUSE, T1616) would false-positive as
+# "invented permissions".
+_BARE_TOKEN_RE = re.compile(r"\b[A-Z][A-Z0-9_]{2,}\b")
+_KNOWN_PERMISSION_SUFFIXES = {p.rsplit(".", 1)[-1] for p in TTP_PERMISSION_VOCAB}
+
+
+def _permission_check(narrative: str, declared: set[str]) -> list[str]:
+    """
+    Anti-fabrication check: the inverse of _grounding_check. That check only
+    verifies cited technique IDs are a SUBSET of the supplied ontology, which
+    can't catch the model inventing plausible-looking permissions (e.g.
+    RECORD_AUDIO back-derived from a predicted TTP rather than the actual
+    manifest) — see PIPELINE_TEST_REPORT.md finding 2. Flags any permission
+    the APK does not actually declare, whether cited fully-qualified
+    (android.permission.X) or bare (X, if X is a recognized Android
+    permission name).
+    """
+    declared_suffixes = {d.rsplit(".", 1)[-1] for d in declared}
+
+    qualified_suffixes = {c.rsplit(".", 1)[-1] for c in _PERM_RE.findall(narrative)}
+    bare_suffixes = set(_BARE_TOKEN_RE.findall(narrative)) & _KNOWN_PERMISSION_SUFFIXES
+
+    invented = sorted(
+        f"android.permission.{suffix}"
+        for suffix in (qualified_suffixes | bare_suffixes) - declared_suffixes
+    )
+    if invented:
+        logger.error(
+            f"[Phase 7] FABRICATION DETECTED — narrative cites permissions not "
+            f"declared by the APK: {invented}. Report is unsafe to ship."
+        )
+    return invented
+
+
 def _grounding_check(narrative: str, provided_technique_ids: set) -> None:
     """
     Post-generation sanity check. Scans the LLM output for MITRE technique ID
@@ -163,6 +205,7 @@ def generate_report(
         "predicted_ttps": manifest.predicted_ttps,
         "predicted_family": manifest.predicted_family,
         "family_confidence": manifest.family_confidence,
+        "permissions": manifest.permissions,
         "behavioral_subgraph_summary": _summarize_behavioral_subgraphs(
             manifest.behavioral_subgraphs
         ),
@@ -244,5 +287,16 @@ that is not explicitly present in the data blocks below.
     # that were not in the provided ontology context block.
     provided_ids = {ctx["technique_id"] for ctx in ontology_context}
     _grounding_check(narrative, provided_ids)
+
+    # Anti-fabrication check — flag any cited permission the APK doesn't
+    # actually declare, and surface it in limitations so it reaches the
+    # analyst rather than only the log.
+    invented_permissions = _permission_check(narrative, set(manifest.permissions))
+    if invented_permissions:
+        limitations.append(
+            "FABRICATION DETECTED: narrative cites permissions not declared by "
+            f"this APK: {', '.join(invented_permissions)}. Treat the narrative "
+            "as unverified and consult the structured manifest instead."
+        )
 
     return narrative, limitations

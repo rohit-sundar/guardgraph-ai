@@ -92,6 +92,7 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             predicted_family=cached.get("family"),
             family_confidence=None,
             signature_yara=None,  # skipped on hot path
+            permissions=ingestion.permissions,
             c2_indicators=ingestion.c2_indicators,
             cert_anomalies=ingestion.cert_anomalies,
             permission_matrix_flags=ingestion.permission_matrix_flags,
@@ -154,6 +155,7 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         predicted_family=predicted_family,
         family_confidence=family_confidence,
         signature_yara=sig_yara,
+        permissions=ingestion.permissions,
         c2_indicators=ingestion.c2_indicators,
         cert_anomalies=ingestion.cert_anomalies,
         permission_matrix_flags=ingestion.permission_matrix_flags,
