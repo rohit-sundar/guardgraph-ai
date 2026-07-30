@@ -25,6 +25,7 @@ Anti-hallucination measures implemented here:
 """
 import json
 import re
+from collections import Counter
 from openai import OpenAI
 from loguru import logger
 
@@ -74,6 +75,39 @@ STRICT RULES — violating ANY of these makes the report unusable:
 >>>>>>> 364c1bf (feat(analysis): add static malware anchors (C2 IoCs, permission matrices, cert anomalies, secondary DEX payloads, uncompressed YARA byte scanning))
 Write for a bank fraud-operations audience: clear, direct, actionable.
 """
+
+
+def _summarize_behavioral_subgraphs(behavioral_subgraphs: list) -> dict:
+    """
+    Collapses the (often 400+) per-subgraph entries down to one bucket per
+    primary_behavior_flag, so the prompt carries the same behavioral signal
+    without serializing every individual subgraph. Full detail (topological
+    invariants, per-subgraph IDs) stays in the manifest for the API response
+    and Neo4j — only the LLM-facing summary is condensed. See
+    PIPELINE_TEST_REPORT.md finding 1: unsummarized subgraphs were 87.9% of
+    the prompt and pushed evaluation past the model's effective context.
+    """
+    behavior_counts = Counter(
+        bs.primary_behavior_flag for bs in behavioral_subgraphs
+    )
+    apis_by_behavior: dict[str, list[str]] = {}
+    for bs in behavioral_subgraphs:
+        seen = apis_by_behavior.setdefault(bs.primary_behavior_flag, [])
+        for api in bs.matched_apis:
+            if api not in seen and len(seen) < 12:
+                seen.append(api)
+
+    return {
+        "total_subgraphs": len(behavioral_subgraphs),
+        "by_behavior": [
+            {
+                "primary_behavior_flag": b,
+                "subgraph_count": n,
+                "representative_matched_apis": apis_by_behavior.get(b, []),
+            }
+            for b, n in behavior_counts.most_common()
+        ],
+    }
 
 
 def _grounding_check(narrative: str, provided_technique_ids: set) -> None:
@@ -129,13 +163,9 @@ def generate_report(
         "predicted_ttps": manifest.predicted_ttps,
         "predicted_family": manifest.predicted_family,
         "family_confidence": manifest.family_confidence,
-        "behavioral_subgraphs": [
-            {
-                "primary_behavior_flag": bs.primary_behavior_flag,
-                "matched_apis": bs.matched_apis,
-            }
-            for bs in manifest.behavioral_subgraphs
-        ],
+        "behavioral_subgraph_summary": _summarize_behavioral_subgraphs(
+            manifest.behavioral_subgraphs
+        ),
         "obfuscation": {
             "string_entropy_score": manifest.obfuscation.string_entropy_score,
             "flattening_suspected": manifest.obfuscation.flattening_suspected,
@@ -171,6 +201,18 @@ that is not explicitly present in the data blocks below.
 ## Known Coverage Limitations (state these explicitly in the report)
 {json.dumps(limitations, indent=2)}
 """
+
+    # Hard budget check — Ollama silently truncates an oversized prompt rather
+    # than erroring, which is exactly how finding 1 went unnoticed (only 16,386
+    # of ~53,000 tokens were evaluated). Fail loudly instead of shipping a
+    # report grounded in a partial manifest.
+    approx_tokens = (len(SYSTEM_PROMPT) + len(user_prompt)) // 3  # conservative chars/token
+    if approx_tokens > settings.graphrag_prompt_token_budget:
+        raise RuntimeError(
+            f"[Phase 7] Prompt ~{approx_tokens} tokens exceeds budget "
+            f"{settings.graphrag_prompt_token_budget}; the model would silently "
+            "drop the manifest head. Reduce prompt size before calling the LLM."
+        )
 
     # temperature=0 — greedy decode; eliminates stochastic drift that causes
     # the model to "helpfully" add technique context it wasn’t given.

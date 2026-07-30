@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     entropy_high_threshold: float = 7.2
     flattening_degree_outlier_zscore: float = 3.0
 
+    # Hard ceiling on the Phase 7 (GraphRAG) prompt, in approximate tokens.
+    # Set against the OBSERVED 16,386 tokens Ollama actually evaluated for
+    # qwen2.5:7b-instruct before truncating — not the nominal 32,768 context,
+    # which is never what the model receives in practice. See
+    # PIPELINE_TEST_REPORT.md finding 1.
+    graphrag_prompt_token_budget: int = 15000
+
     class Config:
         env_file = ".env"
 
