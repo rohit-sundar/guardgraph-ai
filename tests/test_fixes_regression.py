@@ -14,10 +14,13 @@ These tests are fully offline — no Neo4j or Ollama required.
 """
 import sys
 import os
+import json
 import unittest
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from app.core.config import settings
 
 
 # ─── Bug 1: Cache lookup gate on sha256 ──────────────────────────────────────
@@ -114,6 +117,98 @@ class TestStoreSigAlwaysCalledAfterColdPath(unittest.TestCase):
                 f"Expected family='', got {kwargs.get('family')!r}")
 
 
+# ─── LLM warm-up: first report after a cold model load ──────────────────────
+
+class TestEnsureModelWarm(unittest.TestCase):
+    """
+    Measured against a live Ollama across forced cold loads: the first inference
+    after a model load decodes differently from every later one, so the first
+    report of a session diverged from subsequent ones even with temperature=0
+    and a pinned seed. Warming up with the SAME prompt fixed it (2/2 trials);
+    a different prompt of comparable size did not (0/2), nor did a 1-token one
+    (0/2). These tests lock in the parts checkable without a GPU.
+    """
+
+    def test_warmup_replays_the_same_prompt_when_model_not_loaded(self):
+        import app.reports.graphrag as g
+        prompt = "## JSON Manifest\n" + ("x" * 5000)
+        with patch.object(g, "_model_is_loaded", return_value=False), \
+             patch.object(g, "_post_native_chat") as mock_post:
+            self.assertTrue(g.ensure_model_warm(prompt))
+
+        mock_post.assert_called_once()
+        self.assertEqual(
+            mock_post.call_args[0][0], prompt,
+            "warm-up must replay the SAME prompt — a different prompt of similar "
+            "size was measured not to stabilise the decode (0/2 trials)",
+        )
+        self.assertEqual(mock_post.call_args[1]["num_predict"], 1,
+                         "warm-up only needs the prefill, not a full generation")
+
+    def test_no_warmup_when_model_already_loaded(self):
+        """The effect is tied to the model load, so a resident model needs no
+        second prefill — paying one on every request would buy nothing."""
+        import app.reports.graphrag as g
+        with patch.object(g, "_model_is_loaded", return_value=True), \
+             patch.object(g, "_post_native_chat") as mock_post:
+            self.assertTrue(g.ensure_model_warm("prompt"))
+
+        mock_post.assert_not_called()
+
+    def test_warmup_uses_native_endpoint_with_keep_alive(self):
+        """keep_alive is honoured by /api/chat and silently IGNORED by the
+        OpenAI-compatible /v1 endpoint, so the warm-up must not use /v1."""
+        import app.reports.graphrag as g
+        captured = {}
+
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["body"] = json.loads(req.data.decode())
+            return MagicMock(__enter__=lambda s: MagicMock(read=lambda: b"{}"),
+                             __exit__=lambda *a: False)
+
+        with patch.object(g.urllib.request, "urlopen", side_effect=fake_urlopen):
+            g._post_native_chat("x", num_predict=1, timeout=5)
+
+        self.assertTrue(captured["url"].endswith("/api/chat"), captured["url"])
+        self.assertNotIn("/v1/", captured["url"])
+        self.assertEqual(captured["body"]["keep_alive"], settings.graphrag_keep_alive)
+        self.assertEqual(captured["body"]["options"]["seed"], settings.graphrag_seed)
+
+    def test_warmup_failure_is_never_fatal(self):
+        """Losing reproducibility must not cost the analysis."""
+        import app.reports.graphrag as g
+        with patch.object(g, "_model_is_loaded", return_value=False), \
+             patch.object(g, "_post_native_chat", side_effect=OSError("refused")):
+            self.assertFalse(g.ensure_model_warm("prompt"))  # must not raise
+
+    def test_generate_report_warms_with_the_prompt_it_will_send(self):
+        import app.reports.graphrag as g
+        order = []
+        mock_resp = MagicMock()
+        mock_resp.choices[0].message.content = "T1636 observed."
+
+        def note_create(**kw):
+            order.append(("llm", kw["messages"][1]["content"]))
+            return mock_resp
+
+        import app.graph.ontology as onto_mod
+        with patch.object(onto_mod.neo4j_client, "run", return_value=[]), \
+             patch.object(g, "ensure_model_warm",
+                          side_effect=lambda p: order.append(("warm", p))), \
+             patch("app.reports.graphrag.OpenAI") as mock_cls:
+            mock_client = MagicMock()
+            mock_cls.return_value = mock_client
+            mock_client.chat.completions.create.side_effect = note_create
+
+            manifest, risk = TestGraphRAGTemperatureIsZero()._make_manifest_and_risk()
+            g.generate_report(manifest, risk)
+
+        self.assertEqual([step for step, _ in order], ["warm", "llm"])
+        self.assertEqual(order[0][1], order[1][1],
+                         "the warm-up must replay exactly the prompt the real call sends")
+
+
 # ─── Bug 2: LLM temperature pinned to 0 ─────────────────────────────────────
 
 class TestGraphRAGTemperatureIsZero(unittest.TestCase):
@@ -149,6 +244,7 @@ class TestGraphRAGTemperatureIsZero(unittest.TestCase):
         fake_ctx = [{"technique_id": "T1636", "name": "Protected User Data",
                      "description": "SMS access.", "tactic": "Collection"}]
         with patch.object(onto_mod.neo4j_client, "run", return_value=fake_ctx), \
+             patch("app.reports.graphrag.ensure_model_warm", return_value=True), \
              patch("app.reports.graphrag.OpenAI") as mock_cls:
             mock_client = MagicMock()
             mock_cls.return_value = mock_client
@@ -162,6 +258,11 @@ class TestGraphRAGTemperatureIsZero(unittest.TestCase):
             self.assertEqual(kw["temperature"], 0, "temperature must be 0 for greedy decode")
             self.assertIn("top_p", kw, "top_p must be explicit")
             self.assertEqual(kw["top_p"], 1.0)
+            self.assertIn("seed", kw,
+                "seed must be pinned — temperature=0 alone does not guarantee "
+                "deterministic output (batch scheduling / KV-cache reuse can still "
+                "perturb the decode)")
+            self.assertEqual(kw["seed"], settings.graphrag_seed)
 
     def test_prompt_excludes_topological_invariants(self):
         """Trimmed manifest_summary must not leak internal topology floats to LLM."""

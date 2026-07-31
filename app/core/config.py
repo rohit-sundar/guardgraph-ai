@@ -39,6 +39,20 @@ class Settings(BaseSettings):
     # which is never what the model receives in practice.
     graphrag_prompt_token_budget: int = 15000
 
+    # Fixed decode seed for the GraphRAG LLM call. temperature=0 alone does not
+    # guarantee reproducible output — batch scheduling and KV-cache reuse can
+    # still perturb the decode between identical calls. Ollama honours `seed`,
+    # so pin it rather than relying on greedy decoding alone.
+    graphrag_seed: int = 42
+
+    # How long Ollama should keep the model resident after a request. Measured:
+    # the FIRST large prefill after a model load decodes differently from every
+    # later one, so an idle unload (Ollama's default is 5m) silently makes the
+    # next analysis the odd one out. Hold the model resident across a normal
+    # working session instead. Only the native /api/chat endpoint honours this —
+    # the OpenAI-compatible /v1 endpoint accepts and ignores it.
+    graphrag_keep_alive: str = "30m"
+
     class Config:
         env_file = ".env"
 

@@ -25,6 +25,8 @@ Anti-hallucination measures implemented here:
 """
 import json
 import re
+import urllib.error
+import urllib.request
 from collections import Counter
 from openai import OpenAI
 from loguru import logger
@@ -152,6 +154,99 @@ def _permission_check(narrative: str, declared: set[str]) -> list[str]:
     return invented
 
 
+def _native_base_url() -> str:
+    """Ollama's native API root. settings.ollama_base_url points at the
+    OpenAI-compatible /v1 endpoint, which ignores keep_alive."""
+    return settings.ollama_base_url.rstrip("/").removesuffix("/v1")
+
+
+def _model_is_loaded() -> bool:
+    """True if Ollama currently holds this model in memory. A loaded model
+    needs no warm-up; a fresh load does."""
+    try:
+        with urllib.request.urlopen(f"{_native_base_url()}/api/ps", timeout=5) as r:
+            loaded = json.load(r).get("models") or []
+    except Exception as e:
+        logger.debug(f"[Phase 7] Could not query Ollama /api/ps: {e}")
+        return False
+    return any(m.get("name") == settings.ollama_model for m in loaded)
+
+
+def _post_native_chat(user_content: str, num_predict: int, timeout: int) -> None:
+    body = json.dumps(
+        {
+            "model": settings.ollama_model,
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "stream": False,
+            "keep_alive": settings.graphrag_keep_alive,
+            "options": {
+                "num_predict": num_predict,
+                "temperature": 0,
+                "top_p": 1.0,
+                "seed": settings.graphrag_seed,
+            },
+        }
+    ).encode()
+    req = urllib.request.Request(
+        f"{_native_base_url()}/api/chat",
+        data=body,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        r.read()
+
+
+def ensure_model_warm(user_prompt: str) -> bool:
+    """
+    Absorbs the first-inference-after-model-load effect so the first report of a
+    session matches the ones after it.
+
+    Measured against a live Ollama, forcing a cold load between trials and
+    holding prompt, seed and temperature fixed:
+
+      * The first inference after a model load decodes differently from every
+        later one (787 vs 912 completion tokens here). Both values are stable
+        and repeatable — this is a systematic difference, not random flakiness.
+      * It is not KV-prefix-cache reuse: running prompt P, then a different
+        prompt Q, then P again, gave P3 == P2 rather than P3 == P1. Only
+        position relative to the model load matters.
+      * Warming up with the SAME prompt that will be sent fixes it (2/2 trials).
+        Warming up with a different prompt of comparable size does NOT (0/2),
+        and neither does a 1-token prompt (0/2). Why matching content is
+        required is not fully characterised — this is an empirical workaround,
+        so change it only against a re-run of that experiment.
+
+    Skipped when the model is already resident: the effect is tied to the load,
+    so paying a second prefill on every request would buy nothing. The
+    keep_alive sent here (honoured by /api/chat, silently ignored by the
+    OpenAI-compatible /v1 endpoint) keeps the model up between analyses; if it
+    does drop out, the next call re-warms automatically.
+
+    Never raises — losing reproducibility must not cost the analysis, and
+    generate_report() surfaces a genuine outage on its own call.
+    """
+    if _model_is_loaded():
+        return True
+
+    try:
+        logger.info(
+            f"[Phase 7] Model '{settings.ollama_model}' is not resident — warming up "
+            "so this report matches subsequent ones."
+        )
+        _post_native_chat(user_prompt, num_predict=1, timeout=600)
+        logger.info("[Phase 7] Warm-up complete; model resident.")
+        return True
+    except Exception as e:
+        logger.warning(
+            f"[Phase 7] LLM warm-up failed ({type(e).__name__}: {e}). Continuing — "
+            "this report may not reproduce byte-for-byte against later ones."
+        )
+        return False
+
+
 def _grounding_check(narrative: str, provided_technique_ids: set) -> None:
     """
     Post-generation sanity check. Scans the LLM output for MITRE technique ID
@@ -184,6 +279,20 @@ def generate_report(
     Anti-hallucination: temperature is pinned to 0 (greedy decode).
     Do NOT raise this without explicit justification — stochastic sampling
     is the primary driver of LLM drift from the grounded prompt.
+
+    Reproducibility, precisely scoped — measured, not assumed:
+      HOLDS   identical inputs produce an identical narrative, including the
+              first report after a cold model load (verified 2/2 across forced
+              Ollama restarts: temperature=0 + pinned seed + ensure_model_warm).
+      CAVEAT  the CPU/GPU layer split is chosen at load time from whatever VRAM
+              is free, and a different split changes the arithmetic enough to
+              flip near-tied greedy tokens. With the GPU clear this reproduced
+              exactly across restarts; under VRAM pressure (orphaned processes
+              holding memory) the same build produced a different narrative and
+              ran 4x slower. Reproducibility therefore assumes comparable free
+              VRAM, not merely the same code and inputs.
+    Treat the narrative as advisory; the structured manifest and risk_score are
+    the reproducible product of record.
     """
     technique_ids = list(manifest.predicted_ttps.keys())
     ontology_context = get_technique_context(technique_ids) if technique_ids else []
@@ -260,6 +369,18 @@ that is not explicitly present in the data blocks below.
     # temperature=0 — greedy decode; eliminates stochastic drift that causes
     # the model to "helpfully" add technique context it wasn’t given.
     # Do NOT raise this without explicit justification.
+    #
+    # temperature=0 alone does not make this deterministic: two calls with
+    # byte-identical prompts have been observed to produce narratives as low
+    # as 19% similar, one fabricating evidence the other did not. Greedy
+    # decoding only removes *sampling* nondeterminism — it can't remove
+    # nondeterminism below it. Pin `seed` too, since Ollama honours it.
+    #
+    # Seed alone is still not sufficient: the first inference after a model load
+    # decodes differently from later ones. ensure_model_warm() absorbs that into
+    # a throwaway pass over this same prompt and holds the model resident.
+    ensure_model_warm(user_prompt)
+
     client = OpenAI(
         base_url=settings.ollama_base_url,
         api_key="ollama",  # required by the client constructor; ignored by Ollama
@@ -270,6 +391,7 @@ that is not explicitly present in the data blocks below.
             max_tokens=2000,
             temperature=0,   # greedy decode — critical for hallucination prevention
             top_p=1.0,
+            seed=settings.graphrag_seed,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
