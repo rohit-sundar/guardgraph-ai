@@ -25,9 +25,9 @@ import uuid
 from fastapi import APIRouter, UploadFile, File, HTTPException
 
 from app.graph.cache import lookup_signature, store_signature
-from app.reports.scoring import compute_risk_score
+from app.reports.scoring import compute_risk_score, _band_for
 from app.core.config import settings
-from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal
+from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown
 
 router = APIRouter()
 
@@ -64,21 +64,30 @@ def _run_analysis(filepath: str) -> AnalysisReport:
     cache_hit = cached is not None
 
     if cache_hit:
+        # A cache hit means "we already reached a verdict on this SHA-256" —
+        # return that verdict, not one recomputed from emptied inputs. A prior
+        # version called compute_risk_score() with predicted_ttps={}, no
+        # anchors and no obfuscation signal, so 81.65 of an 86.14 "malicious"
+        # score was discarded and the hot path answered "low" for known-bad
+        # malware — while the *cached narrative in the same response* still
+        # said 86.14.
         empty_obfuscation = _empty_obfuscation_signal()
-        risk_score = compute_risk_score(
-            predicted_ttps={},
-            permissions=ingestion.permissions,
-            obfuscation=empty_obfuscation,
-            entropy_threshold=settings.entropy_high_threshold,
-            matched_anchor_behaviors=set(),
-            cache_hit=True,
-            cached_score=cached.get("base_score"),
-            matched_c2_indicators=0,
-            permission_matrix_flags=ingestion.permission_matrix_flags,
-            extracted_c2_count=len(ingestion.c2_indicators),
-            cert_anomaly_count=len(ingestion.cert_anomalies),
-            secondary_dex_count=ingestion.secondary_dex_count,
-            dropper_signal_count=len(ingestion.dropper_signals),
+        cached_score = cached.get("base_score")
+        cached_ttps = cached.get("ttps") or {}
+        total_score = cached_score if cached_score is not None else 0.0
+        risk_score = RiskScoreBreakdown(
+            # Not recomputed on this path — None, not 0.0, which would falsely
+            # assert "we looked and found no evidence".
+            classifier_confidence_component=None,
+            permission_api_component=None,
+            ttp_severity_component=None,
+            forensic_anchor_component=None,
+            obfuscation_component=None,
+            reputation_component=None,
+            ioc_component=None,
+            total_score=total_score,
+            verdict_band=_band_for(total_score),
+            zero_day_indicator=False,
         )
         manifest = AnalysisManifest(
             target_package=ingestion.package_name,
@@ -88,7 +97,7 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             graph_density=0.0,
             behavioral_subgraphs=[],
             obfuscation=empty_obfuscation,
-            predicted_ttps={},
+            predicted_ttps=cached_ttps,
             predicted_family=cached.get("family"),
             family_confidence=None,
             signature_yara=None,  # skipped on hot path
@@ -105,9 +114,11 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         narrative = cached.get("narrative", "")
         limitations = cached.get("limitations", [])
 
+        if cached_score is None:
+            limitations = limitations + ["cache hit had no stored score — reporting 0/low"]
         if not narrative:
             narrative = "[Narrative not found in cache. Cached score only.]"
-            limitations = ["analysis skipped — known sample (cache hit)"]
+            limitations = limitations + ["analysis skipped — known sample (cache hit)"]
 
         return AnalysisReport(
             manifest=manifest,
@@ -185,7 +196,7 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             sha256=ingestion.sha256,
             family=predicted_family or "",
             risk_score=risk_score.total_score,
-            ttps=list(predicted_ttps.keys()),
+            ttps=predicted_ttps,
             narrative=narrative,
             limitations=limitations,
         )

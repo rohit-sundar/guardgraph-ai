@@ -84,9 +84,9 @@ def _summarize_behavioral_subgraphs(behavioral_subgraphs: list) -> dict:
     primary_behavior_flag, so the prompt carries the same behavioral signal
     without serializing every individual subgraph. Full detail (topological
     invariants, per-subgraph IDs) stays in the manifest for the API response
-    and Neo4j — only the LLM-facing summary is condensed. See
-    PIPELINE_TEST_REPORT.md finding 1: unsummarized subgraphs were 87.9% of
-    the prompt and pushed evaluation past the model's effective context.
+    and Neo4j — only the LLM-facing summary is condensed. Unsummarized
+    subgraphs were once 87.9% of the prompt and pushed evaluation past the
+    model's effective context.
     """
     behavior_counts = Counter(
         bs.primary_behavior_flag for bs in behavioral_subgraphs
@@ -130,8 +130,8 @@ def _permission_check(narrative: str, declared: set[str]) -> list[str]:
     verifies cited technique IDs are a SUBSET of the supplied ontology, which
     can't catch the model inventing plausible-looking permissions (e.g.
     RECORD_AUDIO back-derived from a predicted TTP rather than the actual
-    manifest) — see PIPELINE_TEST_REPORT.md finding 2. Flags any permission
-    the APK does not actually declare, whether cited fully-qualified
+    manifest). Flags any permission the APK does not actually declare,
+    whether cited fully-qualified
     (android.permission.X) or bare (X, if X is a recognized Android
     permission name).
     """

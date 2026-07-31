@@ -52,10 +52,12 @@ class TestCacheLookupGateOnSha256(unittest.TestCase):
     def test_returns_row_when_family_is_present(self):
         sha = "aa" * 32
         row = {"sha256": sha, "family": "banker", "base_score": 82.0,
-               "narrative": "y", "limitations": [], "ttps": ["T1636"]}
+               "narrative": "y", "limitations": [],
+               "ttps": [{"technique_id": "T1636", "probability": 0.91}]}
         result = self._call_lookup([row])
         self.assertIsNotNone(result)
         self.assertEqual(result["family"], "banker")
+        self.assertEqual(result["ttps"], {"T1636": 0.91})
 
 
 # ─── Bug 1b: store_signature always called after cold path ───────────────────

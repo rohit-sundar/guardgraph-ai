@@ -108,8 +108,8 @@ class AnalysisManifest(BaseModel):
     signature_yara: Optional[SignatureYaraResult] = None
     # Declared manifest permissions (e.g. "android.permission.CAMERA"). Fed to
     # GraphRAG so the LLM has real permissions to cite instead of back-deriving
-    # a plausible-looking list from predicted TTPs (see PIPELINE_TEST_REPORT.md
-    # finding 2 — RECORD_AUDIO was fabricated this way).
+    # a plausible-looking list from predicted TTPs (RECORD_AUDIO was
+    # fabricated this way in one prior report).
     permissions: list[str] = []
     # Advanced Android malware static anchors (fed to GraphRAG + risk scoring)
     c2_indicators: list[str] = []
@@ -123,17 +123,21 @@ class AnalysisManifest(BaseModel):
 
 
 class RiskScoreBreakdown(BaseModel):
-    classifier_confidence_component: float
-    permission_api_component: float
-    ttp_severity_component: float
+    # Component fields are Optional: a cache-hit hot path returns the cached
+    # verdict verbatim without recomputing any component, so None here means
+    # "not recomputed on this path" — distinct from 0.0, which would falsely
+    # assert "we looked and found no evidence".
+    classifier_confidence_component: Optional[float] = None
+    permission_api_component: Optional[float] = None
+    ttp_severity_component: Optional[float] = None
     # Deterministic behavioral evidence component (§9.3 fix).
     # Weighted on matched forensic-dictionary behaviors (proven API presence),
     # not classifier probability — these are the strongest static predictors
     # per GUARD paper SHAP analysis.
-    forensic_anchor_component: float
-    obfuscation_component: float
-    reputation_component: float
-    ioc_component: float
+    forensic_anchor_component: Optional[float] = None
+    obfuscation_component: Optional[float] = None
+    reputation_component: Optional[float] = None
+    ioc_component: Optional[float] = None
     total_score: float
     verdict_band: str  # low / suspicious / high / malicious
     # Zero-day / novel-variant flag: strong deterministic (forensic anchor) and/or

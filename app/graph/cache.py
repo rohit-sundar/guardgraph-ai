@@ -11,13 +11,14 @@ def lookup_signature(sha256: str) -> dict | None:
     query = """
     MATCH (s:Sample {sha256: $sha256})
     OPTIONAL MATCH (s)-[:CLASSIFIED_AS_FAMILY]->(f:MalwareFamily)
-    OPTIONAL MATCH (s)-[:MAPS_TO_TECHNIQUE]->(t:Technique)
+    OPTIONAL MATCH (s)-[r:MAPS_TO_TECHNIQUE]->(t:Technique)
     RETURN s.sha256 AS sha256,
            f.name AS family,
            s.risk_score AS base_score,
            s.narrative AS narrative,
            s.limitations AS limitations,
-           collect(DISTINCT t.technique_id) AS ttps
+           collect(DISTINCT CASE WHEN t IS NULL THEN NULL
+                   ELSE {technique_id: t.technique_id, probability: r.probability} END) AS ttps
     """
     try:
         rows = neo4j_client.run(query, sha256=sha256)
@@ -30,13 +31,25 @@ def lookup_signature(sha256: str) -> dict | None:
     # every second request to fall back to cold path (cache never hit).
     if not rows or rows[0].get("sha256") is None:
         return None
-    return rows[0]
+    row = rows[0]
+    # Rebuild the technique_id -> probability map (only bare IDs used to be
+    # stored, so the hot path had to return predicted_ttps={} instead of the
+    # real map).
+    row["ttps"] = {
+        t["technique_id"]: t.get("probability")
+        for t in (row.get("ttps") or [])
+        if t and t.get("technique_id")
+    }
+    return row
 
 
-def store_signature(sha256: str, family: str, risk_score: float, ttps: list[str], narrative: str = "", limitations: list[str] = None):
+def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None):
     """
     Call this after a cold-path analysis completes, so future uploads of
     the same sample (or re-uploads during a campaign) hit the fast path.
+
+    ttps carries technique_id -> confidence so the hot path can return the
+    real predicted-TTP map (previously only bare IDs were persisted).
     """
     if limitations is None:
         limitations = []
@@ -49,17 +62,18 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: list[str]
     MERGE (f:MalwareFamily {name: $family})
     MERGE (s)-[:CLASSIFIED_AS_FAMILY]->(f)
     WITH s
-    UNWIND $ttps AS ttp_id
-    MERGE (t:Technique {technique_id: ttp_id})
-    MERGE (s)-[:MAPS_TO_TECHNIQUE]->(t)
+    UNWIND $ttps AS ttp
+    MERGE (t:Technique {technique_id: ttp.technique_id})
+    MERGE (s)-[r:MAPS_TO_TECHNIQUE]->(t)
+    SET r.probability = ttp.probability
     """
     try:
         neo4j_client.run(
-            query, 
-            sha256=sha256, 
-            family=family, 
-            risk_score=risk_score, 
-            ttps=ttps,
+            query,
+            sha256=sha256,
+            family=family,
+            risk_score=risk_score,
+            ttps=[{"technique_id": k, "probability": v} for k, v in ttps.items()],
             narrative=narrative,
             limitations=limitations
         )

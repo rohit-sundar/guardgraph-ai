@@ -250,6 +250,18 @@ def ioc_component(
     return min(1.0, score)
 
 
+def _band_for(total: float) -> str:
+    """Verdict band thresholds, shared so a cache hit reports the same band
+    a cold-path run would have for the same total_score (§9.3 finding 3)."""
+    if total <= 30:
+        return "low"
+    if total <= 60:
+        return "suspicious"
+    if total <= 80:
+        return "high"
+    return "malicious"
+
+
 def compute_risk_score(
     predicted_ttps: dict[str, float],
     permissions: list[str],
@@ -298,14 +310,7 @@ def compute_risk_score(
         0.25 * c1 + 0.20 * c2 + 0.15 * c3 + 0.15 * c4 + 0.15 * c5 + 0.05 * c6 + 0.05 * c7
     ) * 100
 
-    if total <= 30:
-        band = "low"
-    elif total <= 60:
-        band = "suspicious"
-    elif total <= 80:
-        band = "high"
-    else:
-        band = "malicious"
+    band = _band_for(total)
 
     # Zero-day / novel-variant signal: the model-free components (deterministic
     # forensic anchors, structural obfuscation/coverage) carry strong evidence while
