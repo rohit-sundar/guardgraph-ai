@@ -159,6 +159,17 @@ class TTPClassifier:
             )
         self._bundle = joblib.load(self.model_path)
 
+    def thresholds(self) -> dict[str, float]:
+        """
+        Per-label decision thresholds calibrated on the validation split at training
+        time ({} for bundles trained before calibration existed — the caller then
+        falls back to its global threshold). A single 0.5 cut cannot serve labels
+        whose prevalence ranges from 0.02 to 0.75.
+        """
+        if self._bundle is None:
+            self.load()
+        return dict(self._bundle.get("label_thresholds") or {})
+
     def predict(self, feature_vector: list[float]) -> dict[str, float]:
         """
         Returns {technique_id: probability} for EVERY label in TTP_LABELS (untrained

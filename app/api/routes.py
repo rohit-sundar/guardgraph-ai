@@ -16,6 +16,8 @@ Changes vs. original skeleton:
 - §9.4: graph_density now computed as mean per-method density (not global sum).
 - §9.5/9.6: method_parse_failure_rate threaded from cfg.py → obfuscation signal.
 - §9.7: subgraph_size_ratio recorded per BehavioralSubgraph for tuning data.
+- The TTP classifier only votes when the analysis actually observed something —
+  it was trained without a benign class and answers confidently regardless.
 """
 import os
 import shutil
@@ -51,7 +53,11 @@ async def analyze(file: UploadFile = File(...)):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-from app.core.pipeline import AnalysisPipeline
+from app.core.pipeline import (
+    AnalysisPipeline,
+    has_deterministic_evidence,
+    NO_CLASSIFIER_EVIDENCE_NOTE,
+)
 
 def _run_analysis(filepath: str) -> AnalysisReport:
     # --- Phase 1: Ingestion & Metadata (+ Android malware static enrichments) ---
@@ -149,9 +155,20 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         )
     )
 
+    # --- Classifier evidence gate ---
+    # The TTP model was trained without a benign class, so it answers confidently
+    # even when handed nothing. Decide ONCE here whether the analysis actually
+    # observed anything, and apply that decision to Phase 5, Phase 6 and the
+    # analyst-facing limitations alike.
+    classifier_evidence = has_deterministic_evidence(
+        cfg_count=len(cfgs),
+        matched_behaviors=set(all_matches),
+        ttp_feature_vector=ttp_feature_vector,
+    )
+
     # --- Phase 5: Multi-label TTP Classification (direct) + auxiliary family label ---
     predicted_ttps, predicted_family, family_confidence = AnalysisPipeline.run_phase5_ml_classification(
-        ttp_feature_vector, feature_vector
+        ttp_feature_vector, feature_vector, evidence_present=classifier_evidence
     )
 
     manifest = AnalysisManifest(
@@ -182,10 +199,14 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         predicted_ttps, ingestion.permissions, obfuscation, all_matches, cache_hit, None,
         sig_yara=sig_yara,
         ingestion=ingestion,
+        classifier_evidence_present=classifier_evidence,
     )
 
     # --- Phase 7: Explainable Reporting ---
     narrative, limitations = AnalysisPipeline.run_phase7_reporting(manifest, risk_score)
+
+    if not classifier_evidence:
+        limitations = list(limitations) + [NO_CLASSIFIER_EVIDENCE_NOTE]
 
     # Always persist after a cold-path run so the hot path fires on the next
     # request for the same SHA-256. predicted_family may be None when the

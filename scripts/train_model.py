@@ -34,6 +34,15 @@ TTP_DATA_PATH = "data/ttp_dataset.csv"          # produced by scripts/build_ttp_
 TTP_METRICS_OUT = "data/models/ttp_metrics.json"
 MIN_TTP_POSITIVES = 3   # labels with fewer positives are skipped by the trainer
 
+# ── Per-label threshold calibration ──
+# One global 0.5 cut cannot serve labels whose prevalence spans 0.02–0.75, so each
+# label's threshold is chosen on a held-out validation split. A label needs at least
+# this many validation positives for the search to mean anything; below that it keeps
+# the global default rather than fitting a threshold to one or two samples.
+DEFAULT_TTP_THRESHOLD = 0.5
+MIN_VAL_POSITIVES_TO_CALIBRATE = 2
+THRESHOLD_GRID = [round(0.05 * i, 2) for i in range(2, 19)]   # 0.10 … 0.90
+
 
 def main():
     if not os.path.exists(DATA_PATH):
@@ -132,6 +141,77 @@ def _ml_metrics(Y_true, Y_pred) -> dict:
     }
 
 
+def _calibrate_thresholds(model, X_val, Y_val, labels: list[str]) -> dict[str, float]:
+    """
+    Pick each label's decision threshold by maximising validation F1.
+
+    Labels with too few validation positives keep DEFAULT_TTP_THRESHOLD — a threshold
+    fitted to one or two samples is noise dressed up as calibration. Ties go to the
+    higher threshold, which is the conservative choice for a detector whose training
+    set has no benign class to teach it when to stay quiet.
+    """
+    from sklearn.metrics import f1_score
+
+    proba = model.predict_proba_matrix(X_val)
+    thresholds: dict[str, float] = {}
+    for i, label in enumerate(labels):
+        y = Y_val[:, i]
+        if int(y.sum()) < MIN_VAL_POSITIVES_TO_CALIBRATE:
+            thresholds[label] = DEFAULT_TTP_THRESHOLD
+            continue
+        best_t, best_f1 = DEFAULT_TTP_THRESHOLD, -1.0
+        for t in THRESHOLD_GRID:
+            f1 = f1_score(y, (proba[:, i] >= t).astype(int), zero_division=0)
+            if f1 > best_f1 or (f1 == best_f1 and t > best_t):
+                best_t, best_f1 = t, float(f1)
+        thresholds[label] = best_t
+    return thresholds
+
+
+def _pr_auc(model, X_te, Y_te, labels: list[str]) -> dict:
+    """
+    Per-label PR-AUC (average precision) plus its macro mean.
+
+    Reported alongside F1 because F1 at a fixed threshold hides what a rare label is
+    actually doing, and every headline metric this project has quoted so far was
+    measured inside an all-malware distribution. Labels with no positives in the test
+    split are omitted — average precision is undefined there, not zero.
+    """
+    from sklearn.metrics import average_precision_score
+
+    proba = model.predict_proba_matrix(X_te)
+    per_label: dict[str, float] = {}
+    for i, label in enumerate(labels):
+        if int(Y_te[:, i].sum()) == 0:
+            continue
+        per_label[label] = round(float(average_precision_score(Y_te[:, i], proba[:, i])), 4)
+    macro = round(sum(per_label.values()) / len(per_label), 4) if per_label else None
+    return {"macro_pr_auc": macro, "per_label": per_label}
+
+
+def _zero_vector_sanity_check(model, n_features: int, labels: list[str],
+                              thresholds: dict[str, float]) -> dict[str, float]:
+    """
+    What does the model predict when shown *nothing*?
+
+    An all-zeros vector carries no permissions, no intents, no APIs and no topology.
+    A model that has learned evidence answers "no techniques"; a model that has
+    learned label priors answers with its most frequent labels. The current shipped
+    model does the latter — 9 techniques at >= 0.5 — which is exactly why the runtime
+    gate in app/core/pipeline.has_deterministic_evidence exists.
+
+    Returns {label: probability} for every label that fires, empty when clean.
+    """
+    import numpy as np
+
+    proba = model.predict_proba_matrix(np.zeros((1, n_features), dtype=float))[0]
+    return {
+        label: round(float(p), 4)
+        for label, p in zip(labels, proba)
+        if p >= thresholds.get(label, DEFAULT_TTP_THRESHOLD)
+    }
+
+
 def _label_powerset_fit_predict(X_tr, Y_tr, X_te, xgb_params):
     """DroidTTP's best in-distribution strategy — benchmarked here for comparison only."""
     import numpy as np
@@ -153,13 +233,23 @@ def _label_powerset_fit_predict(X_tr, Y_tr, X_te, xgb_params):
     return out
 
 
-def train_ttp():
+def train_ttp(allow_prior_only: bool = False):
     """
     Trains the multi-label MITRE ATT&CK Mobile TTP classifier.
 
     Default = Binary Relevance (saved as the shipped model). Classifier Chains and
     Label Powerset are benchmarked and reported for a DroidTTP-style comparison, but
     NOT shipped — BR is the zero-day-robust choice (can emit unseen label combos).
+
+    Three splits, not two: fit / validation / test. Thresholds are
+    calibrated on validation and the reported metrics come from test, so the numbers
+    are not measured on data that chose the thresholds. The model is NOT refitted on
+    fit+validation afterwards — that would ship a different model from the one the
+    thresholds were calibrated against, and the point of this rework is that the
+    headline metrics should mean what they claim.
+
+    Training aborts if the all-zeros sanity check fails unless
+    --allow-prior-only is passed.
     """
     import json
     import numpy as np
@@ -183,18 +273,43 @@ def train_ttp():
         sys.exit(1)
 
     label_cols = [t for t in TTP_LABELS if t in df.columns]
+    # Labels the data cannot train are excluded here rather than occupying output
+    # slots and inflating the macro average with free zeros.
+    dropped_labels = [t for t in label_cols if int(df[t].sum()) < MIN_TTP_POSITIVES]
     trained_labels = [t for t in label_cols if int(df[t].sum()) >= MIN_TTP_POSITIVES]
     if not trained_labels:
         print(f"ERROR: no technique has >= {MIN_TTP_POSITIVES} positive samples. "
               "Collect more data (scripts/build_ttp_dataset.py) before training.")
         sys.exit(1)
 
+    # A detector trained only on malware has never been asked to say "no". Every
+    # metric below is measured inside whatever distribution the dataset happens to
+    # cover, so state the balance up front rather than burying it.
+    n_benign = int((df[label_cols].sum(axis=1) == 0).sum())
+    n_positive = int(len(df) - n_benign)
+    if n_benign == 0:
+        print("\n" + "!" * 78)
+        print("WARNING: dataset has NO all-negative (benign) rows. The model can only")
+        print("learn label priors, not the difference between malicious and clean. F1")
+        print("measured on this split says nothing about whether a prediction means")
+        print("anything. Collect 150-300 clean APKs and rerun:")
+        print("    python scripts/build_ttp_dataset.py --stage c --benign-dir data/benign_apks")
+        print("!" * 78 + "\n")
+    else:
+        print(f"Class balance: {n_positive} labeled-positive rows, {n_benign} benign rows "
+              f"({n_benign / len(df):.1%} benign)")
+
     print(f"Training TTP model on {len(df)} samples, {len(trained_labels)} technique labels "
           f"(>= {MIN_TTP_POSITIVES} positives): {trained_labels}")
+    if dropped_labels:
+        print(f"Dropped {len(dropped_labels)} untrainable labels (< {MIN_TTP_POSITIVES} "
+              f"positives): {dropped_labels}")
 
     X = df[TTP_FEATURE_NAMES].to_numpy(dtype=float)
     Y = df[trained_labels].to_numpy(dtype=int)
-    X_tr, X_te, Y_tr, Y_te = _multilabel_split(X, Y)
+    X_fit_val, X_te, Y_fit_val, Y_te = _multilabel_split(X, Y, test_size=0.3)
+    X_tr, X_val, Y_tr, Y_val = _multilabel_split(X_fit_val, Y_fit_val, test_size=0.25)
+    print(f"Split: {len(X_tr)} fit / {len(X_val)} validation (thresholds) / {len(X_te)} test")
 
     xgb_params = dict(
         n_estimators=200, max_depth=4, learning_rate=0.1,
@@ -202,12 +317,35 @@ def train_ttp():
         eval_metric="logloss", random_state=42,
     )
 
-    metrics: dict = {"n_samples": int(len(df)), "n_labels": len(trained_labels),
-                     "trained_labels": trained_labels}
+    metrics: dict = {
+        "n_samples": int(len(df)),
+        "n_benign_rows": n_benign,
+        "n_positive_rows": n_positive,
+        "n_labels": len(trained_labels),
+        "trained_labels": trained_labels,
+        "dropped_labels": dropped_labels,
+        "split": {"fit": len(X_tr), "validation": len(X_val), "test": len(X_te)},
+    }
 
     # Binary Relevance — the shipped default.
     br = BinaryRelevanceXGB(trained_labels, **xgb_params).fit(X_tr, Y_tr)
-    metrics["binary_relevance"] = _ml_metrics(Y_te, br.predict(X_te))
+
+    # Calibrate on validation, then report on test at those thresholds.
+    label_thresholds = _calibrate_thresholds(br, X_val, Y_val, trained_labels)
+    thr_vec = np.array([label_thresholds[t] for t in trained_labels])
+    Y_pred = (br.predict_proba_matrix(X_te) >= thr_vec).astype(int)
+
+    metrics["label_thresholds"] = label_thresholds
+    metrics["binary_relevance"] = _ml_metrics(Y_te, Y_pred)
+    metrics["binary_relevance_at_0.5"] = _ml_metrics(Y_te, br.predict(X_te))
+    metrics["pr_auc"] = _pr_auc(br, X_te, Y_te, trained_labels)
+
+    # The model must not have an opinion about an empty sample.
+    zero_preds = _zero_vector_sanity_check(
+        br, len(TTP_FEATURE_NAMES), trained_labels, label_thresholds
+    )
+    metrics["zero_vector_predictions"] = zero_preds
+    metrics["zero_vector_sanity_check"] = "FAILED" if zero_preds else "passed"
 
     # Classifier Chains benchmark.
     try:
@@ -223,10 +361,30 @@ def train_ttp():
     except Exception as e:
         metrics["label_powerset"] = {"error": str(e)}
 
+    if zero_preds:
+        print("\n" + "!" * 78)
+        print(f"SANITY CHECK FAILED — an all-zeros feature vector predicts "
+              f"{len(zero_preds)} techniques: {json.dumps(zero_preds, indent=2)}")
+        print("The model has learned label priors, not evidence. Add benign samples")
+        print("(scripts/build_ttp_dataset.py --stage c --benign-dir ...) and retrain.")
+        print("!" * 78)
+        if not allow_prior_only:
+            os.makedirs(os.path.dirname(TTP_METRICS_OUT), exist_ok=True)
+            with open(TTP_METRICS_OUT, "w", encoding="utf-8") as f:
+                json.dump(metrics, f, indent=2)
+            print(f"\nModel NOT saved — {TTP_MODEL_PATH} left untouched.")
+            print(f"Metrics (including the failure) written to {TTP_METRICS_OUT}.")
+            print("Rerun with --allow-prior-only to ship it anyway; the runtime gate in "
+                  "app/core/pipeline.has_deterministic_evidence will suppress its output "
+                  "on samples with no parsed code or anchors.")
+            sys.exit(1)
+        print("\n--allow-prior-only: shipping the model despite the failed check.\n")
+
     os.makedirs(os.path.dirname(TTP_MODEL_PATH), exist_ok=True)
     joblib.dump(
         {"model": br, "feature_names": TTP_FEATURE_NAMES,
-         "trained_labels": trained_labels, "strategy": "binary_relevance"},
+         "trained_labels": trained_labels, "strategy": "binary_relevance",
+         "label_thresholds": label_thresholds},
         TTP_MODEL_PATH,
     )
     with open(TTP_METRICS_OUT, "w", encoding="utf-8") as f:
@@ -241,9 +399,13 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Train GuardGraph classifiers.")
     ap.add_argument("--target", choices=["family", "ttp"], default="family",
                     help="family = legacy multiclass model (default); ttp = multi-label TTP model")
+    ap.add_argument("--allow-prior-only", action="store_true",
+                    help="Ship the TTP model even if the all-zeros sanity check fails "
+                         "(i.e. it predicts techniques for a sample with no features). "
+                         "Use only while the training set still lacks a benign class.")
     args = ap.parse_args()
 
     if args.target == "ttp":
-        train_ttp()
+        train_ttp(allow_prior_only=args.allow_prior_only)
     else:
         main()

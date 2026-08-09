@@ -355,9 +355,9 @@ that is not explicitly present in the data blocks below.
 """
 
     # Hard budget check — Ollama silently truncates an oversized prompt rather
-    # than erroring, which is exactly how finding 1 went unnoticed (only 16,386
-    # of ~53,000 tokens were evaluated). Fail loudly instead of shipping a
-    # report grounded in a partial manifest.
+    # than erroring, which is how an earlier truncation went unnoticed for so
+    # long (only 16,386 of ~53,000 tokens were evaluated). Fail loudly instead
+    # of shipping a report grounded in a partial manifest.
     approx_tokens = (len(SYSTEM_PROMPT) + len(user_prompt)) // 3  # conservative chars/token
     if approx_tokens > settings.graphrag_prompt_token_budget:
         raise RuntimeError(

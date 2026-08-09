@@ -10,6 +10,12 @@ we assemble labels ourselves:
       (label_source="stix_ref").
   Stage B (weak bootstrap) — for local CICMalDroid2020 banking/SMS APKs, derive weak TTP
       labels from forensic-dictionary behaviors via BEHAVIOR_TO_TTPS (label_source="weak").
+  Stage C (benign negatives) — for local clean APKs, emit all-zero label rows
+      (label_source="benign"). Stages A and B produce positives only, which is what
+      taught the model label priors instead of evidence: an all-zeros feature vector
+      still predicted 9 techniques at >= 0.5. A classifier that has never been shown a
+      clean app has never been asked to say "no". Source 150-300 from F-Droid, APKPure
+      top charts, or AndroZoo's vt_detection=0 slice.
 
 Feature extraction reuses the SAME analysis functions the cold path uses and calls
 `build_ttp_feature_vector`, so training columns line up exactly with inference. Keep
@@ -20,6 +26,7 @@ Feature extraction reuses the SAME analysis functions the cold path uses and cal
 Usage:
     python scripts/build_ttp_dataset.py --stage a --max-per-family 15
     python scripts/build_ttp_dataset.py --stage b --cic-dir data/cicmaldroid_apks
+    python scripts/build_ttp_dataset.py --stage c --benign-dir data/benign_apks
     python scripts/build_ttp_dataset.py --stage all
     python scripts/build_ttp_dataset.py --stage a --download-workers 16   # faster network
 """
@@ -632,12 +639,63 @@ def stage_b(cic_dir: str, writer: IncrementalCsvWriter) -> int:
     return written
 
 
+# ── Stage C: benign negatives (all-zero label rows) ──
+
+def stage_c_benign(benign_dir: str, writer: IncrementalCsvWriter) -> int:
+    """
+    Emit an all-zero label row per clean APK. Returns rows written.
+
+    Deliberately unlike stage B, which drops rows that produce no techniques: here a
+    row with no positive labels IS the signal. These are the negatives the model needs
+    to learn that an absence of evidence means "no technique", not "the usual ones".
+
+    Nothing here verifies the APKs are actually clean — that is on whoever fills the
+    directory. Mislabelled malware in this set teaches the model the exact opposite of
+    the intended lesson, so prefer a source with a verdict attached (AndroZoo
+    vt_detection=0) over "it looked fine on the store page".
+    """
+    if not benign_dir or not os.path.isdir(benign_dir):
+        logger.warning(f"[dataset] benign dir '{benign_dir}' not found — skipping stage C.")
+        return 0
+    apks = [os.path.join(benign_dir, f) for f in os.listdir(benign_dir) if f.endswith(".apk")]
+    total = len(apks)
+    logger.info(f"[dataset] stage C: {total} benign APKs to consider")
+
+    written = 0
+    for idx, apk_path in enumerate(apks, 1):
+        name = os.path.basename(apk_path)
+        try:
+            if writer.is_done(compute_sha256(apk_path)):
+                continue
+        except Exception as e:
+            logger.warning(f"[dataset] could not hash {name}: {e}")
+            continue
+        logger.info(f"[dataset] [{idx}/{total}] analysing benign {name}")
+        try:
+            extracted = extract_ttp_row(apk_path)
+        except Exception as e:
+            logger.exception(f"[dataset] analysis failed for {name}: {e}")
+            continue
+        if extracted is None:
+            continue
+        vec, meta = extracted
+        writer.write(_row_dict(vec, set(), "benign", meta["sha256"], "benign"))
+        written += 1
+        logger.info(f"[dataset] stage C row: {meta['sha256'][:12]} (all labels 0)")
+    return written
+
+
 def main():
     ap = argparse.ArgumentParser(description="Build the multi-label TTP training dataset.")
-    ap.add_argument("--stage", choices=["a", "b", "all"], default="all")
+    ap.add_argument("--stage", choices=["a", "b", "c", "all"], default="all")
     ap.add_argument("--max-per-family", type=int, default=15)
     ap.add_argument("--apk-dir", default="data/ttp_apks")
     ap.add_argument("--cic-dir", default="data/cicmaldroid_apks")
+    ap.add_argument(
+        "--benign-dir", default="data/benign_apks",
+        help="Directory of known-clean APKs for stage C. Each becomes an all-zero "
+             "label row — the negative class the model currently has none of.",
+    )
     ap.add_argument("--out", default=OUT_CSV)
     ap.add_argument(
         "--download-workers", type=int, default=8,
@@ -690,6 +748,8 @@ def main():
             written += stage_a_analyze(args.apk_dir, manifest_path, writer)
         if args.stage in ("b", "all"):
             written += stage_b(args.cic_dir, writer)
+        if args.stage in ("c", "all"):
+            written += stage_c_benign(args.benign_dir, writer)
 
     if not os.path.exists(args.out) or os.path.getsize(args.out) == 0:
         logger.error("[dataset] No rows produced. Nothing written.")
@@ -707,6 +767,17 @@ def main():
         f"{len(df.columns)} cols total -> {args.out}"
     )
     logger.info(f"[dataset] Labels with >=1 positive: {len(pos_per_label)} -> {pos_per_label}")
+
+    label_cols = [t for t in TTP_LABELS if t in df.columns]
+    n_benign = int((df[label_cols].sum(axis=1) == 0).sum())
+    if n_benign:
+        logger.info(f"[dataset] Benign (all-zero label) rows: {n_benign}/{len(df)} ({n_benign / len(df):.1%})")
+    else:
+        logger.warning(
+            "[dataset] No benign rows — every sample in this dataset is malware, so the "
+            "trained model can only learn label priors. Add clean APKs with "
+            "--stage c --benign-dir <dir> before training."
+        )
 
 
 if __name__ == "__main__":

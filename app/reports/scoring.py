@@ -82,9 +82,25 @@ MATRIX_FLAG_SEVERITY = {
 }
 
 
-def classifier_confidence_component(predicted_ttps: dict[str, float]) -> float:
-    """Uses the max class confidence as the classifier signal."""
-    if not predicted_ttps:
+def classifier_confidence_component(
+    predicted_ttps: dict[str, float],
+    evidence_present: bool = True,
+) -> float:
+    """
+    Uses the max class confidence as the classifier signal.
+
+    `evidence_present=False` zeroes the component outright. The TTP model is
+    trained on 134 samples that are *all* malware — no benign class — so
+    it has learned label priors as much as evidence: an all-zeros 179-feature
+    vector still predicts 9 techniques at >= 0.5, several of them well above their
+    training prevalence (T1471 at 0.5446 against 0.097). A sample that yielded no
+    parsed code and no forensic anchors produces exactly that vector, and the
+    prior alone was worth 24.10 of the 33.92 "suspicious" score a 35-byte text
+    file renamed `.apk` received. Until the training set gains a benign class
+    (`scripts/build_ttp_dataset.py --benign-dir`), the classifier gets no vote
+    when it had nothing to look at.
+    """
+    if not evidence_present or not predicted_ttps:
         return 0.0
     return max(predicted_ttps.values())
 
@@ -252,7 +268,7 @@ def ioc_component(
 
 def _band_for(total: float) -> str:
     """Verdict band thresholds, shared so a cache hit reports the same band
-    a cold-path run would have for the same total_score (§9.3 finding 3)."""
+    a cold-path run would have for the same total_score."""
     if total <= 30:
         return "low"
     if total <= 60:
@@ -282,15 +298,23 @@ def compute_risk_score(
     cert_anomaly_count: int = 0,
     secondary_dex_count: int = 0,
     dropper_signal_count: int = 0,
+    # See classifier_confidence_component.
+    classifier_evidence_present: bool = True,
 ) -> RiskScoreBreakdown:
     if matched_anchor_behaviors is None:
         matched_anchor_behaviors = set()
 
-    c1 = classifier_confidence_component(predicted_ttps)
+    # Both model-derived components are gated together: if the classifier had no
+    # grounds for an opinion, the severity of the techniques it named is just as
+    # ungrounded. The deterministic components (permissions, anchors, obfuscation,
+    # IOC) are untouched — they are measurements, not predictions.
+    c1 = classifier_confidence_component(
+        predicted_ttps, evidence_present=classifier_evidence_present
+    )
     c2 = permission_api_risk_component(
         permissions, permission_matrix_flags=permission_matrix_flags
     )
-    c3 = ttp_severity_component(predicted_ttps)
+    c3 = ttp_severity_component(predicted_ttps) if classifier_evidence_present else 0.0
     c4 = forensic_anchor_component(matched_anchor_behaviors)
     c5 = obfuscation_component(obfuscation, entropy_threshold)
     c6 = reputation_component(cache_hit, cached_score, is_known_malware)

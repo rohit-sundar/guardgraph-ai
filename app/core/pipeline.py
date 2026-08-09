@@ -30,8 +30,12 @@ from app.reports.scoring import compute_risk_score
 from app.reports.graphrag import generate_report
 from app.core.config import settings
 
-# Min technique probability for a TTP to count as "predicted" in the manifest.
-# Probabilities are retained for risk scoring; this only gates what surfaces.
+# Default min technique probability for a TTP to count as "predicted" in the
+# manifest. Probabilities are retained for risk scoring; this only gates what
+# surfaces. A trained bundle may carry per-label thresholds calibrated on a
+# validation split (train_model.py --target ttp), which override this per
+# technique — with prevalences from 0.02 to 0.75 one global cut cannot serve
+# every label. This value remains the fallback for uncalibrated labels.
 TTP_PREDICT_THRESHOLD = 0.5
 from app.core.schemas import (
     IngestionResult,
@@ -44,6 +48,43 @@ from app.core.schemas import (
     SignatureYaraResult,
     AnalysisReport
 )
+
+# Limitation text surfaced to the analyst when the gate below fires.
+NO_CLASSIFIER_EVIDENCE_NOTE = (
+    "TTP classifier suppressed — no methods were parsed and no forensic anchors "
+    "matched, so its predictions would reflect the training-set label prior rather "
+    "than evidence from this sample. Score reflects deterministic signals only."
+)
+
+
+def has_deterministic_evidence(
+    cfg_count: int,
+    matched_behaviors: Set[str],
+    ttp_feature_vector: List[float],
+) -> bool:
+    """
+    Does the static analysis give the TTP classifier anything to reason about?
+
+    The model is trained on 134 all-malware samples with no benign class, so it
+    cannot represent "nothing suspicious here" — an all-zeros feature vector lands
+    in positive leaves and yields 9 techniques at >= 0.5. Confirmed end to end: a
+    ZIP holding one 35-byte text file renamed `.apk` (no AndroidManifest.xml, 0
+    methods, 0 CFGs, 0 subgraphs) scored 33.92 / `suspicious`, 24.10 of it from
+    classifier confidence alone.
+
+    So we require the analysis to have actually observed something before the
+    model's opinion counts: at least one parsed method CFG or one matched anchor
+    behavior, and a feature vector that is not identically zero. A manifest-only
+    APK whose DEX failed to parse gets no vote either — permissions alone are far
+    outside the distribution every estimator was fitted on.
+
+    This is an interim mitigation. The real fix is a benign class in the training
+    set; see `scripts/build_ttp_dataset.py --benign-dir`.
+    """
+    if not any(v != 0.0 for v in ttp_feature_vector):
+        return False
+    return cfg_count > 0 or bool(matched_behaviors)
+
 
 class AnalysisPipeline:
     @staticmethod
@@ -289,15 +330,21 @@ class AnalysisPipeline:
     def run_phase5_ml_classification(
         ttp_feature_vector: List[float],
         family_feature_vector: List[float],
+        evidence_present: bool = True,
     ) -> Tuple[Dict[str, float], Optional[str], Optional[float]]:
         """
         Phase 5: multi-label MITRE ATT&CK Mobile TTP classification.
 
         PRIMARY: the Binary-Relevance TTP model predicts technique probabilities
-        DIRECTLY (no FAMILY_TO_TTPS proxy). Techniques at/above TTP_PREDICT_THRESHOLD
-        surface in `predicted_ttps` (probabilities retained for risk scoring).
+        DIRECTLY (no FAMILY_TO_TTPS proxy). Techniques at/above their calibrated
+        threshold (falling back to TTP_PREDICT_THRESHOLD) surface in `predicted_ttps`;
+        probabilities are retained for risk scoring.
         AUXILIARY: the legacy family model still supplies `predicted_family` for the
         report/reputation when trained. Both degrade gracefully if untrained.
+
+        `evidence_present=False` (see has_deterministic_evidence) suppresses the TTP
+        model entirely rather than only discounting it downstream, so prior-driven
+        techniques never reach the manifest, the narrative or the signature cache.
         """
         logger.info("[Phase 5] Starting Multi-label TTP Classification...")
         start_time = time.time()
@@ -306,13 +353,18 @@ class AnalysisPipeline:
         family_confidence = None
 
         # Primary: direct multi-label technique prediction.
-        try:
-            ttp_preds = ttp_classifier.predict(ttp_feature_vector)
-            predicted_ttps = {
-                t: p for t, p in ttp_preds.items() if p >= TTP_PREDICT_THRESHOLD
-            }
-        except FileNotFoundError:
-            logger.warning("[Phase 5] TTP model not found. Proceeding with empty TTP predictions.")
+        if not evidence_present:
+            logger.warning(f"[Phase 5] {NO_CLASSIFIER_EVIDENCE_NOTE}")
+        else:
+            try:
+                ttp_preds = ttp_classifier.predict(ttp_feature_vector)
+                thresholds = ttp_classifier.thresholds()
+                predicted_ttps = {
+                    t: p for t, p in ttp_preds.items()
+                    if p >= thresholds.get(t, TTP_PREDICT_THRESHOLD)
+                }
+            except FileNotFoundError:
+                logger.warning("[Phase 5] TTP model not found. Proceeding with empty TTP predictions.")
 
         # Auxiliary: legacy family label (best-effort; often untrained in the prototype).
         try:
@@ -341,8 +393,15 @@ class AnalysisPipeline:
         cached_score: Optional[float] = None,
         sig_yara: Optional[SignatureYaraResult] = None,
         ingestion: Optional[IngestionResult] = None,
+        classifier_evidence_present: bool = True,
     ) -> RiskScoreBreakdown:
-        """Phase 6: Calculate weighted risk score component breakdown and verdict."""
+        """Phase 6: Calculate weighted risk score component breakdown and verdict.
+
+        `classifier_evidence_present=False` zeroes the two model-derived components
+        (see has_deterministic_evidence). Phase 5 already empties `predicted_ttps` in
+        that case, so this is belt-and-braces for callers that score without going
+        through Phase 5.
+        """
         logger.info("[Phase 6] Starting Risk Scoring...")
         start_time = time.time()
         matched_anchor_behaviors = set(all_matches.keys())
@@ -390,6 +449,7 @@ class AnalysisPipeline:
             cert_anomaly_count=cert_anoms,
             secondary_dex_count=secondary_dex,
             dropper_signal_count=dropper_sigs,
+            classifier_evidence_present=classifier_evidence_present,
         )
         duration = time.time() - start_time
         logger.info(f"[Phase 6] Completed in {duration:.3f}s. Risk Score: {risk_score.total_score} ({risk_score.verdict_band})")
