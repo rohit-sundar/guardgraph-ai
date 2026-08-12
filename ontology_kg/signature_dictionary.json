@@ -1,0 +1,113 @@
+{
+  "_comment": "Forensic Feature-of-Interest (FoI) dictionary. Each entry = one anchor-node rule. Extend this list — this is your core hackathon deliverable. severity_weight is 0-1, feeds into calculated_risk_score.",
+  "indicators": [
+    {
+      "indicator_id": "SMS_001",
+      "category": "sms_exfiltration",
+      "match_type": "api",
+      "signature": "Landroid/telephony/SmsManager;->sendTextMessage",
+      "behavior_id": "STEALTH_SMS_INTERCEPTION",
+      "behavior_label": "SMS-based OTP interception / exfiltration",
+      "related_permissions": ["android.permission.SEND_SMS", "android.permission.READ_SMS"],
+      "technique_ids": ["T1636"],
+      "tactic_ids": ["TA0041"],
+      "severity_weight": 0.9
+    },
+    {
+      "indicator_id": "SMS_002",
+      "category": "sms_exfiltration",
+      "match_type": "permission",
+      "signature": "android.permission.RECEIVE_SMS",
+      "behavior_id": "OTP_BROADCAST_RECEIVER_ABUSE",
+      "behavior_label": "Broadcast receiver registered for incoming SMS/OTP",
+      "related_permissions": ["android.permission.RECEIVE_SMS"],
+      "technique_ids": ["T1636", "T1417"],
+      "tactic_ids": ["TA0041"],
+      "severity_weight": 0.85
+    },
+    {
+      "indicator_id": "REFLECT_001",
+      "category": "dynamic_reflection",
+      "match_type": "api",
+      "signature": "Ljava/lang/reflect/Method;->invoke",
+      "behavior_id": "REFLECTIVE_CODE_EXECUTION",
+      "behavior_label": "Reflection used to obscure API calls / evade static detection",
+      "related_permissions": [],
+      "technique_ids": ["T1406"],
+      "tactic_ids": ["TA0005"],
+      "severity_weight": 0.6
+    },
+    {
+      "indicator_id": "CRYPTO_001",
+      "category": "cryptography",
+      "match_type": "api",
+      "signature": "Ljavax/crypto/Cipher;->doFinal",
+      "behavior_id": "PAYLOAD_ENCRYPTION",
+      "behavior_label": "Encrypted payload / string decryption at runtime, possible ransomware or C2 obfuscation",
+      "related_permissions": [],
+      "technique_ids": ["T1406"],
+      "tactic_ids": ["TA0005"],
+      "severity_weight": 0.5
+    },
+    {
+      "indicator_id": "OVERLAY_001",
+      "category": "credential_harvesting",
+      "match_type": "permission",
+      "signature": "android.permission.SYSTEM_ALERT_WINDOW",
+      "behavior_id": "OVERLAY_CREDENTIAL_THEFT",
+      "behavior_label": "Overlay window drawn over banking app to steal credentials",
+      "related_permissions": ["android.permission.SYSTEM_ALERT_WINDOW"],
+      "technique_ids": ["T1411"],
+      "tactic_ids": ["TA0004"],
+      "severity_weight": 0.95
+    },
+    {
+      "indicator_id": "ACCESS_001",
+      "category": "credential_harvesting",
+      "match_type": "component",
+      "signature": "android.accessibilityservice.AccessibilityService",
+      "behavior_id": "ACCESSIBILITY_ABUSE",
+      "behavior_label": "Accessibility service abused to read screen content / auto-click (keylogging-equivalent)",
+      "related_permissions": ["android.permission.BIND_ACCESSIBILITY_SERVICE"],
+      "technique_ids": ["T1417"],
+      "tactic_ids": ["TA0009"],
+      "severity_weight": 0.95
+    },
+    {
+      "indicator_id": "C2_001",
+      "category": "c2_network",
+      "match_type": "string_pattern",
+      "signature": "hardcoded_url_or_ip_regex",
+      "behavior_id": "C2_COMMUNICATION",
+      "behavior_label": "Hardcoded C2 endpoint or suspicious HTTP client usage",
+      "related_permissions": ["android.permission.INTERNET"],
+      "technique_ids": ["T1437"],
+      "tactic_ids": ["TA0011"],
+      "severity_weight": 0.8
+    },
+    {
+      "indicator_id": "PERSIST_001",
+      "category": "persistence",
+      "match_type": "component",
+      "signature": "android.intent.action.BOOT_COMPLETED",
+      "behavior_id": "BOOT_PERSISTENCE",
+      "behavior_label": "App registers to auto-start on device boot",
+      "related_permissions": ["android.permission.RECEIVE_BOOT_COMPLETED"],
+      "technique_ids": ["T1398"],
+      "tactic_ids": ["TA0028"],
+      "severity_weight": 0.55
+    },
+    {
+      "indicator_id": "DEXLOAD_001",
+      "category": "dynamic_loading",
+      "match_type": "api",
+      "signature": "Ldalvik/system/DexClassLoader;-><init>",
+      "behavior_id": "DYNAMIC_CODE_LOADING",
+      "behavior_label": "Loads additional Dalvik code at runtime, common in droppers",
+      "related_permissions": [],
+      "technique_ids": ["T1407"],
+      "tactic_ids": ["TA0005"],
+      "severity_weight": 0.75
+    }
+  ]
+}
