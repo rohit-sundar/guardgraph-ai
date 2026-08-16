@@ -3,7 +3,7 @@ Regression tests for the TTP model's inability to discriminate.
 
 The model is trained on 134 samples that are all malware, with no benign class, so
 it has learned label priors as much as evidence. Measured against the shipped
-`.joblib`, an all-zeros 179-feature vector predicts 9 techniques at >= 0.5, several
+`.joblib`, an all-zeros 181-feature vector predicts 9 techniques at >= 0.5, several
 of them well above their training prevalence (T1471 — ransomware, 9.7% prevalence —
 at 0.5446). End to end that meant a ZIP holding one 35-byte text file renamed `.apk`
 scored 33.92 / `suspicious`, of which 24.10 points came from classifier confidence
@@ -28,9 +28,10 @@ from app.core.pipeline import (
     NO_CLASSIFIER_EVIDENCE_NOTE,
 )
 from app.core.schemas import ObfuscationSignal
+from app.ml.features import FEATURE_NAMES, TTP_FEATURE_NAMES
 from app.reports.scoring import classifier_confidence_component, compute_risk_score
 
-N_TTP_FEATURES = 179
+N_TTP_FEATURES = len(TTP_FEATURE_NAMES)
 
 
 def _obfuscation(entropy: float = 0.0) -> ObfuscationSignal:
@@ -239,7 +240,7 @@ class TestSuppressionReachesTheReport(unittest.TestCase):
             mp.run_phase2_graph_construction.return_value = ({}, 0.0)   # 0 CFGs
             mp.run_phase3_forensic_matching.return_value = ({}, [], []) # 0 anchors
             mp.run_phase4_feature_engineering.return_value = (
-                obf, [0.0] * 33, [0.0] * N_TTP_FEATURES, 0.0, 0
+                obf, [0.0] * len(FEATURE_NAMES), [0.0] * N_TTP_FEATURES, 0.0, 0
             )
             mp.run_phase5_ml_classification.return_value = ({}, None, None)
             mp.run_phase6_risk_scoring.return_value = risk

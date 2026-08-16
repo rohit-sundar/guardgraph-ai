@@ -116,7 +116,7 @@ samples the model doesn't recognise.
 Column order is load-bearing (XGBoost validates count, not meaning) — freeze these before
 training:
 - `app/ml/labels.py` → `TTP_LABELS` (technique output order)
-- `app/ml/features.py` → `TTP_FEATURE_NAMES` / `build_ttp_feature_vector` (179 features)
+- `app/ml/features.py` → `TTP_FEATURE_NAMES` / `build_ttp_feature_vector` (181 features)
 
 **Ontology grounding** — run once. Required for grounded reports, even without a trained model.
 ```bash

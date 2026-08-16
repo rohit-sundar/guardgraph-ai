@@ -184,9 +184,9 @@ def test_yara_rule_scanning():
     assert len(clean_matches) == 0
 
 
-def test_feature_vector_33_features():
-    # Verify that the vector length matches the expanded 33 features
-    assert len(FEATURE_NAMES) == 33
+def test_feature_vector_35_features():
+    # Verify that the vector length matches the expanded 35 features
+    assert len(FEATURE_NAMES) == 35
     vec = build_feature_vector(
         permissions=["android.permission.READ_SMS"],
         matched_behaviors={"OTP_INTERCEPTION"},
@@ -198,7 +198,7 @@ def test_feature_vector_33_features():
         yara_rule_match_count=2,
         yara_max_severity=0.85
     )
-    assert len(vec) == 33
+    assert len(vec) == 35
     # Check that signature/YARA features are at the tail of the vector
     assert vec[-3] == 1.0  # signature_match_count
     assert vec[-2] == 2.0  # yara_rule_match_count

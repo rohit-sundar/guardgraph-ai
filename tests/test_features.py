@@ -27,8 +27,8 @@ def test_feature_vector_length():
         yara_max_severity=0.85,
     )
     assert len(vec) == len(FEATURE_NAMES)
-    assert len(vec) == 33
-    print(f"OK: feature vector length {len(vec)} matches FEATURE_NAMES (33)")
+    assert len(vec) == 35
+    print(f"OK: feature vector length {len(vec)} matches FEATURE_NAMES (35)")
 
 
 def test_ttp_feature_vector_length():
@@ -55,6 +55,33 @@ def test_ttp_feature_vector_length():
     print(f"OK: TTP feature vector length {len(populated)} matches TTP_FEATURE_NAMES ({len(TTP_FEATURE_NAMES)})")
 
 
+def test_behavior_features_cover_the_forensic_dictionary():
+    """
+    Every behavior Phase 3 can match must reach the feature vectors.
+
+    DYNAMIC_CODE_LOADING and ACCESSIBILITY_ABUSE were matched by Phase 3 and
+    weighted in BEHAVIOR_SEVERITY (0.70 and 0.90) yet appeared in neither vector,
+    so ACCESSIBILITY_ABUSE — the second-highest behavior weight and the single
+    most characteristic banking-trojan signal — was scored and reported but could
+    never influence a prediction. A behavior added to FORENSIC_DICTIONARY without
+    being added here reintroduces exactly that silent gap.
+    """
+    from app.analysis.forensic import FORENSIC_DICTIONARY
+    from app.ml.features import BEHAVIOR_FEATURES
+
+    missing = set(FORENSIC_DICTIONARY) - set(BEHAVIOR_FEATURES)
+    assert not missing, (
+        f"{sorted(missing)} can be matched by Phase 3 but reach no feature vector. "
+        "Add them to BEHAVIOR_FEATURES, then rebuild the dataset and retrain — "
+        "the vector lengths are frozen contracts."
+    )
+    # The reverse direction would produce a column that is always 0.
+    unmatched = set(BEHAVIOR_FEATURES) - set(FORENSIC_DICTIONARY)
+    assert not unmatched, f"{sorted(unmatched)} are features nothing can ever set"
+    print(f"OK: all {len(FORENSIC_DICTIONARY)} forensic behaviors reach the feature vectors")
+
+
 if __name__ == "__main__":
     test_feature_vector_length()
     test_ttp_feature_vector_length()
+    test_behavior_features_cover_the_forensic_dictionary()

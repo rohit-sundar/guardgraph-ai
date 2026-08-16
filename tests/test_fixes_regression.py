@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.core.config import settings
+from app.ml.features import FEATURE_NAMES, TTP_FEATURE_NAMES
 
 
 # ─── Bug 1: Cache lookup gate on sha256 ──────────────────────────────────────
@@ -101,7 +102,7 @@ class TestStoreSigAlwaysCalledAfterColdPath(unittest.TestCase):
             mp.run_phase1b_signature_yara.return_value = real_sig_yara
             mp.run_phase2_graph_construction.return_value = ({}, 0.0)
             mp.run_phase3_forensic_matching.return_value = ({}, [], [])
-            mp.run_phase4_feature_engineering.return_value = (mock_obf, [0.0]*33, [0.0]*179, 0.0, 0)
+            mp.run_phase4_feature_engineering.return_value = (mock_obf, [0.0]*len(FEATURE_NAMES), [0.0]*len(TTP_FEATURE_NAMES), 0.0, 0)
             # predicted_family is None (classifier untrained / FileNotFoundError path)
             mp.run_phase5_ml_classification.return_value = ({}, None, None)
             mp.run_phase6_risk_scoring.return_value = mock_risk

@@ -19,7 +19,7 @@ from app.core.schemas import (
     RiskScoreBreakdown
 )
 from app.ml.labels import TTP_LABELS
-from app.ml.features import TTP_FEATURE_NAMES, build_ttp_feature_vector
+from app.ml.features import FEATURE_NAMES, TTP_FEATURE_NAMES, build_ttp_feature_vector
 
 class TestAnalysisPipelinePhases(unittest.TestCase):
     def test_pipeline_methods_exist(self):
@@ -44,7 +44,7 @@ class TestAnalysisPipelinePhases(unittest.TestCase):
             "Lcom/test/app/MainActivity;->onCreate()V": nx.DiGraph()
         }
 
-        # Phase 4 now returns 5 values: obfuscation, family (33) vec, TTP (179) vec, density, nodes
+        # Phase 4 now returns 5 values: obfuscation, family (35) vec, TTP (181) vec, density, nodes
         obfuscation, vec, ttp_vec, mean_density, total_nodes = AnalysisPipeline.run_phase4_feature_engineering(
             ingestion=mock_ingestion,
             cfgs=mock_cfgs,
@@ -56,9 +56,9 @@ class TestAnalysisPipelinePhases(unittest.TestCase):
 
         self.assertIsInstance(obfuscation, ObfuscationSignal)
         self.assertIsInstance(vec, list)
-        self.assertEqual(len(vec), 33)  # legacy family vector (FEATURE_NAMES)
+        self.assertEqual(len(vec), len(FEATURE_NAMES))  # legacy family vector
         self.assertIsInstance(ttp_vec, list)
-        self.assertEqual(len(ttp_vec), len(TTP_FEATURE_NAMES))  # multi-label TTP vector (179)
+        self.assertEqual(len(ttp_vec), len(TTP_FEATURE_NAMES))  # multi-label TTP vector (181)
         self.assertEqual(mean_density, 0.0)
         self.assertEqual(total_nodes, 0)
 

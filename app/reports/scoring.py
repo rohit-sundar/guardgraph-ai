@@ -91,7 +91,7 @@ def classifier_confidence_component(
 
     `evidence_present=False` zeroes the component outright. The TTP model is
     trained on 134 samples that are *all* malware — no benign class — so
-    it has learned label priors as much as evidence: an all-zeros 179-feature
+    it has learned label priors as much as evidence: an all-zeros 181-feature
     vector still predicts 9 techniques at >= 0.5, several of them well above their
     training prevalence (T1471 at 0.5446 against 0.097). A sample that yielded no
     parsed code and no forensic anchors produces exactly that vector, and the

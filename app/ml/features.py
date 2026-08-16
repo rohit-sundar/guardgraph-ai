@@ -24,6 +24,15 @@ PERMISSION_FEATURES = [
 
 # Behavior flags from the forensic dictionary — one binary feature per
 # behavior category (was this behavior observed anywhere in the app).
+#
+# This list must cover FORENSIC_DICTIONARY in full. DYNAMIC_CODE_LOADING and
+# ACCESSIBILITY_ABUSE were matched by Phase 3 and weighted in BEHAVIOR_SEVERITY
+# (0.70 and 0.90) but reached neither feature vector, so the second-highest
+# behavior weight in the table — and the single most characteristic
+# banking-trojan signal — could be scored and reported yet never influence a
+# prediction. Adding them moves FEATURE_NAMES 33 -> 35 and TTP_FEATURE_NAMES
+# 179 -> 181; both are frozen contracts, so any change here requires a full
+# dataset rebuild and retrain, not just a retrain.
 BEHAVIOR_FEATURES = [
     "STEALTH_SMS_INTERCEPTION",
     "OTP_INTERCEPTION",
@@ -31,6 +40,8 @@ BEHAVIOR_FEATURES = [
     "CRYPTOGRAPHY_USAGE",
     "CREDENTIAL_HARVESTING",
     "C2_BEHAVIOR",
+    "DYNAMIC_CODE_LOADING",
+    "ACCESSIBILITY_ABUSE",
 ]
 
 # Topological stats — must match keys produced by topology.py exactly.

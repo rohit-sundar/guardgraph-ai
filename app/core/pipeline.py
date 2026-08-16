@@ -242,8 +242,8 @@ class AnalysisPipeline:
         Phase 4: topological invariants + obfuscation signals + feature vectors.
 
         Builds TWO feature vectors:
-          - `feature_vector` (33)     — legacy family model (unchanged semantics).
-          - `ttp_feature_vector` (179) — multi-label TTP model; GUARD topology stats
+          - `feature_vector` (35)     — legacy family model (unchanged semantics).
+          - `ttp_feature_vector` (181) — multi-label TTP model; GUARD topology stats
             aggregated across ALL anchor subgraphs (not just the first), plus the
             DroidTTP-style manifest/API presence vocab.
         """
@@ -258,7 +258,7 @@ class AnalysisPipeline:
             method_parse_failure_rate=parse_failure_rate,
         )
 
-        # Legacy family (33) vector — unchanged: first-subgraph invariants.
+        # Legacy family (35) vector — unchanged: first-subgraph invariants.
         if behavioral_subgraphs:
             agg_invariants = behavioral_subgraphs[0].topological_invariants
         else:
@@ -286,7 +286,7 @@ class AnalysisPipeline:
             yara_max_severity=yara_max_severity,
         )
 
-        # Multi-label TTP (179) vector. GUARD topology aggregated across ALL anchor
+        # Multi-label TTP (181) vector. GUARD topology aggregated across ALL anchor
         # subgraphs; sensitive-API presence over every API call observed in the CFGs.
         # Keep this construction in sync with scripts/build_ttp_dataset.py::extract_ttp_row.
         all_apis: Set[str] = set()
