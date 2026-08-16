@@ -28,6 +28,9 @@ test_malware_samples/
 # Downloaded APKs from MalwareBazaar (scripts/build_ttp_dataset.py) — real malware
 data/ttp_apks/
 
+# Benign APK corpus (scripts/build_ttp_dataset.py --stage c) — ~1GB, regeneratable
+data/benign_apks/
+
 # Run logs (scripts/build_ttp_dataset.py writes a per-run file sink here) —
 # keep the directory in the repo, ignore everything written into it
 logs/*

@@ -22,10 +22,14 @@ guardgraph-ai/
 │   └── reports/        risk scoring, GraphRAG report generation
 ├── data/
 │   ├── samples/        put test APKs here (gitignored)
+│   ├── benign_apks/    known-clean Stage C corpus (gitignored, ~1 GB)
 │   └── models/         put trained model.json here
 ├── scripts/
-│   ├── train_model.py       CICMalDroid2020 training script skeleton
-│   └── load_ontology.py     loads MITRE ATT&CK Mobile / CAPEC into Neo4j
+│   ├── train_model.py            CICMalDroid2020 training script skeleton
+│   ├── build_ttp_dataset.py      assembles the multi-label TTP dataset (stages A/B/C)
+│   ├── download_benign_apks.py   fetches the F-Droid known-clean corpus for stage C
+│   ├── download_yara_rules.py    fetches the community YARA rule corpus
+│   └── load_ontology.py          loads MITRE ATT&CK Mobile / CAPEC into Neo4j
 ├── tests/
 ├── docker-compose.yml   Neo4j only — API runs locally for prototype
 ├── requirements.txt
