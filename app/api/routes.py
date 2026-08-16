@@ -25,6 +25,7 @@ import tempfile
 import uuid
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from loguru import logger
 
 from app.graph.cache import lookup_signature, store_signature
 from app.reports.scoring import compute_risk_score, _band_for
@@ -32,6 +33,14 @@ from app.core.config import settings
 from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown
 
 router = APIRouter()
+
+# Score assigned when the APK cannot be parsed at all. Deliberately mid-band
+# ("suspicious") rather than 0: a file that defeats Androguard's AXML parser or
+# carries a corrupted ZIP central directory is usually doing so on purpose, and
+# reporting "low" on an anti-analysis sample is the worse error. It is not scored
+# higher either, because nothing was actually observed — no anchors, no
+# permissions, no IoCs. The band says "look at this by hand", which is the truth.
+UNPARSEABLE_RISK_SCORE = 50.0
 
 
 @router.post("/analyze", response_model=AnalysisReport)
@@ -46,11 +55,97 @@ async def analyze(file: UploadFile = File(...)):
         with open(tmp_path, "wb") as f:
             shutil.copyfileobj(file.file, f)
 
-        result = _run_analysis(tmp_path)
+        try:
+            result = _run_analysis(tmp_path)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # Malformed AXML attribute names and corrupted EOCD records are
+            # deliberate anti-analysis techniques — 12% of this project's own
+            # malware corpus takes the pipeline down this way. An analyst who
+            # uploads one deserves a verdict recording that the sample resists
+            # parsing, not an opaque 500 with the reason only in the server log.
+            logger.exception(f"[analyze] analysis failed for {file.filename}: {exc}")
+            result = _unparseable_report(tmp_path, exc)
         return result
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
+    """
+    Builds the verdict returned when static analysis cannot complete.
+
+    The SHA-256 is recomputed from the raw bytes — it needs no parsing and is the
+    one fact still available, so the analyst can pivot to threat intel on the hash
+    even though nothing was extracted from the file. The sample is NOT cached: a
+    parse failure is a property of this analyzer, not a verdict worth replaying on
+    the hot path after the underlying cause is fixed.
+    """
+    from app.analysis.ingest import compute_sha256
+
+    try:
+        sha256 = compute_sha256(filepath)
+    except Exception:  # unreadable temp file — nothing left to report on
+        sha256 = ""
+
+    reason = f"{type(exc).__name__}: {exc}"
+    obfuscation = ObfuscationSignal(
+        string_entropy_score=0.0,
+        flattening_suspected=False,
+        flattening_outlier_nodes=[],
+        reflection_call_count=0,
+        unresolved_reflection_targets=0,
+        method_parse_failure_rate=1.0,  # nothing parsed — 100% of the app is a gap
+        coverage_note="static analysis aborted — the APK could not be parsed",
+    )
+    manifest = AnalysisManifest(
+        target_package=None,
+        sha256=sha256,
+        cache_hit=False,
+        total_nodes_parsed=0,
+        graph_density=0.0,
+        behavioral_subgraphs=[],
+        obfuscation=obfuscation,
+        predicted_ttps={},
+        predicted_family=None,
+        family_confidence=None,
+        signature_yara=None,
+    )
+    risk_score = RiskScoreBreakdown(
+        # Every component is None, not 0.0 — the same distinction the hot path
+        # draws. Nothing was computed; asserting "we looked and found nothing"
+        # about a file we could not open would be a lie.
+        classifier_confidence_component=None,
+        permission_api_component=None,
+        ttp_severity_component=None,
+        forensic_anchor_component=None,
+        obfuscation_component=None,
+        reputation_component=None,
+        ioc_component=None,
+        total_score=UNPARSEABLE_RISK_SCORE,
+        verdict_band=_band_for(UNPARSEABLE_RISK_SCORE),
+        zero_day_indicator=False,
+    )
+    return AnalysisReport(
+        manifest=manifest,
+        risk_score=risk_score,
+        narrative_report=(
+            "[No narrative generated — static analysis could not parse this APK.]"
+        ),
+        limitations=[
+            "ANALYSIS INCOMPLETE: the APK could not be parsed, so no permissions, "
+            "forensic anchors, IoCs or TTPs were extracted. Every field in this "
+            "manifest is empty because nothing was observed, not because nothing "
+            "is there.",
+            f"Parser failure: {reason}",
+            "A file that defeats the parser is frequently doing so deliberately "
+            "(malformed AXML, corrupted ZIP central directory). Treat the sample "
+            "as unverified and triage it manually.",
+            f"Score fixed at {UNPARSEABLE_RISK_SCORE} — not derived from evidence.",
+        ],
+    )
 
 
 from app.core.pipeline import (
@@ -147,7 +242,7 @@ def _run_analysis(filepath: str) -> AnalysisReport:
     # Merge C2 IoCs found in DEX string literals into ingestion
     ingestion = AnalysisPipeline.merge_c2_from_strings(ingestion, all_strings)
 
-    # --- Phase 4: Feature Engineering (family 33-vec + multi-label TTP 179-vec) ---
+    # --- Phase 4: Feature Engineering (family 35-vec + multi-label TTP 181-vec) ---
     obfuscation, feature_vector, ttp_feature_vector, mean_density, total_nodes = (
         AnalysisPipeline.run_phase4_feature_engineering(
             ingestion, cfgs, all_matches, behavioral_subgraphs, all_strings, parse_failure_rate,

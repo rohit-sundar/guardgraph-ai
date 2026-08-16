@@ -324,5 +324,74 @@ class TestGroundingCheckLogic(unittest.TestCase):
         _grounding_check("No techniques predicted.", set())  # must not raise
 
 
+# ─── T2: unparseable APKs return a verdict, not a bare 500 ───────────────────
+
+class TestUnparseableApkReturnsVerdict(unittest.TestCase):
+    """
+    12% of the project's own malware corpus crashed the pipeline with unhandled
+    IndexError / ValueError from Androguard and apkInspector — malformed AXML
+    attribute names and corrupted ZIP end-of-central-directory records, both
+    deliberate anti-analysis techniques. /analyze had a try/finally with no
+    except, so an analyst uploading a hostile sample got an opaque 500 with the
+    reason only in the server log.
+    """
+
+    def _corrupt_apk(self) -> str:
+        import tempfile
+        fd, path = tempfile.mkstemp(suffix=".apk")
+        with os.fdopen(fd, "wb") as f:
+            f.write(b"PK\x03\x04" + b"\x00" * 64)  # ZIP magic, no central directory
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_report_is_structured_and_carries_the_hash(self):
+        from app.api.routes import _unparseable_report, UNPARSEABLE_RISK_SCORE
+        from app.analysis.ingest import compute_sha256
+
+        path = self._corrupt_apk()
+        report = _unparseable_report(path, ValueError("EOCD signature not found"))
+
+        # The hash needs no parsing, so it must survive — it is the one pivot the
+        # analyst still has into threat intel.
+        self.assertEqual(report.manifest.sha256, compute_sha256(path))
+        self.assertEqual(report.risk_score.total_score, UNPARSEABLE_RISK_SCORE)
+        self.assertEqual(report.risk_score.verdict_band, "suspicious")
+
+        # Components stay None, never 0.0: nothing was computed, and 0.0 would
+        # falsely assert "we looked and found no evidence".
+        self.assertIsNone(report.risk_score.forensic_anchor_component)
+        self.assertIsNone(report.risk_score.obfuscation_component)
+
+        # The failure must be legible in the report itself, not just the log.
+        joined = " ".join(report.limitations)
+        self.assertIn("ANALYSIS INCOMPLETE", joined)
+        self.assertIn("EOCD signature not found", joined)
+
+    def test_endpoint_returns_200_not_500(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        with open(self._corrupt_apk(), "rb") as f:
+            payload = f.read()
+
+        with patch("app.api.routes._run_analysis", side_effect=IndexError("string index out of range")):
+            resp = TestClient(app).post(
+                "/analyze", files={"file": ("corrupt.apk", payload, "application/vnd.android.package-archive")}
+            )
+
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body["risk_score"]["verdict_band"], "suspicious")
+        self.assertIn("string index out of range", " ".join(body["limitations"]))
+
+    def test_non_apk_still_rejected_with_400(self):
+        """The 400 path is correct behavior and must not be swallowed by the new except."""
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        resp = TestClient(app).post("/analyze", files={"file": ("notapk.txt", b"hello", "text/plain")})
+        self.assertEqual(resp.status_code, 400)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
