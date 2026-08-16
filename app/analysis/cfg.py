@@ -14,8 +14,34 @@ Changes vs. original:
 - §10.3: is_method_relevant() pre-filter skips methods with no API/string
   overlap with the forensic dictionary before doing full CFG construction,
   reducing runtime on large benign apps without changing detection outcomes.
+- T1: const-string operands are parsed delimiter-agnostically. Both extraction
+  sites previously tested for a single quote; Androguard 4.1.x emits double
+  quotes, so the only literals that survived were ones whose *text* contained
+  an apostrophe — and those were then split on it. See parse_const_string().
 """
+import re
+
 import networkx as nx
+
+# Androguard renders a const-string operand as `reg, <delimiter>literal<delimiter>`.
+# Which delimiter it uses is a property of the Androguard version, not of the APK:
+# 4.1.x (the pinned version) emits double quotes, older builds emitted single ones.
+# Capture whichever character opens the literal and match it again at the close, so
+# the parse survives either — and so an apostrophe *inside* a double-quoted literal
+# is treated as text rather than as a delimiter. Greedy `.*` + re.S takes the last
+# matching delimiter, which keeps embedded delimiters of the other kind intact.
+_CONST_STRING_RE = re.compile(r"""(['"])(.*)\1""", re.S)
+
+
+def parse_const_string(output: str) -> str | None:
+    """
+    Extracts the literal from a const-string instruction's operand text.
+
+    Returns None when the operand carries no delimited literal at all, which the
+    callers treat as "no string here" rather than as an empty string.
+    """
+    match = _CONST_STRING_RE.search(output)
+    return match.group(2) if match else None
 
 
 def build_method_cfg(method_analysis) -> nx.DiGraph:
@@ -74,9 +100,8 @@ def enrich_acfg(g: nx.DiGraph, method_analysis) -> nx.DiGraph:
             if mnemonic.startswith("invoke"):
                 api_calls.append(output.strip())
             if mnemonic == "const-string":
-                # output format: "reg, 'literal'" — extract the literal
-                if "'" in output:
-                    literal = output.split("'", 1)[1].rsplit("'", 1)[0]
+                literal = parse_const_string(output)
+                if literal is not None:
                     string_literals.append(literal)
 
         g.nodes[node_id]["opcode_frequency"] = opcode_freq
@@ -114,10 +139,16 @@ def is_method_relevant(
                     if any(api in output for api in relevant_api_substrings):
                         return True
 
-                if mnemonic == "const-string" and "'" in output:
-                    literal = output.split("'", 1)[1].rsplit("'", 1)[0].lower()
-                    if any(s in literal for s in relevant_string_substrings):
-                        return True
+                if mnemonic == "const-string":
+                    # Must use the same parse as enrich_acfg: a method whose only
+                    # relevance is a dictionary *string* is never selected for CFG
+                    # construction otherwise, so fixing one site without the other
+                    # changes nothing.
+                    literal = parse_const_string(output)
+                    if literal is not None:
+                        literal = literal.lower()
+                        if any(s in literal for s in relevant_string_substrings):
+                            return True
     except Exception:
         # If the pre-filter itself fails, include the method to be safe —
         # skipping on error risks false negatives.
