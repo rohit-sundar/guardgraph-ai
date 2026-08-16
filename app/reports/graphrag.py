@@ -70,14 +70,15 @@ STRICT RULES — violating ANY of these makes the report unusable:
    classifier confidence alone.
 10. Do not add sections, bullet points, or conclusions that go beyond what the data
    supports. If a section would require invented evidence, omit it entirely.
-7. Do not use hedging filler language beyond what's needed for genuine uncertainty.
-8. If the risk score breakdown has "zero_day_indicator": true, prominently flag this as a
-   POSSIBLE NOVEL / ZERO-DAY VARIANT. Explain that the verdict rests on model-free evidence
-   (deterministic matched APIs/permissions and/or structural obfuscation/coverage signals)
-   while the classifier has low familiarity with this sample — not on classifier confidence.
->>>>>>> 364c1bf (feat(analysis): add static malware anchors (C2 IoCs, permission matrices, cert anomalies, secondary DEX payloads, uncompressed YARA byte scanning))
+
 Write for a bank fraud-operations audience: clear, direct, actionable.
 """
+
+# Cap for the open-ended static-anchor lists forwarded to the LLM (extracted C2
+# endpoints, payload assets, dropper signals, exported components). cert_anomalies,
+# permission_matrix_flags and accessibility_flags are drawn from small enumerated
+# sets and need no cap.
+_ANCHOR_LIST_CAP = 20
 
 
 def _summarize_behavioral_subgraphs(behavioral_subgraphs: list) -> dict:
@@ -315,6 +316,24 @@ def generate_report(
         "predicted_family": manifest.predicted_family,
         "family_confidence": manifest.family_confidence,
         "permissions": manifest.permissions,
+        # Deterministic static anchors. SYSTEM_PROMPT rule 5 instructs the model to
+        # cite these by name; until they were forwarded here, rule 5 was naming
+        # eight fields absent from the context — an open invitation to fabricate in
+        # the one component whose entire purpose is bounded output.
+        #
+        # The list-valued ones are capped. The module enforces a hard token budget
+        # that RAISES rather than truncates (see below), and payload_assets alone is
+        # capped at 100 upstream, so an unbounded dump could turn a good report into
+        # "[Report generation unavailable: ...]". Twenty entries is representative
+        # evidence — the same trade _summarize_behavioral_subgraphs makes.
+        "c2_indicators": manifest.c2_indicators[:_ANCHOR_LIST_CAP],
+        "cert_anomalies": manifest.cert_anomalies,
+        "permission_matrix_flags": manifest.permission_matrix_flags,
+        "accessibility_flags": manifest.accessibility_flags,
+        "secondary_dex_count": manifest.secondary_dex_count,
+        "payload_assets": manifest.payload_assets[:_ANCHOR_LIST_CAP],
+        "dropper_signals": manifest.dropper_signals[:_ANCHOR_LIST_CAP],
+        "exported_risks": manifest.exported_risks[:_ANCHOR_LIST_CAP],
         "behavioral_subgraph_summary": _summarize_behavioral_subgraphs(
             manifest.behavioral_subgraphs
         ),
