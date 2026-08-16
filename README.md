@@ -63,7 +63,12 @@ docker compose up -d
 ```
 
 ```bash
-# 5. Run the API (leave running; --reload for development)
+# 5. Download the community YARA rules (run once, or to refresh)
+python scripts/download_yara_rules.py
+```
+
+```bash
+# 6. Run the API (leave running; --reload for development)
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -84,7 +89,7 @@ curl -X POST http://localhost:8000/analyze -F "file=@data/samples/test.apk"
 | 4-hop subgraph extraction | Working |
 | Topological feature mining | Working (degree/closeness/clustering; eigenvector/Katz stubbed — slow on large graphs, add if needed) |
 | Entropy-based obfuscation scoring | Working |
-| Signature + YARA scanning (hash/cert DB, VirusTotal, MalwareBazaar, YARA rules) | Working; online triage (VT/MalwareBazaar) needs API keys in `.env`, otherwise local hash/cert + built-in YARA rules run offline |
+| Signature + YARA scanning (hash/cert DB, VirusTotal, MalwareBazaar, YARA rules) | Working; online triage (VT/MalwareBazaar) needs API keys in `.env`, otherwise local hash/cert + YARA run offline. 8 built-in rules always load; the ~500 community rule *files* require quickstart step 5 — without it the engine runs built-in-only and says so in the startup log |
 | Family XGBoost inference (auxiliary) | Stub — needs `data/models/guardgraph_xgb_v1.json`. Not loaded by default, so `classifier_confidence` contributes 0 to the score until trained |
 | Multi-label MITRE ATT&CK TTP classifier (primary, cold path) | Working code; needs `data/models/guardgraph_ttp_br_v1.joblib` from `train_model.py --target ttp`. Degrades gracefully (empty TTPs) until trained — until then `ttp_severity` contributes 0 |
 | Neo4j cache lookup (hot path) | Working, needs Neo4j running + ontology loaded. Cold-path caching only writes a `Sample` node when the family model predicts a family, so with the model untrained nothing is cached back |
@@ -119,22 +124,34 @@ python scripts/build_ttp_label_space.py    # ATT&CK Mobile label space + ontolog
 python scripts/load_ontology.py            # into Neo4j; --starter for an offline 5-technique seed
 ```
 
-**Training** — optional. Stage A pulls real APKs from MalwareBazaar (needs
-`MALWAREBAZAAR_API_KEY`; downloads live malware), Stage B weak-labels local samples.
-Run Stage A's two phases separately — analysis is memory-hungry and can crash the
+**Training** — optional. The dataset is assembled in three stages: **A** pulls real APKs
+from MalwareBazaar (needs `MALWAREBAZAAR_API_KEY`; downloads live malware), **B**
+weak-labels local CICMalDroid samples, and **C** adds known-clean APKs as the negative
+class. Run Stage A's two phases separately — analysis is memory-hungry and can crash the
 process, which you don't want to cost you the downloads.
+
 ```bash
-# 1. Download — network-bound, resumable, parallelizable. Writes to data/ttp_apks/_manifest.json.
+# 1. Download malware — network-bound, resumable, parallelizable. Writes data/ttp_apks/_manifest.json.
 python scripts/build_ttp_dataset.py --stage a --phase download --max-per-family 15 --download-workers 8
 ```
 
 ```bash
-# 2. Analyse — CPU/memory-bound, takes hours. Writes to data/ttp_dataset.csv.
+# 2. Download the benign corpus from F-Droid — ~1 GB, a couple of minutes.
+python scripts/download_benign_apks.py
+```
+
+```bash
+# 3. Analyse malware — CPU/memory-bound, takes hours. Writes to data/ttp_dataset.csv.
 python scripts/build_ttp_dataset.py --stage a --phase analyze
 ```
 
 ```bash
-# 3. Train Binary Relevance; benchmarks Classifier Chains / Label Powerset.
+# 4. Analyse the benign corpus — appends all-zero-label rows to the same CSV.
+python scripts/build_ttp_dataset.py --stage c --benign-dir data/benign_apks
+```
+
+```bash
+# 5. Train Binary Relevance; benchmarks Classifier Chains / Label Powerset.
 python scripts/train_model.py --target ttp
 #    -> data/models/guardgraph_ttp_br_v1.joblib + data/models/ttp_metrics.json
 ```

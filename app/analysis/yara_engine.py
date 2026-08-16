@@ -18,6 +18,7 @@ Dependency: yara-python (pip install yara-python)
 Falls back gracefully if yara-python is not installed — logs a warning
 and returns empty matches rather than crashing the pipeline.
 """
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -284,12 +285,15 @@ rule AndroidMalware_AntiAnalysis {
 
 # ── Module-level compiled rules cache ────────────────────────────────────
 
+# Derived, not hardcoded, so the startup log can't drift from the source above.
+BUILTIN_RULE_COUNT = len(re.findall(r"^rule\s+\w+", BUILTIN_RULES_SOURCE, re.MULTILINE))
+
 _COMPILED_RULES: Optional["yara.Rules"] = None
 
 
 def compile_rules(rules_dir: str = "") -> Optional["yara.Rules"]:
     """
-    Compiles built-in YARA rules + any .yar files in rules_dir.
+    Compiles built-in YARA rules + any .yar/.yara files in rules_dir.
     Returns compiled yara.Rules object, or None if yara-python is
     unavailable.
 
@@ -307,16 +311,25 @@ def compile_rules(rules_dir: str = "") -> Optional["yara.Rules"]:
     valid_external_count = 0
     invalid_external_count = 0
 
-    # Load external .yar files from rules_dir
+    # Load external .yar/.yara files from rules_dir.
+    # Both extensions matter: download_yara_rules.py preserves the upstream
+    # filename, and Yara-Rules/rules ships a mix of .yar and .yara — globbing
+    # only "*.yar" silently drops the .yara subset from the compiled ruleset.
     if rules_dir:
         rules_path = Path(rules_dir)
         if rules_path.is_dir():
-            for yar_file in sorted(rules_path.glob("*.yar")):
+            rule_files = sorted(
+                p for p in rules_path.glob("*")
+                if p.suffix.lower() in (".yar", ".yara")
+            )
+            for yar_file in rule_files:
                 try:
                     rule_text = yar_file.read_text(encoding="utf-8")
                     # Try compiling this single file first to check for syntax/import errors
                     yara.compile(source=rule_text)
-                    sources[yar_file.stem] = rule_text
+                    # Namespace on full filename, not stem — foo.yar and foo.yara
+                    # would otherwise collide and one would be dropped.
+                    sources[yar_file.name] = rule_text
                     valid_external_count += 1
                 except Exception as e:
                     # Ignore invalid files to prevent one broken community rule from disabling the entire engine
@@ -326,9 +339,16 @@ def compile_rules(rules_dir: str = "") -> Optional["yara.Rules"]:
     try:
         _COMPILED_RULES = yara.compile(sources=sources)
         logger.info(
-            f"YARA rules compiled: 1 built-in, {valid_external_count} external(s) loaded. "
+            f"YARA rules compiled: {BUILTIN_RULE_COUNT} built-in, "
+            f"{valid_external_count} external file(s) loaded. "
             f"({invalid_external_count} broken external(s) skipped)"
         )
+        if rules_dir and valid_external_count == 0:
+            logger.warning(
+                f"No community YARA rules loaded from '{rules_dir}' — running on the "
+                f"{BUILTIN_RULE_COUNT} built-in rules only. "
+                f"Populate it with: python scripts/download_yara_rules.py"
+            )
         return _COMPILED_RULES
     except yara.SyntaxError as e:
         # Fallback to just built-in rules if the merge fails unexpectedly
