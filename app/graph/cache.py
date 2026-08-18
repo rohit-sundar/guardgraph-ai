@@ -7,6 +7,9 @@ resolves") if you pre-populate a few signature nodes for your demo samples.
 from app.graph.neo4j_client import neo4j_client
 
 
+_MEMORY_CACHE: dict[str, dict] = {}
+
+
 def lookup_signature(sha256: str) -> dict | None:
     query = """
     MATCH (s:Sample {sha256: $sha256})
@@ -22,28 +25,22 @@ def lookup_signature(sha256: str) -> dict | None:
     """
     try:
         rows = neo4j_client.run(query, sha256=sha256)
+        if rows and rows[0].get("sha256") is not None:
+            row = rows[0]
+            row["ttps"] = {
+                t["technique_id"]: t.get("probability")
+                for t in (row.get("ttps") or [])
+                if t and t.get("technique_id")
+            }
+            return row
     except Exception:
-        # Neo4j not reachable (e.g. Docker not up) — degrade to cold path.
-        return None
-    # Gate on SHA-256 presence (the Sample node), NOT on family — the family
-    # classifier is often untrained in the prototype so predicted_family may
-    # be None even after a successful cold-path run. Gating on family caused
-    # every second request to fall back to cold path (cache never hit).
-    if not rows or rows[0].get("sha256") is None:
-        return None
-    row = rows[0]
-    # Rebuild the technique_id -> probability map (only bare IDs used to be
-    # stored, so the hot path had to return predicted_ttps={} instead of the
-    # real map).
-    row["ttps"] = {
-        t["technique_id"]: t.get("probability")
-        for t in (row.get("ttps") or [])
-        if t and t.get("technique_id")
-    }
-    return row
+        pass
+
+    # In-memory cache fallback
+    return _MEMORY_CACHE.get(sha256)
 
 
-def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None):
+def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None, *, signature_yara_data: dict | None = None, permissions: list[str] | None = None, risk_components: dict | None = None, obfuscation_data: dict | None = None):
     """
     Call this after a cold-path analysis completes, so future uploads of
     the same sample (or re-uploads during a campaign) hit the fast path.
@@ -53,6 +50,21 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
     """
     if limitations is None:
         limitations = []
+
+    # Always save to memory cache
+    _MEMORY_CACHE[sha256] = {
+        "sha256": sha256,
+        "family": family,
+        "base_score": risk_score,
+        "ttps": ttps,
+        "narrative": narrative,
+        "limitations": limitations,
+        "signature_yara_data": signature_yara_data,
+        "permissions": permissions or [],
+        "risk_components": risk_components or {},
+        "obfuscation_data": obfuscation_data,
+    }
+
 
     query = """
     MERGE (s:Sample {sha256: $sha256})
@@ -78,5 +90,6 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
             limitations=limitations
         )
     except Exception:
-        # Neo4j not reachable — skip caching silently rather than crashing.
+        # Neo4j not reachable — skip Neo4j write silently rather than crashing.
         pass
+

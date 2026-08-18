@@ -11,6 +11,9 @@ data/*.csv
 *.egg-info/
 .DS_Store
 
+bin/ollama/
+guardgraph_test/*.apk
+
 # Obsidian & Local Task Tracking
 .obsidian/
 AI_ENGINEER_TASKS.md

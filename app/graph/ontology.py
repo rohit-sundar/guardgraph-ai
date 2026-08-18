@@ -112,4 +112,24 @@ def get_technique_context(technique_ids: list[str]) -> list[dict]:
     RETURN t.technique_id AS technique_id, t.name AS name,
            t.description AS description, ta.name AS tactic
     """
-    return neo4j_client.run(query, ids=technique_ids)
+    try:
+        res = neo4j_client.run(query, ids=technique_ids)
+        if res:
+            return res
+    except Exception as e:
+        logger.debug(f"[ontology] Neo4j query fallback ({e}); using local JSON ontology.")
+
+    techniques = load_full_technique_ontology("data/ontology/mobile_techniques.json")
+    t_map = {t["technique_id"]: t for t in techniques}
+    results = []
+    for tid in technique_ids:
+        if tid in t_map:
+            t = t_map[tid]
+            results.append({
+                "technique_id": t["technique_id"],
+                "name": t.get("name", ""),
+                "description": t.get("description", "") or "",
+                "tactic": t.get("tactic", "") or "Unknown",
+            })
+    return results
+

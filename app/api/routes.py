@@ -30,7 +30,7 @@ from loguru import logger
 from app.graph.cache import lookup_signature, store_signature
 from app.reports.scoring import compute_risk_score, _band_for
 from app.core.config import settings
-from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown
+from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown, SignatureYaraResult
 
 router = APIRouter()
 
@@ -52,25 +52,29 @@ async def analyze(file: UploadFile = File(...)):
     tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}.apk")
 
     try:
+        content = await file.read()
         with open(tmp_path, "wb") as f:
-            shutil.copyfileobj(file.file, f)
+            f.write(content)
 
         try:
             result = _run_analysis(tmp_path)
         except HTTPException:
             raise
         except Exception as exc:
-            # Malformed AXML attribute names and corrupted EOCD records are
-            # deliberate anti-analysis techniques — 12% of this project's own
-            # malware corpus takes the pipeline down this way. An analyst who
-            # uploads one deserves a verdict recording that the sample resists
-            # parsing, not an opaque 500 with the reason only in the server log.
-            logger.exception(f"[analyze] analysis failed for {file.filename}: {exc}")
+            logger.error(f"Unparseable APK fallback triggered: {exc}")
             result = _unparseable_report(tmp_path, exc)
-        return result
-
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    return result
+
+
+@router.post("/analyze_sample", response_model=AnalysisReport)
+async def analyze_sample():
+    sample_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "guardgraph_test", "guardgraph_test.apk"))
+    if not os.path.exists(sample_path):
+        raise HTTPException(404, f"Sample file not found at {sample_path}")
+    return _run_analysis(sample_path)
 
 
 def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
@@ -172,24 +176,42 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         # score was discarded and the hot path answered "low" for known-bad
         # malware — while the *cached narrative in the same response* still
         # said 86.14.
-        empty_obfuscation = _empty_obfuscation_signal()
         cached_score = cached.get("base_score")
         cached_ttps = cached.get("ttps") or {}
         total_score = cached_score if cached_score is not None else 0.0
+
+        # Reconstruct risk score — use cached component breakdown if available
+        rc = cached.get("risk_components") or {}
         risk_score = RiskScoreBreakdown(
-            # Not recomputed on this path — None, not 0.0, which would falsely
-            # assert "we looked and found no evidence".
-            classifier_confidence_component=None,
-            permission_api_component=None,
-            ttp_severity_component=None,
-            forensic_anchor_component=None,
-            obfuscation_component=None,
-            reputation_component=None,
-            ioc_component=None,
+            classifier_confidence_component=rc.get("classifier_confidence_component"),
+            permission_api_component=rc.get("permission_api_component"),
+            ttp_severity_component=rc.get("ttp_severity_component"),
+            forensic_anchor_component=rc.get("forensic_anchor_component"),
+            obfuscation_component=rc.get("obfuscation_component"),
+            reputation_component=rc.get("reputation_component"),
+            ioc_component=rc.get("ioc_component"),
             total_score=total_score,
             verdict_band=_band_for(total_score),
-            zero_day_indicator=False,
+            zero_day_indicator=rc.get("zero_day_indicator", False),
         )
+
+        # Reconstruct signature_yara from cache if available
+        cached_sig_yara_data = cached.get("signature_yara_data")
+        if cached_sig_yara_data:
+            cached_sig_yara = SignatureYaraResult(**cached_sig_yara_data)
+        else:
+            cached_sig_yara = None
+
+        # Reconstruct obfuscation from cache if available
+        cached_obf_data = cached.get("obfuscation_data")
+        if cached_obf_data:
+            obfuscation = ObfuscationSignal(**cached_obf_data)
+        else:
+            obfuscation = _empty_obfuscation_signal()
+
+        # Use cached permissions, falling back to ingestion
+        cached_permissions = cached.get("permissions") or ingestion.permissions
+
         manifest = AnalysisManifest(
             target_package=ingestion.package_name,
             sha256=ingestion.sha256,
@@ -197,12 +219,12 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             total_nodes_parsed=0,
             graph_density=0.0,
             behavioral_subgraphs=[],
-            obfuscation=empty_obfuscation,
+            obfuscation=obfuscation,
             predicted_ttps=cached_ttps,
             predicted_family=cached.get("family"),
             family_confidence=None,
-            signature_yara=None,  # skipped on hot path
-            permissions=ingestion.permissions,
+            signature_yara=cached_sig_yara,
+            permissions=cached_permissions,
             c2_indicators=ingestion.c2_indicators,
             cert_anomalies=ingestion.cert_anomalies,
             permission_matrix_flags=ingestion.permission_matrix_flags,
@@ -315,6 +337,10 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             ttps=predicted_ttps,
             narrative=narrative,
             limitations=limitations,
+            signature_yara_data=sig_yara.model_dump() if sig_yara else None,
+            permissions=ingestion.permissions,
+            risk_components=risk_score.model_dump(),
+            obfuscation_data=obfuscation.model_dump(),
         )
 
     return AnalysisReport(

@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GuardGraph AI — Android Malware Threat Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+</head>
+<body>
+  <div class="app-background"></div>
+  <div class="glow-orb glow-top-left"></div>
+  <div class="glow-orb glow-bottom-right"></div>
+
+  <header class="app-header">
+    <div class="header-container">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            <path d="m9 12 2 2 4-4"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>GUARDGRAPH <span>AI</span></h1>
+          <p class="tagline">GraphRAG Android Threat Intelligence Platform</p>
+        </div>
+      </div>
+      <div class="status-badges">
+        <div class="status-badge pulse-green">
+          <span class="dot"></span> Backend Engine: Active
+        </div>
+        <div class="status-badge pulse-purple">
+          <span class="dot"></span> Qwen2.5 7B LLM: Ready
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="main-content">
+    <!-- Upload Section -->
+    <section class="upload-section" id="uploadSection">
+      <div class="glass-card upload-card">
+        <div class="upload-area" id="dropZone">
+          <div class="upload-icon-wrapper">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </div>
+          <h3>Upload APK Sample for Analysis</h3>
+          <p class="upload-hint">Drag & drop your <code>.apk</code> file here, or browse from computer</p>
+          
+          <div style="margin: 1.5rem auto; max-width: 400px;">
+            <input type="file" id="fileInput" accept=".apk" style="display: block; margin: 0 auto 1rem auto; color: #f8fafc; font-family: var(--font-mono); font-size: 0.9rem;">
+          </div>
+
+          <div class="upload-actions">
+            <button type="button" class="btn btn-secondary" id="btnTestSample">
+              ⚡ Quick Test Target Sample (guardgraph_test.apk)
+            </button>
+          </div>
+        </div>
+
+        <div class="file-preview hidden" id="filePreview">
+          <div class="file-info">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
+              <line x1="12" y1="18" x2="12.01" y2="18"/>
+            </svg>
+            <span class="file-name" id="fileName">sample.apk</span>
+            <span class="file-size" id="fileSize">0 MB</span>
+          </div>
+          <button type="button" class="btn btn-analyze" id="btnStartAnalyze">
+            🚀 Run GraphRAG Threat Analysis
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Pipeline Progress Visualizer -->
+    <section class="progress-section hidden" id="progressSection">
+      <div class="glass-card progress-card">
+        <div class="progress-header">
+          <h3>Analyzing Target Package...</h3>
+          <span class="progress-percentage" id="progressPercent">0%</span>
+        </div>
+        <div class="progress-bar-container">
+          <div class="progress-bar-fill" id="progressBarFill"></div>
+        </div>
+        <div class="pipeline-steps">
+          <div class="step-item" id="step1">
+            <div class="step-dot">1</div>
+            <span class="step-label">APK Ingestion</span>
+          </div>
+          <div class="step-item" id="step2">
+            <div class="step-dot">2</div>
+            <span class="step-label">YARA Scan</span>
+          </div>
+          <div class="step-item" id="step3">
+            <div class="step-dot">3</div>
+            <span class="step-label">CFG Graph</span>
+          </div>
+          <div class="step-item" id="step4">
+            <div class="step-dot">4</div>
+            <span class="step-label">MITRE TTPs</span>
+          </div>
+          <div class="step-item" id="step5">
+            <div class="step-dot">5</div>
+            <span class="step-label">Obfuscation</span>
+          </div>
+          <div class="step-item" id="step6">
+            <div class="step-dot">6</div>
+            <span class="step-label">Risk Scoring</span>
+          </div>
+          <div class="step-item" id="step7">
+            <div class="step-dot">7</div>
+            <span class="step-label">GraphRAG AI</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Results Section -->
+    <section class="results-section hidden" id="resultsSection">
+      <!-- Top Overview Banner -->
+      <div class="results-overview-grid">
+        <!-- Risk Score Card -->
+        <div class="glass-card risk-card">
+          <div class="card-header">
+            <h4>OVERALL RISK SCORE</h4>
+            <span class="verdict-tag" id="verdictTag">SUSPICIOUS</span>
+          </div>
+          <div class="risk-meter-wrapper">
+            <div class="radial-gauge" id="radialGauge">
+              <svg viewBox="0 0 100 100">
+                <circle class="gauge-bg" cx="50" cy="50" r="42"/>
+                <circle class="gauge-fill" id="gaugeFill" cx="50" cy="50" r="42" stroke-dasharray="264" stroke-dashoffset="264"/>
+              </svg>
+              <div class="gauge-text">
+                <span class="score-num" id="scoreNum">0.0</span>
+                <span class="score-max">/ 100</span>
+              </div>
+            </div>
+          </div>
+          <div class="risk-badges">
+            <span class="badge badge-zero-day hidden" id="zeroDayBadge">Zero-Day Anomaly Detected</span>
+            <span class="badge badge-malware hidden" id="knownMalwareBadge">Known VirusTotal Signature Match</span>
+          </div>
+        </div>
+
+        <!-- Target Package Specs Card -->
+        <div class="glass-card specs-card">
+          <div class="card-header">
+            <h4>SAMPLE METADATA & REPUTATION</h4>
+          </div>
+          <div class="specs-grid">
+            <div class="spec-item">
+              <span class="spec-label">Package Name</span>
+              <span class="spec-value code" id="targetPackage">—</span>
+            </div>
+            <div class="spec-item">
+              <span class="spec-label">SHA-256 Hash</span>
+              <span class="spec-value code truncate" id="targetHash">—</span>
+            </div>
+            <div class="spec-item">
+              <span class="spec-label">VirusTotal Status</span>
+              <span class="spec-value highlight-red" id="vtStatus">15 / 75 Engines Flagged</span>
+            </div>
+            <div class="spec-item">
+              <span class="spec-label">Malware Family</span>
+              <span class="spec-value badge-family" id="familyBadge">trojan.btmob/spyagent</span>
+            </div>
+            <div class="spec-item">
+              <span class="spec-label">Secondary DEX Payloads</span>
+              <span class="spec-value" id="secondaryDexCount">3 payload assets</span>
+            </div>
+            <div class="spec-item">
+              <span class="spec-label">Cert Certificates</span>
+              <span class="spec-value warning" id="certAnomalies">Self-Signed Certificate</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tabbed Detailed Findings Container -->
+      <div class="glass-card tabs-card">
+        <div class="tabs-header">
+          <button class="tab-btn active" onclick="switchTab('aiReport')">
+            ✨ GraphRAG AI Threat Narrative
+          </button>
+          <button class="tab-btn" onclick="switchTab('yaraRules')">
+            🛡️ YARA & Signature Detection (<span id="yaraCount">0</span>)
+          </button>
+          <button class="tab-btn" onclick="switchTab('topology')">
+            🕸️ CFG Topology & Obfuscation
+          </button>
+          <button class="tab-btn" onclick="switchTab('permissions')">
+            🔑 Permissions Matrix (<span id="permissionCount">0</span>)
+          </button>
+          <button class="tab-btn" onclick="switchTab('riskBreakdown')">
+            📊 Risk Components Score
+          </button>
+        </div>
+
+        <div class="tabs-body">
+          <!-- Tab 1: AI Report -->
+          <div class="tab-content active" id="tabAiReport">
+            <div class="ai-report-wrapper">
+              <div class="ai-report-header">
+                <div class="llm-info">
+                  <span class="sparkle">✨</span> Grounded in MITRE ATT&CK Mobile Ontology via Qwen2.5 7B
+                </div>
+                <button class="btn btn-sm" onclick="copyAiReport()">Copy Report</button>
+              </div>
+              <div class="markdown-body" id="aiReportMarkdown">
+                <!-- Rendered markdown goes here -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 2: YARA Rules -->
+          <div class="tab-content" id="tabYaraRules">
+            <div class="yara-matches-container" id="yaraMatchesList">
+              <!-- YARA matches rendered here -->
+            </div>
+          </div>
+
+          <!-- Tab 3: Topology -->
+          <div class="tab-content" id="tabTopology">
+            <div class="topology-grid">
+              <div class="top-stat-box">
+                <span class="stat-num" id="statCfgNodes">0</span>
+                <span class="stat-lbl">CFG Nodes Parsed</span>
+              </div>
+              <div class="top-stat-box">
+                <span class="stat-num" id="statSubgraphs">0</span>
+                <span class="stat-lbl">Behavioral Subgraphs</span>
+              </div>
+              <div class="top-stat-box">
+                <span class="stat-num" id="statGraphDensity">0.0</span>
+                <span class="stat-lbl">Graph Density</span>
+              </div>
+              <div class="top-stat-box">
+                <span class="stat-num" id="statEntropy">3.37</span>
+                <span class="stat-lbl">String Entropy Score</span>
+              </div>
+              <div class="top-stat-box">
+                <span class="stat-num" id="statFlattening">TRUE</span>
+                <span class="stat-lbl">Control-Flow Flattening</span>
+              </div>
+              <div class="top-stat-box">
+                <span class="stat-num" id="statReflections">66</span>
+                <span class="stat-lbl">Reflection Method Calls</span>
+              </div>
+              <div class="top-stat-box">
+                <span class="stat-num" id="statParseFail">0.0%</span>
+                <span class="stat-lbl">Parse Failure Rate</span>
+              </div>
+            </div>
+
+            <!-- Interactive Graph Explorer -->
+            <div class="graph-explorer-wrapper">
+              <div class="graph-explorer-header">
+                <div>
+                  <h5>Interactive Behavioral Subgraph Explorer</h5>
+                  <p class="graph-subtitle">Visual representation of suspicious control-flow basic blocks and forensic anchor clusters</p>
+                </div>
+                <div class="graph-controls">
+                  <button class="btn btn-sm btn-control" onclick="resetGraphView()">🎯 Fit View</button>
+                  <button class="btn btn-sm btn-control" onclick="relayoutGraph('cose')">🔄 Re-cluster</button>
+                  <button class="btn btn-sm btn-control" onclick="relayoutGraph('concentric')">⭕ Rings</button>
+                </div>
+              </div>
+              <div class="graph-canvas-container" id="cyGraphContainer">
+                <div class="graph-placeholder-text">Run analysis to explore interactive CFG behavioral graph</div>
+              </div>
+              <div class="graph-legend">
+                <div class="legend-item"><span class="legend-dot dot-outlier"></span> Outlier Node (Flattening)</div>
+                <div class="legend-item"><span class="legend-dot dot-behavior"></span> Behavioral Subgraph / Anchor</div>
+                <div class="legend-item"><span class="legend-dot dot-api"></span> Sensitive Target API</div>
+                <div class="legend-item"><span class="legend-dot dot-normal"></span> Control Flow Block</div>
+              </div>
+            </div>
+
+            <div class="subgraphs-list" style="margin-top: 1.5rem;">
+              <h5>Extracted Behavioral Subgraphs & Outlier Nodes</h5>
+              <div class="subgraph-chips" id="outlierNodesList">
+                <!-- Nodes rendered here -->
+              </div>
+            </div>
+          </div>
+
+          <!-- Tab 4: Permissions -->
+          <div class="tab-content" id="tabPermissions">
+            <div class="permissions-grid" id="permissionsList">
+              <!-- Permissions rendered here -->
+            </div>
+          </div>
+
+          <!-- Tab 5: Risk Breakdown -->
+          <div class="tab-content" id="tabRiskBreakdown">
+            <div class="breakdown-list" id="riskBreakdownList">
+              <!-- Breakdown bars rendered here -->
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

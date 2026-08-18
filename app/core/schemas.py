@@ -122,6 +122,7 @@ class AnalysisManifest(BaseModel):
     dropper_signals: list[str] = []
 
 
+
 class RiskScoreBreakdown(BaseModel):
     # Component fields are Optional: a cache-hit hot path returns the cached
     # verdict verbatim without recomputing any component, so None here means
