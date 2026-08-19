@@ -51,7 +51,11 @@ from loguru import logger  # noqa: E402
 
 from app.analysis.ingest import ingest_apk, compute_sha256  # noqa: E402
 from app.analysis.cfg import build_all_method_cfgs  # noqa: E402
-from app.analysis.forensic import match_anchors, extract_anchor_subgraph  # noqa: E402
+from app.analysis.forensic import (  # noqa: E402
+    ManifestContext,
+    match_anchors,
+    extract_anchor_subgraph,
+)
 from app.analysis.topology import (  # noqa: E402
     compute_topological_invariants,
     aggregate_subgraph_invariants,
@@ -122,12 +126,15 @@ def extract_ttp_row(apk_path: str) -> tuple[list[float], dict] | None:
     subgraph_invariants: list[dict] = []
     all_strings: list[str] = []
     all_apis: set[str] = set()
+    # Same manifest gate the cold path applies (N1) — training rows must be built
+    # from the rules inference will actually run, or the behavior columns lie.
+    manifest = ManifestContext.from_ingestion(ingestion)
 
     for g in cfgs.values():
         for _, data in g.nodes(data=True):
             all_strings.extend(data.get("string_literals", []))
             all_apis.update(data.get("api_calls", []))
-        matches = match_anchors(g)
+        matches = match_anchors(g, manifest)
         for behavior, anchor_nodes in matches.items():
             all_matches.setdefault(behavior, []).extend(anchor_nodes)
             for anchor in anchor_nodes:

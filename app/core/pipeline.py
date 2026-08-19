@@ -18,7 +18,7 @@ from loguru import logger
 
 from app.analysis.ingest import ingest_apk
 from app.analysis.cfg import build_all_method_cfgs
-from app.analysis.forensic import match_anchors, extract_anchor_subgraph
+from app.analysis.forensic import ManifestContext, match_anchors, extract_anchor_subgraph
 from app.analysis.topology import compute_topological_invariants, aggregate_subgraph_invariants
 from app.analysis.obfuscation import build_obfuscation_signal
 from app.analysis.signatures import match_signatures
@@ -173,17 +173,26 @@ class AnalysisPipeline:
         return cfgs, parse_failure_rate
 
     @staticmethod
-    def run_phase3_forensic_matching(cfgs: Dict[str, nx.DiGraph]) -> Tuple[Dict[str, List[str]], List[BehavioralSubgraph], List[str]]:
-        """Phase 3: Match suspicious anchor APIs and extract bounded 4-hop subgraphs."""
+    def run_phase3_forensic_matching(
+        cfgs: Dict[str, nx.DiGraph],
+        ingestion: IngestionResult,
+    ) -> Tuple[Dict[str, List[str]], List[BehavioralSubgraph], List[str]]:
+        """
+        Phase 3: Match suspicious anchor APIs and extract bounded 4-hop subgraphs.
+
+        `ingestion` supplies the manifest declarations the gated rules read (N1):
+        a behavior whose capability the app never declared cannot fire.
+        """
         logger.info("[Phase 3] Starting Forensic Anchor Matching & Subgraph Extraction...")
         start_time = time.time()
+        manifest = ManifestContext.from_ingestion(ingestion)
         all_matches: Dict[str, List[str]] = {}
         behavioral_subgraphs: List[BehavioralSubgraph] = []
         all_strings: List[str] = []
 
         for method_sig, g in cfgs.items():
             method_node_count = g.number_of_nodes()
-            matches = match_anchors(g)
+            matches = match_anchors(g, manifest)
             for behavior, anchor_nodes in matches.items():
                 all_matches.setdefault(behavior, []).extend(anchor_nodes)
 

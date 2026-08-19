@@ -14,6 +14,8 @@ Changes vs. original:
 - §10.3: is_method_relevant() pre-filter skips methods with no API/string
   overlap with the forensic dictionary before doing full CFG construction,
   reducing runtime on large benign apps without changing detection outcomes.
+- N1: the pre-filter vocabulary now comes from forensic.relevance_vocabulary(),
+  which walks the clause structure the tightened dictionary uses.
 - T1: const-string operands are parsed delimiter-agnostically. Both extraction
   sites previously tested for a single quote; Androguard 4.1.x emits double
   quotes, so the only literals that survived were ones whose *text* contained
@@ -176,19 +178,12 @@ def build_all_method_cfgs(
     dictionary API/string overlap before full CFG construction (§10.3).
     Set to False to replicate original behavior (builds CFG for all methods).
     """
-    from app.analysis.forensic import FORENSIC_DICTIONARY
+    from app.analysis.forensic import relevance_vocabulary
 
-    # Build cheap lookup sets for the relevance pre-filter.
-    relevant_apis: frozenset[str] = frozenset(
-        api
-        for rules in FORENSIC_DICTIONARY.values()
-        for api in rules.get("apis", [])
-    )
-    relevant_strings: frozenset[str] = frozenset(
-        s.lower()
-        for rules in FORENSIC_DICTIONARY.values()
-        for s in rules.get("strings", [])
-    )
+    # Cheap lookup sets for the relevance pre-filter. Owned by forensic.py since
+    # N1 made a rule's patterns live inside clauses rather than at its top level —
+    # re-deriving them here would silently drift from what match_anchors reads.
+    relevant_apis, relevant_strings = relevance_vocabulary()
 
     graphs: dict[str, nx.DiGraph] = {}
     attempted = 0

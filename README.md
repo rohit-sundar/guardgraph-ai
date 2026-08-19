@@ -89,7 +89,7 @@ curl -X POST http://localhost:8000/analyze -F "file=@data/samples/test.apk"
 | Androguard ingestion | Working (needs `androguard` installed) |
 | CFG construction (NetworkX) | Working |
 | ACFG enrichment | Working |
-| Forensic dictionary / anchor detection | Working, but the dictionary is a starter set — currently over-matches common libraries (AndroidX/Glide/Lottie reflection + HTTP read as anchors), so expect false positives until it's tuned/allowlisted |
+| Forensic dictionary / anchor detection | Working. Each rule is gated on a manifest declaration and its patterns are grouped into clauses that must corroborate each other within one method. |
 | 4-hop subgraph extraction | Working |
 | Topological feature mining | Working (degree/closeness/clustering; eigenvector/Katz stubbed — slow on large graphs, add if needed) |
 | Entropy-based obfuscation scoring | Working |

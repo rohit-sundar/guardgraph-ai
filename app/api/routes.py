@@ -259,7 +259,7 @@ def _run_analysis(filepath: str) -> AnalysisReport:
     cfgs, parse_failure_rate = AnalysisPipeline.run_phase2_graph_construction(analysis_obj)
 
     # --- Phase 3: Forensic Matching & Subgraph Extraction ---
-    all_matches, behavioral_subgraphs, all_strings = AnalysisPipeline.run_phase3_forensic_matching(cfgs)
+    all_matches, behavioral_subgraphs, all_strings = AnalysisPipeline.run_phase3_forensic_matching(cfgs, ingestion)
 
     # Merge C2 IoCs found in DEX string literals into ingestion
     ingestion = AnalysisPipeline.merge_c2_from_strings(ingestion, all_strings)
