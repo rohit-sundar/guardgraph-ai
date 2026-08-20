@@ -66,16 +66,27 @@ def build_obfuscation_signal(
     flattening_zscore: float,
     unanalyzed_native_libs: int = 0,
     method_parse_failure_rate: float = 0.0,
+    dex_method_count: int | None = None,
+    declared_component_count: int | None = None,
 ) -> ObfuscationSignal:
     entropy_score = compute_string_pool_entropy(all_strings)
 
+    # N7: count how MANY methods look flattened, not just whether one does.
+    # `flattening_suspected` is kept for the frozen feature vectors, but it is an
+    # existential over every analysed method and therefore true on almost any app
+    # of normal size — measured, 30/30 clean apps against 23/28 malware. The
+    # prevalence is what scoring reads.
     flattening_suspected = False
     flattening_nodes: list[str] = []
+    flattening_methods = 0
     for g in cfgs.values():
         suspected, nodes = detect_flattening_outlier(g, flattening_zscore)
         if suspected:
             flattening_suspected = True
+            flattening_methods += 1
             flattening_nodes.extend(nodes)
+    analyzed_methods = len(cfgs)
+    flattening_ratio = (flattening_methods / analyzed_methods) if analyzed_methods else 0.0
 
     reflection_total, reflection_unresolved = count_reflection_calls(cfgs)
 
@@ -95,6 +106,32 @@ def build_obfuscation_signal(
             "analysis coverage reduced; possible heavy obfuscation"
         )
 
+    # N7: the code that was recovered cannot account for the app the manifest
+    # describes. This is the coverage gap that matters and it used to be invisible —
+    # an empty `cfgs` means no method can look flattened, so the obfuscation signal
+    # read "clean" on exactly the samples that defeated the analyser.
+    if dex_method_count == 0:
+        coverage_notes.insert(
+            0, "no methods recovered from the DEX — the app's code was not analysable "
+               "(packing, encryption, or a runtime-loaded payload)"
+        )
+    elif dex_method_count and declared_component_count:
+        if dex_method_count < 2 * declared_component_count:
+            coverage_notes.insert(
+                0,
+                f"{dex_method_count} methods recovered against "
+                f"{declared_component_count} declared components — the DEX is too "
+                "small to implement its own manifest; the payload is not in it"
+            )
+
+    # Reported, not scored: measured over the corpus, the share of analysed methods
+    # that look flattened is indistinguishable between clean apps and malware.
+    if flattening_ratio >= 0.20:
+        coverage_notes.append(
+            f"control-flow flattening shape in {flattening_ratio * 100:.0f}% of "
+            f"analysed methods"
+        )
+
     coverage_note = "; ".join(coverage_notes) if coverage_notes else "no significant static coverage gaps detected"
 
     return ObfuscationSignal(
@@ -104,5 +141,12 @@ def build_obfuscation_signal(
         reflection_call_count=reflection_total,
         unresolved_reflection_targets=reflection_unresolved,
         method_parse_failure_rate=method_parse_failure_rate,
+        flattening_method_count=flattening_methods,
+        analyzed_method_count=analyzed_methods,
+        flattening_method_ratio=round(flattening_ratio, 4),
+        dex_method_count=None if dex_method_count is None else int(dex_method_count),
+        declared_component_count=(
+            None if declared_component_count is None else int(declared_component_count)
+        ),
         coverage_note=coverage_note,
     )

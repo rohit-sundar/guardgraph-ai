@@ -38,3 +38,6 @@ data/benign_apks/
 # keep the directory in the repo, ignore everything written into it
 logs/*
 !logs/.gitkeep
+
+# Corpus score dumps (scripts/score_corpus.py) — measurement output, regeneratable
+data/corpus_scores*.json

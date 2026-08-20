@@ -213,6 +213,31 @@ _PERM_ALIASES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# An app that acts as an accessibility service declares the *service*, not a
+# <uses-permission>: BIND_ACCESSIBILITY_SERVICE is the permission the *system*
+# holds over that service, so it shows up as the service's android:permission
+# attribute and never in the app's own permission list. Measured over the 353-APK
+# corpus, gating on <uses-permission> catches 6/133 malware; gating on the
+# service's intent-filter action catches 75/133 against 7/220 benign. Every
+# accessibility-dependent rule in this module reads the declaration, not the
+# permission (N5). forensic.py imports this constant rather than restating it.
+ACCESSIBILITY_SERVICE_ACTION = "android.accessibilityservice.AccessibilityService"
+
+
+def declares_accessibility_service(
+    permissions: list[str] | None = None,
+    intent_actions: list[str] | None = None,
+) -> bool:
+    """
+    True when the app declares an accessibility service, by either route: the
+    intent-filter action on the service (the real-world form) or the legacy
+    <uses-permission> (kept because a handful of samples do write it).
+    """
+    if ACCESSIBILITY_SERVICE_ACTION in set(intent_actions or ()):
+        return True
+    return "android.permission.BIND_ACCESSIBILITY_SERVICE" in set(permissions or ())
+
+
 # (flag_id, required_any_of_groups) — each group is OR within, AND across groups
 _PERMISSION_MATRIX: list[tuple[str, list[list[str]]]] = [
     (
@@ -290,13 +315,26 @@ def _normalize_permissions(permissions: list[str]) -> set[str]:
     return short
 
 
-def detect_permission_matrix(permissions: list[str]) -> list[str]:
+def detect_permission_matrix(
+    permissions: list[str],
+    intent_actions: list[str] | None = None,
+) -> list[str]:
     """
     Detect high-risk multi-permission combinations used by banking malware.
 
     Returns flag IDs such as OVERLAY_ATTACK_PATTERN, SMS_OTP_STEALER_PATTERN.
+
+    `intent_actions` carries the app's declared intent-filter actions. Three rules
+    here (SMS_OTP_STEALER_PATTERN, ACCESSIBILITY_FULL_CONTROL, and the a11y config
+    flags derived alongside them) key off BIND_ACCESSIBILITY_SERVICE, which almost
+    never appears as a <uses-permission> — see ACCESSIBILITY_SERVICE_ACTION. Without
+    the actions those rules fire on 6/133 malware instead of 75/133 (N5). The
+    argument is optional so existing permission-only callers keep working, but the
+    pipeline always passes it.
     """
     short = _normalize_permissions(permissions)
+    if declares_accessibility_service(permissions, intent_actions):
+        short.add("BIND_ACCESSIBILITY_SERVICE")
     flags: list[str] = []
     for flag_id, groups in _PERMISSION_MATRIX:
         if all(any(p in short for p in group) for group in groups):
@@ -350,11 +388,19 @@ def analyze_certificate_anomalies(der_certs: list[bytes]) -> list[str]:
 
     Returns human-readable anomaly strings, e.g.:
       debug_or_test_key:CN=Android Debug
-      self_signed
+      self_signed_junk_dn:CN=a
       generic_subject:CN=test
       expired
       not_yet_valid
       missing_certificate
+
+    Plain `self_signed` is deliberately NOT an anomaly (N6). Android app signing
+    *is* self-signing — there is no CA in the model — so subject == issuer holds for
+    essentially every APK ever published. Reporting it put a constant on 27/30
+    clean apps and 22/28 malware in the sampled corpus, i.e. a floor under
+    ioc_component that carried no information. What remains flagged is a
+    self-signed certificate whose distinguished name is *also* junk (a one-character
+    CN, a near-empty DN), which is a real dropper tell.
     """
     if not der_certs:
         return ["missing_certificate"]
@@ -381,16 +427,17 @@ def analyze_certificate_anomalies(der_certs: list[bytes]) -> list[str]:
             elif cn and _GENERIC_JUNK_CN.match(str(cn).strip()):
                 anomalies.append(f"generic_subject:CN={cn}")
 
-            # Self-signed (subject == issuer)
+            # Self-signed is the norm on Android, so only a self-signed cert whose
+            # DN is *also* junk counts as an anomaly (N6).
             try:
-                if subject.dump() == issuer.dump():
-                    anomalies.append("self_signed")
-                    # Extra: very short / junk self-signed fields
-                    if len(subject_str) < 20 or re.search(r"\bCN\s*[:=]\s*[01a]\b", subject_str, re.I):
-                        anomalies.append(f"self_signed_junk_dn:{subject_str[:80]}")
+                self_signed = subject.dump() == issuer.dump()
             except Exception:
-                if subject_str == issuer_str:
-                    anomalies.append("self_signed")
+                self_signed = subject_str == issuer_str
+            if self_signed and (
+                len(subject_str) < 20
+                or re.search(r"\bCN\s*[:=]\s*[01a]\b", subject_str, re.I)
+            ):
+                anomalies.append(f"self_signed_junk_dn:{subject_str[:80]}")
 
             # Validity window
             try:
@@ -643,8 +690,9 @@ _A11Y_TRUE_FLAGS = (
 
 def parse_accessibility_configs(apk_obj) -> list[str]:
     """
-    If BIND_ACCESSIBILITY_SERVICE is used, parse accessibility service config
-    XML resources for keylogging / full-control flags.
+    Parse the app's accessibility-service config XML resources for keylogging /
+    full-control flags. Callers gate this on declares_accessibility_service(),
+    which reads the service declaration rather than a <uses-permission> (N5).
 
     Returns flags like:
       canRetrieveWindowContent=true
@@ -730,8 +778,9 @@ def parse_accessibility_configs(apk_obj) -> list[str]:
             pass
 
     if not flags:
-        # Caller only invokes this when BIND_ACCESSIBILITY is present — missing
-        # config is itself a mild signal (config may be dynamically loaded).
+        # Caller only invokes this for an app that declares an accessibility
+        # service — a missing config is itself a mild signal (it may be built
+        # at runtime via setServiceInfo).
         flags.append("accessibility_config_not_statically_resolved")
 
     # De-dupe
@@ -815,6 +864,26 @@ def _parse_a11y_xml_text(text: str, path: str) -> list[str]:
     except ET.ParseError:
         pass
 
+    return flags
+
+
+def accessibility_matrix_flags(accessibility_flags: list[str]) -> list[str]:
+    """
+    Map parsed accessibility-config flags onto the ACCESSIBILITY_* permission-matrix
+    flag IDs that MATRIX_FLAG_SEVERITY (scoring.py) actually weights.
+
+    Both ingest_apk and enrich_apk_static go through this. ingest_apk previously
+    spliced the *raw* config flags into permission_matrix_flags, so entries like
+    `accessibility_config:res/xml/service.xml` reached the scorer, which has no
+    weight for them and fell back to its 0.6 default for unknown flags (N5).
+    """
+    flags: list[str] = []
+    if any("canRetrieveWindowContent=true" in f for f in accessibility_flags):
+        flags.append("ACCESSIBILITY_WINDOW_CONTENT")
+    if any("canPerformGestures=true" in f for f in accessibility_flags):
+        flags.append("ACCESSIBILITY_GESTURE_CONTROL")
+    if any("keylogging_event_mask" in f for f in accessibility_flags):
+        flags.append("ACCESSIBILITY_KEYLOGGING_MASK")
     return flags
 
 
@@ -984,6 +1053,7 @@ def enrich_apk_static(
     apk_obj,
     permissions: list[str],
     extra_strings: Optional[list[str]] = None,
+    intent_actions: Optional[list[str]] = None,
 ) -> dict[str, Any]:
     """
     Run all static malware enrichments for an APK.
@@ -996,29 +1066,19 @@ def enrich_apk_static(
     cert_anomalies = analyze_certificate_anomalies(der_certs)
 
     # Permission matrix
-    permission_matrix_flags = detect_permission_matrix(permissions)
+    permission_matrix_flags = detect_permission_matrix(permissions, intent_actions)
 
     # Payload / multi-DEX inspection
     payloads = inspect_apk_payloads(filepath)
 
-    # Accessibility config (only when permission present)
+    # Accessibility config — gated on the service declaration, not the permission (N5).
     accessibility_flags: list[str] = []
-    short = _normalize_permissions(permissions)
-    if "BIND_ACCESSIBILITY_SERVICE" in short:
+    if declares_accessibility_service(permissions, intent_actions):
         accessibility_flags = parse_accessibility_configs(apk_obj)
-        if any("canRetrieveWindowContent=true" in f for f in accessibility_flags):
-            if "ACCESSIBILITY_WINDOW_CONTENT" not in permission_matrix_flags:
-                permission_matrix_flags = permission_matrix_flags + [
-                    "ACCESSIBILITY_WINDOW_CONTENT"
-                ]
-        if any("canPerformGestures=true" in f for f in accessibility_flags):
-            permission_matrix_flags = permission_matrix_flags + [
-                "ACCESSIBILITY_GESTURE_CONTROL"
-            ]
-        if any("keylogging_event_mask" in f for f in accessibility_flags):
-            permission_matrix_flags = permission_matrix_flags + [
-                "ACCESSIBILITY_KEYLOGGING_MASK"
-            ]
+        permission_matrix_flags = permission_matrix_flags + [
+            f for f in accessibility_matrix_flags(accessibility_flags)
+            if f not in permission_matrix_flags
+        ]
 
     # Exported component risks
     exported_risks = detect_exported_risks(apk_obj)

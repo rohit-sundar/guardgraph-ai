@@ -25,6 +25,10 @@ class IngestionResult(BaseModel):
     cert_anomalies: list[str] = []
     permission_matrix_flags: list[str] = []
     secondary_dex_count: int = 0
+    # Total methods Androguard recovered from the DEX(es), before cfg.py's relevance
+    # pre-filter. Feeds ObfuscationSignal.dex_method_count so the scorer can tell
+    # "no code was recovered" apart from "no method was relevant" (N7).
+    dex_method_count: int = 0
     accessibility_flags: list[str] = []
     exported_risks: list[str] = []
     payload_assets: list[str] = []
@@ -53,6 +57,27 @@ class ObfuscationSignal(BaseModel):
     # A high failure rate is itself an analysis-coverage gap and raises the
     # obfuscation score, since heavily obfuscated APKs often break parsers.
     method_parse_failure_rate: float = 0.0
+    # N7: `flattening_suspected` is an existential over every analysed method, so on
+    # an app with hundreds of them it is true almost by construction — measured, it
+    # fired on 30/30 clean apps against 23/28 malware, i.e. a constant pointing the
+    # wrong way. These three carry the same evidence as a *prevalence*, which is what
+    # scoring.obfuscation_component reads. The boolean stays because it is one of the
+    # three OBFUSCATION_FEATURES in the frozen 35/181 vectors.
+    flattening_method_count: int = 0
+    analyzed_method_count: int = 0
+    flattening_method_ratio: float = 0.0
+    # Methods present in the DEX at all, from ingestion. Distinguishes "the relevance
+    # pre-filter selected nothing" (large dex_method_count, small analyzed count) from
+    # "there was no code to analyse" — only the latter is an anti-analysis signal.
+    # `None` means not measured, and is scored as absence of evidence rather than as
+    # evidence of absence: a caller that builds this signal by hand must not be
+    # charged the anti-analysis penalty for leaving the field out.
+    dex_method_count: int | None = None
+    # Activities + services + receivers the manifest declares. Read together with
+    # dex_method_count: a DEX too small to implement the components its own manifest
+    # declares is a loader stub, and that is the one anti-analysis signal that
+    # measurably separates the corpus. `None` = not measured.
+    declared_component_count: int | None = None
     coverage_note: str  # e.g. "3 native libraries not analyzed"
 
 

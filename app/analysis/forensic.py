@@ -31,6 +31,8 @@ from typing import Any, Iterable, Mapping
 
 import networkx as nx
 
+from app.analysis.apk_static import ACCESSIBILITY_SERVICE_ACTION
+
 # ── shared vocabularies ───────────────────────────────────────────────────────
 # Named so the gates read as capability declarations rather than magic lists.
 
@@ -51,7 +53,10 @@ SMS_INTENT_ACTIONS = [
 # permission is what the system holds over the service, so it appears as the
 # service's android:permission attribute. Gating on <uses-permission> alone
 # catches 6/133 malware; gating on the service's intent-filter action catches 75.
-ACCESSIBILITY_INTENT_ACTIONS = ["android.accessibilityservice.AccessibilityService"]
+# The action string is owned by apk_static, which reads the manifest — the same
+# declaration now also gates accessibility config parsing and the ACCESSIBILITY_*
+# permission-matrix flags (N5), and one restated copy would be one too many.
+ACCESSIBILITY_INTENT_ACTIONS = [ACCESSIBILITY_SERVICE_ACTION]
 
 # Endpoints specific enough to stand as C2 evidence on their own. Bare http(s)://
 # and Ljava/net/HttpURLConnection;->connect are deliberately absent — "this app

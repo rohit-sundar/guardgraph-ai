@@ -30,6 +30,8 @@ placeholder returning a constant. Tune the internals as you validate
 against your demo set, but the formula weights themselves shouldn't drift
 without a documented reason.
 """
+import math
+
 from app.core.config import TTP_SEVERITY_WEIGHTS, TACTIC_SEVERITY
 from app.core.schemas import RiskScoreBreakdown, ObfuscationSignal
 from app.ml.labels import TECHNIQUE_TACTIC
@@ -39,6 +41,103 @@ from app.ml.labels import TECHNIQUE_TACTIC
 ZERO_DAY_ANCHOR_MIN = 0.5   # forensic_anchor_component (0-1) at/above this = strong proven evidence
 ZERO_DAY_OBF_MIN = 0.5      # obfuscation_component (0-1) at/above this = strong evasion/coverage signal
 ZERO_DAY_CONF_MAX = 0.4     # classifier_confidence_component (0-1) below this = weak model familiarity
+
+# ── Calibration constants (N6-N8) ─────────────────────────────────────────────
+# Every number in this block was picked by measuring the 353-APK corpus
+# (220 F-Droid benign / 133 MalwareBazaar malware), not by intuition. Re-derive
+# them with `python scripts/score_corpus.py` after any change to the analysis
+# stages; the script prints the same tables the values below were chosen from.
+
+# classifier_confidence_component (N8). Fallback decision boundary for a technique
+# the trained bundle carries no calibrated threshold for — matches
+# pipeline.TTP_PREDICT_THRESHOLD, which decides what reaches this function.
+DEFAULT_TTP_THRESHOLD = 0.5
+# Summed threshold margin at which confidence reaches 1 - 1/e ≈ 0.63. Malware
+# predicts a median of 8 techniques (mass well past this); the 7 clean apps that
+# predict anything at all mostly predict one or two.
+CONFIDENCE_SATURATION_MASS = 2.5
+
+# obfuscation_component (N7). Measured over the corpus, all four original inputs
+# were useless: string-pool entropy tops out at 3.47 against a 7.2 threshold and runs
+# the wrong way (benign 3.28 vs malware 2.78); `flattening_suspected` is an
+# existential over every analysed method and fired on 30/30 sampled clean apps;
+# `unresolved_reflection_targets` is a documented stub pinned at 0;
+# `method_parse_failure_rate` was 0.0 on all 353. So the component was a constant
+# 6.00/15 for 216 of 220 clean apps and 108 of 133 malware — 39.3% of cap for benign
+# against 32.5% for malware, an inverted constant.
+#
+# Reading flattening as a prevalence instead does not rescue it: over the full corpus
+# the share of analysed methods that look flattened is benign p75 0.119 against
+# malware p75 0.118, and every candidate threshold from 0.05 to 0.50 gives a lift
+# between 0.79 and 1.07. It is measured and reported, and it is not scored.
+#
+# What is left is the thing the component exists for: evidence that the analyser was
+# denied the code.
+CODE_NOT_RECOVERED_WEIGHT = 0.60
+# An Android class that exists at all costs a constructor and at least one lifecycle
+# override, so a manifest declaring N components needs on the order of 2N methods
+# before anything else. Below that the recovered DEX cannot be the app the manifest
+# describes — a loader stub whose payload is decrypted at runtime. Measured, the
+# lowest ratio in the 219-app clean corpus is 56.85 methods per declared component,
+# 28x above this floor; on the malware side 12 samples fall below it, one of them
+# declaring 539 activities, 42 services and 49 receivers with 57 methods in its DEX.
+MIN_METHODS_PER_DECLARED_COMPONENT = 2.0
+PARSE_FAILURE_MIN = 0.10            # below this, CFG failures are ordinary noise
+PARSE_FAILURE_WEIGHT = 2.0          # rate * this, capped at PARSE_FAILURE_CAP
+PARSE_FAILURE_CAP = 0.40
+UNRESOLVED_REFLECTION_WEIGHT = 0.10
+
+# ioc_component (N6). The old tiers let three weak signals saturate the cap: a
+# YARA term of severity * 0.3 * min(n, 3) paid 0.765 to any app matching three
+# rules at severity 0.85, and clean apps match a mean of 10.8 community rules at
+# exactly that severity. Rule-declared severity is author metadata, not a measure of
+# specificity, so YARA breadth no longer multiplies. Evidence is split: signals that
+# identify *this* sample can reach the cap alone; ubiquitous ones share a small
+# allowance and can never carry a verdict by themselves.
+IOC_SIGNATURE_WEIGHT = 0.50         # per hash/cert signature hit
+IOC_EXTRACTED_C2_WEIGHT = 0.35      # per exact extracted IoC (bot token, .onion, …)
+IOC_EXTRACTED_C2_CAP = 0.70
+IOC_SECONDARY_DEX_WEIGHT = 0.20     # per hidden/secondary DEX payload
+IOC_SECONDARY_DEX_CAP = 0.40
+IOC_YARA_WEIGHT = 0.25              # * max rule severity, no count multiplier
+IOC_CERT_ANOMALY_WEIGHT = 0.10
+IOC_DROPPER_WEIGHT = 0.10
+IOC_FORENSIC_C2_WEIGHT = 0.10
+IOC_CIRCUMSTANTIAL_CAP = 0.35       # joint ceiling on the four weak terms above
+
+# ── Verdict band boundaries ───────────────────────────────────────────────────
+# Each boundary answers a different question, so each is set by its own criterion
+# rather than by cutting 0-100 into four. Measured *after* the N5-N8 component fixes,
+# over two full corpus runs; reproduce with `python scripts/score_corpus.py`.
+#
+#   clean corpus:   median 11.81, p95 26.73, max 53.33     (220 apps)
+#   malware corpus: p25 64.33-65.99, median 69.15-72.64     (133 samples)
+#
+# The malware range is given as a span across the two runs on purpose. Phase 1.5
+# queries VirusTotal and MalwareBazaar live, so `signature_match_count` — and through
+# it `ioc_component` and `reputation_component` — depends on what those services
+# answered that day: mean signature hits per malware sample were 0.80 in one run and
+# 0.15 in the next, moving malware totals by about four points. Boundaries are chosen
+# to be insensitive to that; the clean side does not move (0.02 hits either run).
+#
+# `low` — "costs no analyst time". Above the clean corpus's 95th percentile (26.73),
+# leaving 212 of 220 clean apps here. 5-14 malware land here too; every one of them
+# recovered no forensic evidence at all, which is a limit on analysis depth that no
+# boundary can move.
+BAND_LOW_CEILING = 30.0
+# `suspicious` — the ceiling below which the tool never asserts a verdict. Above the
+# *highest* score any app in the 220-app clean corpus reaches (53.33), so `high` is a
+# band the clean corpus never enters, with 6.67 points of margin. Youden's J peaks far
+# lower, at 27.0 (J=0.921); that difference is deliberately spent on never showing an
+# analyst a clean app marked `high`.
+BAND_SUSPICIOUS_CEILING = 60.0
+# `high` — the strongest claim, so it is placed where a few points of third-party
+# lookup variance cannot move dozens of samples across it. Below the malware first
+# quartile in both runs (64.33 / 65.99), which puts 98-102 of 133 samples (74-77%) at
+# `malicious` either way; at 70 the same two runs gave 55 and 85, because 70 falls
+# inside the distribution's mode. 11.7 points clear of the highest clean-corpus score.
+# Was 80.0, where only 12 of 133 malware reached `malicious` at all.
+BAND_HIGH_CEILING = 65.0
 
 RISKY_PERMISSIONS = {
     "android.permission.BIND_ACCESSIBILITY_SERVICE": 1.0,
@@ -85,24 +184,48 @@ MATRIX_FLAG_SEVERITY = {
 def classifier_confidence_component(
     predicted_ttps: dict[str, float],
     evidence_present: bool = True,
+    ttp_thresholds: dict[str, float] | None = None,
 ) -> float:
     """
-    Uses the max class confidence as the classifier signal.
+    Turns the multi-label TTP model's output into one calibrated 0-1 confidence.
 
-    `evidence_present=False` zeroes the component outright. The TTP model is
-    trained on 134 samples that are *all* malware — no benign class — so
-    it has learned label priors as much as evidence: an all-zeros 181-feature
-    vector still predicts 9 techniques at >= 0.5, several of them well above their
-    training prevalence (T1471 at 0.5446 against 0.097). A sample that yielded no
-    parsed code and no forensic anchors produces exactly that vector, and the
-    prior alone was worth 24.10 of the 33.92 "suspicious" score a 35-byte text
-    file renamed `.apk` received. Until the training set gains a benign class
-    (`scripts/build_ttp_dataset.py --benign-dir`), the classifier gets no vote
-    when it had nothing to look at.
+    `evidence_present=False` zeroes the component outright. The model has a benign
+    class now, but it still cannot be asked "is this malware?" — it answers "which
+    techniques does this sample exhibit?" — so a sample that yielded no parsed code
+    and no forensic anchors gets no vote at all rather than the label prior's
+    opinion (see pipeline.has_deterministic_evidence).
+
+    N8: this used to return `max(predicted_ttps.values())`, which discards the two
+    things that actually distinguish a real TTP profile from a lucky label:
+
+      * **Where the probability sits relative to its own decision boundary.** The
+        per-label thresholds calibrated at training time range from 0.10 to 0.90
+        (`ttp_metrics.json`), because label prevalence ranges from 0.02 to 0.75. A
+        0.98 on T1516, whose boundary is 0.10, is not the same evidence as a 0.98
+        on T1471, whose boundary is 0.90. Each probability is therefore rescaled to
+        its margin past its own threshold.
+      * **Breadth.** Measured over the 353-sample corpus, malware predicts a median
+        of 8 techniques and 213 of 220 clean apps predict none. One technique, however
+        confident, is a thin basis for a 25-point component — `com.symeonchen.wakeupscreen`
+        drew 24.57 of 25 from a single label. Margins are summed into an evidence
+        mass and squashed, so confidence grows with corroborating techniques and
+        saturates once there are enough of them.
+
+    A clean app that the model genuinely reads as multi-technique malware still scores
+    high here; that is a training-data problem (the negatives are 220 F-Droid
+    utilities) and no scoring function can talk it out of its own prediction.
     """
     if not evidence_present or not predicted_ttps:
         return 0.0
-    return max(predicted_ttps.values())
+
+    thresholds = ttp_thresholds or {}
+    mass = 0.0
+    for technique, prob in predicted_ttps.items():
+        thr = thresholds.get(technique, DEFAULT_TTP_THRESHOLD)
+        headroom = max(1e-6, 1.0 - thr)
+        mass += min(1.0, max(0.0, (prob - thr) / headroom))
+
+    return 1.0 - math.exp(-mass / CONFIDENCE_SATURATION_MASS)
 
 
 def permission_api_risk_component(
@@ -177,22 +300,76 @@ def forensic_anchor_component(matched_anchor_behaviors: set[str]) -> float:
     return min(1.0, (sum(weights) / len(weights)) + breadth_bonus)
 
 
-def obfuscation_component(obfuscation: ObfuscationSignal, entropy_threshold: float) -> float:
+def obfuscation_component(
+    obfuscation: ObfuscationSignal,
+    entropy_threshold: float | None = None,
+) -> float:
     """
-    §9.5 fix: coverage gaps now raise the score, not just the narrative text.
-    An APK that evades analysis (via native libs, reflection, parse failures)
-    is *more* suspicious than a fully-transparent one, all else equal.
+    §9.5: coverage gaps raise the score, not just the narrative text. An APK that
+    evades analysis is *more* suspicious than a fully transparent one, all else equal.
+
+    N7 rewrite. The four old inputs measured, over the 353-APK corpus:
+
+      | input                            | benign          | malware        |
+      |----------------------------------|-----------------|----------------|
+      | `string_entropy_score` >= 7.2    | never (max 3.47)| never          |
+      | `flattening_suspected`           | 30/30 sampled   | 23/28 sampled  |
+      | `unresolved_reflection_targets`  | 0 (stub)        | 0 (stub)       |
+      | `method_parse_failure_rate` >=.1 | 0/353           | 0/353          |
+
+    Three were dead and the fourth was a near-constant pointing the wrong way, which
+    is why the component read exactly 6.00/15 for 216 of 220 clean apps and 108 of
+    133 malware — 39.3% of cap for benign against 32.5% for malware, an inverted
+    constant occupying 15% of the score.
+
+    * Mean per-string Shannon entropy cannot reach 7.2 bits: that needs ~147 distinct
+      characters per string. It is also inverted, because large clean apps carry
+      longer, more varied literals than a packed stub does. It stays on
+      ObfuscationSignal — it is one of the three frozen OBFUSCATION_FEATURES and the
+      coverage note still reports it — but it no longer moves the score.
+      `entropy_threshold` is kept in the signature so call sites need not change.
+    * Flattening prevalence is measured and reported but not scored: benign p75 0.119
+      against malware p75 0.118, and no threshold from 0.05 to 0.50 gives a lift
+      outside 0.79-1.07. Paying points for it is paying for noise.
+    * Manifest-vs-code is new, and is what the component now rests on: a DEX that
+      cannot possibly implement the manifest it ships with. Twelve corpus malware fail
+      that test — including a sample declaring 539 activities, 42 services and 49
+      receivers with 57 methods — and no clean app comes within 28x of it. Those
+      samples used to score 0.0 here, because an empty CFG set has nothing that can
+      look flattened: the component that exists to measure evasion read zero on
+      exactly the samples that defeated the analyser.
+
+    On this corpus that leaves the component at 0.0 for every clean app and non-zero
+    only where the code genuinely could not be reached. A component that is silent
+    when it has nothing to say beats one that pays 6.00 to everybody.
     """
     score = 0.0
-    if obfuscation.string_entropy_score >= entropy_threshold:
-        score += 0.5
-    if obfuscation.flattening_suspected:
-        score += 0.4
+
+    # The recovered code cannot account for the app the manifest describes — packed,
+    # encrypted, or staged at runtime. `None` on either field means "not measured",
+    # which earns nothing: only a measurement is evidence.
+    declared = obfuscation.declared_component_count
+    recovered = obfuscation.dex_method_count
+    if recovered is not None:
+        if recovered == 0 or (
+            declared
+            and recovered < MIN_METHODS_PER_DECLARED_COMPONENT * declared
+        ):
+            score += CODE_NOT_RECOVERED_WEIGHT
+
+    # Methods that broke Androguard's block parser, over those attempted.
+    if obfuscation.method_parse_failure_rate >= PARSE_FAILURE_MIN:
+        score += min(
+            PARSE_FAILURE_CAP,
+            PARSE_FAILURE_WEIGHT * obfuscation.method_parse_failure_rate,
+        )
+
+    # Reflection targets that constant propagation could not resolve. Still a stub in
+    # obfuscation.count_reflection_calls (always 0); wired so that implementing the
+    # taint pass turns it on rather than requiring a second change here.
     if obfuscation.unresolved_reflection_targets > 0:
-        score += 0.1
-    # §9.5/9.6: parse failure rate > 10% → additional evasion signal
-    if obfuscation.method_parse_failure_rate >= 0.10:
-        score += min(0.3, obfuscation.method_parse_failure_rate)
+        score += UNRESOLVED_REFLECTION_WEIGHT
+
     return min(1.0, score)
 
 
@@ -227,53 +404,64 @@ def ioc_component(
     dropper_signal_count: int = 0,
 ) -> float:
     """
-    IOC score — combines C2 network indicators with signature detection,
-    YARA scan results, certificate anomalies, and dropper payload signals.
+    IOC score — signature detection, YARA results, extracted C2 indicators,
+    certificate anomalies, and dropper payload signals.
 
-    Scoring tiers:
-    - Signature hit: +0.5 per match (hash match = near-certain bad)
-    - YARA hit: +severity * 0.3 per match (rule-severity-weighted)
-    - Extracted C2 IoCs (telegram/firebase/onion/raw IP): +0.35 each
-    - Forensic C2_BEHAVIOR string hits: +0.2 each (weaker than exact IoCs)
-    - Certificate anomalies (debug key / self-signed junk): +0.15 each
-    - Secondary/hidden DEX payloads: +0.2 each (capped)
-    - Dropper signals: +0.1 each (capped)
+    N6 rewrite. The old tiers summed everything into one `min(1.0, ...)`, which let
+    ubiquitous evidence saturate the cap on its own. Measured, clean apps drew 93.4%
+    of the 5-point cap against malware's 97.6% — a component with no information in
+    it. Two causes, in order of size:
+
+      * **YARA.** `severity * 0.3 * min(n, 3)` paid 0.765 to anything matching three
+        rules at severity 0.85, and a clean app matches a mean of 10.8 of the 498
+        loaded community rules, at exactly that severity (`IP`, `domain`,
+        `contains_base64` and friends). Rule-declared severity is metadata written by
+        the rule's author, not a measurement of how specific the rule is, so breadth
+        across a generic corpus no longer multiplies: YARA contributes
+        `IOC_YARA_WEIGHT * max_severity`, once. See T11 for the corpus skew itself.
+      * **`self_signed`** on every APK, worth 0.15 — fixed upstream in
+        apk_static.analyze_certificate_anomalies.
+
+    Evidence is now split by whether it identifies *this* sample:
+
+      * **Attributable** — a signature hash/cert hit, an exact extracted IoC, a hidden
+        DEX payload. Any of these can carry the component to its cap alone, because
+        each names something specific about this file.
+      * **Circumstantial** — YARA, certificate anomalies, dropper heuristics, forensic
+        C2 strings. Jointly capped at IOC_CIRCUMSTANTIAL_CAP, so no pile of generic
+        hits can imply a verdict on its own.
+
+    Caveat for anyone reading corpus numbers: `signature_match_count` is 1 for every
+    malware sample in `data/ttp_apks/` because those hashes came from MalwareBazaar
+    and are in the signature DB. On this corpus it is a tautology, not a measurement.
     """
-    score = 0.0
+    attributable = 0.0
+    attributable += signature_match_count * IOC_SIGNATURE_WEIGHT
+    attributable += min(
+        IOC_EXTRACTED_C2_CAP, extracted_c2_count * IOC_EXTRACTED_C2_WEIGHT
+    )
+    attributable += min(
+        IOC_SECONDARY_DEX_CAP, secondary_dex_count * IOC_SECONDARY_DEX_WEIGHT
+    )
 
-    # Signature matches — strongest IOC signal
-    score += signature_match_count * 0.5
-
-    # YARA matches — severity-weighted
+    circumstantial = 0.0
     if yara_match_count > 0:
-        score += yara_max_severity * 0.3 * min(yara_match_count, 3)
+        circumstantial += IOC_YARA_WEIGHT * yara_max_severity
+    circumstantial += cert_anomaly_count * IOC_CERT_ANOMALY_WEIGHT
+    circumstantial += dropper_signal_count * IOC_DROPPER_WEIGHT
+    circumstantial += matched_c2_indicators * IOC_FORENSIC_C2_WEIGHT
 
-    # Exact extracted C2 IoCs (telegram bot tokens, firebase, etc.)
-    score += min(0.7, extracted_c2_count * 0.35)
-
-    # Forensic dictionary C2_BEHAVIOR string hits (weaker)
-    score += min(0.3, matched_c2_indicators * 0.2)
-
-    # Certificate anomalies
-    score += min(0.4, cert_anomaly_count * 0.15)
-
-    # Hidden / secondary DEX payloads
-    score += min(0.4, secondary_dex_count * 0.2)
-
-    # Dropper / dynload / overlay-template signals
-    score += min(0.3, dropper_signal_count * 0.1)
-
-    return min(1.0, score)
+    return min(1.0, attributable + min(IOC_CIRCUMSTANTIAL_CAP, circumstantial))
 
 
 def _band_for(total: float) -> str:
     """Verdict band thresholds, shared so a cache hit reports the same band
     a cold-path run would have for the same total_score."""
-    if total <= 30:
+    if total <= BAND_LOW_CEILING:
         return "low"
-    if total <= 60:
+    if total <= BAND_SUSPICIOUS_CEILING:
         return "suspicious"
-    if total <= 80:
+    if total <= BAND_HIGH_CEILING:
         return "high"
     return "malicious"
 
@@ -282,6 +470,10 @@ def compute_risk_score(
     predicted_ttps: dict[str, float],
     permissions: list[str],
     obfuscation: ObfuscationSignal,
+    # Retained for call-site compatibility and no longer read: string-pool entropy
+    # stopped contributing to the score in N7 — see obfuscation_component. It still
+    # drives the coverage note in build_obfuscation_signal, which is where the
+    # threshold does its remaining work.
     entropy_threshold: float,
     matched_anchor_behaviors: set[str] | None = None,
     cache_hit: bool = False,
@@ -300,6 +492,7 @@ def compute_risk_score(
     dropper_signal_count: int = 0,
     # See classifier_confidence_component.
     classifier_evidence_present: bool = True,
+    ttp_thresholds: dict[str, float] | None = None,
 ) -> RiskScoreBreakdown:
     if matched_anchor_behaviors is None:
         matched_anchor_behaviors = set()
@@ -309,14 +502,16 @@ def compute_risk_score(
     # ungrounded. The deterministic components (permissions, anchors, obfuscation,
     # IOC) are untouched — they are measurements, not predictions.
     c1 = classifier_confidence_component(
-        predicted_ttps, evidence_present=classifier_evidence_present
+        predicted_ttps,
+        evidence_present=classifier_evidence_present,
+        ttp_thresholds=ttp_thresholds,
     )
     c2 = permission_api_risk_component(
         permissions, permission_matrix_flags=permission_matrix_flags
     )
     c3 = ttp_severity_component(predicted_ttps) if classifier_evidence_present else 0.0
     c4 = forensic_anchor_component(matched_anchor_behaviors)
-    c5 = obfuscation_component(obfuscation, entropy_threshold)
+    c5 = obfuscation_component(obfuscation)
     c6 = reputation_component(cache_hit, cached_score, is_known_malware)
     c7 = ioc_component(
         matched_c2_indicators,

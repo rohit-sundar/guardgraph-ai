@@ -106,14 +106,55 @@ class TestClassifierComponentGate(unittest.TestCase):
         ttps = {"T1418": 0.9639, "T1582": 0.8207, "T1471": 0.5446}
         self.assertEqual(classifier_confidence_component(ttps, evidence_present=False), 0.0)
 
-    def test_component_is_unchanged_with_evidence(self):
+    def test_component_is_nonzero_with_evidence(self):
+        """The gate only zeroes the component; with evidence the model still votes."""
         ttps = {"T1429": 0.9912, "T1616": 0.9909}
-        self.assertAlmostEqual(
-            classifier_confidence_component(ttps, evidence_present=True), 0.9912
+        self.assertGreater(
+            classifier_confidence_component(ttps, evidence_present=True), 0.0
         )
 
-    def test_default_preserves_legacy_behaviour(self):
-        self.assertAlmostEqual(classifier_confidence_component({"T1429": 0.5}), 0.5)
+    def test_breadth_raises_confidence_monotonically(self):
+        """
+        N8: confidence is an evidence mass over techniques, not `max(probability)`.
+        Two decisive techniques must outrank one, and both must stay below the cap —
+        `com.symeonchen.wakeupscreen` drew 24.57/25 from a single label under the old
+        max() rule.
+        """
+        thresholds = {"T1429": 0.5, "T1616": 0.5, "T1471": 0.5}
+        one = classifier_confidence_component(
+            {"T1429": 0.99}, ttp_thresholds=thresholds
+        )
+        two = classifier_confidence_component(
+            {"T1429": 0.99, "T1616": 0.99}, ttp_thresholds=thresholds
+        )
+        three = classifier_confidence_component(
+            {"T1429": 0.99, "T1616": 0.99, "T1471": 0.99}, ttp_thresholds=thresholds
+        )
+        self.assertLess(one, two)
+        self.assertLess(two, three)
+        self.assertLess(three, 1.0)
+        # One confident technique must no longer be worth most of the 25-point cap.
+        self.assertLess(one, 0.5)
+
+    def test_confidence_is_measured_against_the_calibrated_threshold(self):
+        """
+        A probability barely past its own boundary is weak evidence; the same
+        probability far past a low boundary is strong. The per-label thresholds in
+        the trained bundle span 0.10 to 0.90, so an uncalibrated max() conflates the
+        two.
+        """
+        barely = classifier_confidence_component(
+            {"T1471": 0.91}, ttp_thresholds={"T1471": 0.9}
+        )
+        decisively = classifier_confidence_component(
+            {"T1516": 0.91}, ttp_thresholds={"T1516": 0.1}
+        )
+        self.assertLess(barely, decisively)
+
+    def test_missing_thresholds_fall_back_to_the_global_default(self):
+        """An untrained bundle yields {}; the component must still be scoreable."""
+        self.assertGreater(classifier_confidence_component({"T1429": 0.99}), 0.0)
+        self.assertEqual(classifier_confidence_component({"T1429": 0.5}, ttp_thresholds={}), 0.0)
 
     def test_empty_file_no_longer_scores_suspicious(self):
         """

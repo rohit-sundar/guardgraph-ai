@@ -16,6 +16,8 @@ from loguru import logger
 
 from app.core.schemas import IngestionResult
 from app.analysis.apk_static import (
+    accessibility_matrix_flags,
+    declares_accessibility_service,
     extract_c2_indicators,
     detect_permission_matrix,
     analyze_certificate_anomalies,
@@ -107,18 +109,41 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
     der_certs = extract_der_certificates(apk_obj)
     cert_anomalies = analyze_certificate_anomalies(der_certs)
 
-    # 4. Detect permission matrices
+    # 4. Detect permission matrices. The declared intent actions go in too: the
+    #    accessibility rules key off BIND_ACCESSIBILITY_SERVICE, which is the
+    #    permission the system holds over a service and so almost never appears in
+    #    <uses-permission> — see apk_static.ACCESSIBILITY_SERVICE_ACTION (N5).
     permissions = list(apk_obj.get_permissions())
-    permission_matrix_flags = detect_permission_matrix(permissions)
+    intent_actions = extract_intent_actions(apk_obj)
+    permission_matrix_flags = detect_permission_matrix(permissions, intent_actions)
 
-    # Add accessibility config flags to permission matrix flags if accessibility is used
-    a11y_flags = []
-    if "android.permission.BIND_ACCESSIBILITY_SERVICE" in permissions:
+    # 4b. Accessibility service config. Gated on the *declaration* — gating on the
+    #     <uses-permission> left accessibility_flags empty for 69 of the 75 corpus
+    #     malware samples that declare an accessibility service. Only the mapped
+    #     ACCESSIBILITY_* IDs join permission_matrix_flags; the raw config strings
+    #     stay in accessibility_flags, where the report and the matrix flags read
+    #     them, instead of reaching the scorer as unweighted unknowns.
+    a11y_flags: list[str] = []
+    if declares_accessibility_service(permissions, intent_actions):
         a11y_flags = parse_accessibility_configs(apk_obj)
-        permission_matrix_flags.extend(a11y_flags)
+        permission_matrix_flags.extend(
+            f for f in accessibility_matrix_flags(a11y_flags)
+            if f not in permission_matrix_flags
+        )
 
     payload_assets = payload_info.get("payload_assets", [])
     dropper_signals = payload_info.get("dropper_signals", [])
+
+    # 5. How much code Androguard actually recovered. Counted here rather than in
+    #    cfg.py because it is a property of the sample, not of the CFG pass, and
+    #    because the scorer needs it to read a zero analysed-method count correctly
+    #    (N7): a stub APK with a rich manifest and no recoverable code is evasion,
+    #    an app whose methods simply matched nothing in the dictionary is not.
+    try:
+        dex_method_count = sum(1 for _ in analysis.get_methods())
+    except Exception as e:
+        logger.warning(f"DEX method count unavailable: {e}")
+        dex_method_count = 0
 
     result = IngestionResult(
         sha256=sha256,
@@ -128,11 +153,12 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
         activities=list(apk_obj.get_activities()),
         services=list(apk_obj.get_services()),
         receivers=list(apk_obj.get_receivers()),
-        intent_actions=extract_intent_actions(apk_obj),
+        intent_actions=intent_actions,
         c2_indicators=c2_indicators,
         cert_anomalies=cert_anomalies,
         permission_matrix_flags=permission_matrix_flags,
         secondary_dex_count=secondary_dex_count,
+        dex_method_count=dex_method_count,
         accessibility_flags=a11y_flags,
         payload_assets=payload_assets,
         dropper_signals=dropper_signals,
@@ -143,6 +169,7 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
         f"cert_anomalies={len(result.cert_anomalies)}, "
         f"perm_matrix={result.permission_matrix_flags}, "
         f"secondary_dex={result.secondary_dex_count}, "
+        f"dex_methods={result.dex_method_count}, "
         f"a11y={len(result.accessibility_flags)}, "
         f"dropper_signals={len(result.dropper_signals)}, "
         f"yara_targets={len(yara_targets)}"

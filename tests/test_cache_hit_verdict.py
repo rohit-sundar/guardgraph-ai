@@ -73,8 +73,22 @@ class TestCacheHitPreservesVerdict(unittest.TestCase):
         self.assertIsNone(result.risk_score.ioc_component)
 
     def test_verdict_band_matches_score_at_every_boundary(self):
-        for score, expected_band in [(10.0, "low"), (45.0, "suspicious"),
-                                      (70.0, "high"), (95.0, "malicious")]:
+        """
+        One sample per band, derived from the boundaries rather than hard-coded, so
+        recalibrating them stays a one-line change in scoring.py. The point of this
+        test is that the hot path bands a cached score exactly as the cold path would,
+        not that any particular number is a boundary.
+        """
+        from app.reports.scoring import (
+            BAND_HIGH_CEILING, BAND_LOW_CEILING, BAND_SUSPICIOUS_CEILING,
+        )
+
+        for score, expected_band in [
+            (BAND_LOW_CEILING / 2, "low"),
+            ((BAND_LOW_CEILING + BAND_SUSPICIOUS_CEILING) / 2, "suspicious"),
+            ((BAND_SUSPICIOUS_CEILING + BAND_HIGH_CEILING) / 2, "high"),
+            ((BAND_HIGH_CEILING + 100.0) / 2, "malicious"),
+        ]:
             cached_row = {
                 "sha256": "dd" * 32, "family": "", "base_score": score,
                 "narrative": "n", "limitations": [], "ttps": {},

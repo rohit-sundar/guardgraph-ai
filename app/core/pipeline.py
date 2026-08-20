@@ -265,6 +265,11 @@ class AnalysisPipeline:
             entropy_threshold=settings.entropy_high_threshold,
             flattening_zscore=settings.flattening_degree_outlier_zscore,
             method_parse_failure_rate=parse_failure_rate,
+            dex_method_count=ingestion.dex_method_count,
+            declared_component_count=(
+                len(ingestion.activities) + len(ingestion.services)
+                + len(ingestion.receivers)
+            ),
         )
 
         # Legacy family (35) vector — unchanged: first-subgraph invariants.
@@ -415,6 +420,16 @@ class AnalysisPipeline:
         start_time = time.time()
         matched_anchor_behaviors = set(all_matches.keys())
 
+        # N8: the scorer rescales each technique probability against the boundary the
+        # model was calibrated to, so it needs the same per-label thresholds Phase 5
+        # filtered on. Read here rather than in scoring.py, which stays model-free; an
+        # untrained bundle yields {} and the scorer falls back to its global default.
+        try:
+            ttp_thresholds = ttp_classifier.thresholds()
+        except (FileNotFoundError, KeyError, Exception) as e:
+            logger.warning(f"[Phase 6] Per-label TTP thresholds unavailable: {e}")
+            ttp_thresholds = {}
+
         # Extract sig/YARA signals for risk scoring
         sig_match_count = 0
         yara_match_count = 0
@@ -459,6 +474,7 @@ class AnalysisPipeline:
             secondary_dex_count=secondary_dex,
             dropper_signal_count=dropper_sigs,
             classifier_evidence_present=classifier_evidence_present,
+            ttp_thresholds=ttp_thresholds,
         )
         duration = time.time() - start_time
         logger.info(f"[Phase 6] Completed in {duration:.3f}s. Risk Score: {risk_score.total_score} ({risk_score.verdict_band})")

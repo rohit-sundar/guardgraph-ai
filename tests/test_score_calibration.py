@@ -1,0 +1,419 @@
+"""
+Regression tests for the N5-N8 calibration pass.
+
+Each finding below was opened by *measuring* the 353-APK corpus (220 F-Droid benign /
+133 MalwareBazaar malware) rather than by reading code, so each test here pins the
+measured behaviour, not the implementation:
+
+  N5  accessibility parsing and the ACCESSIBILITY_* matrix flags were gated on
+      `<uses-permission android:name="...BIND_ACCESSIBILITY_SERVICE">`, which 6 of 133
+      malware declare. The service's intent-filter action, which 75 of 133 declare, is
+      the real signal.
+  N6  `ioc_component` consumed 93.4% of its cap on clean apps against 97.6% on
+      malware. Two causes: `self_signed` reported as an anomaly on every APK, and a
+      YARA term that paid 0.765 for matching three generic community rules.
+  N7  `obfuscation_component` was *inverted* (benign 39.3% of cap, malware 32.5%).
+      Three of its four inputs were dead and the fourth — `flattening_suspected` — is
+      an existential over every analysed method, so it fired on 30/30 clean apps.
+  N8  `classifier_confidence_component` returned `max(probability)`, ignoring both the
+      per-label calibrated threshold and how many techniques corroborated. See also
+      tests/test_classifier_evidence_gate.py.
+
+Plus the verdict-band boundaries those components feed.
+
+Fully offline — no model, no Neo4j, no Ollama, no APK fixtures.
+"""
+import os
+import sys
+import unittest
+from datetime import datetime, timedelta, timezone
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from app.analysis.apk_static import (
+    ACCESSIBILITY_SERVICE_ACTION,
+    accessibility_matrix_flags,
+    analyze_certificate_anomalies,
+    declares_accessibility_service,
+    detect_permission_matrix,
+)
+from app.analysis.forensic import ACCESSIBILITY_INTENT_ACTIONS
+from app.core.schemas import ObfuscationSignal
+from app.reports.scoring import (
+    BAND_HIGH_CEILING,
+    BAND_LOW_CEILING,
+    BAND_SUSPICIOUS_CEILING,
+    MATRIX_FLAG_SEVERITY,
+    _band_for,
+    classifier_confidence_component,
+    ioc_component,
+    obfuscation_component,
+)
+
+A11Y_PERMISSION = "android.permission.BIND_ACCESSIBILITY_SERVICE"
+SMS_PERMISSIONS = ["android.permission.READ_SMS", "android.permission.RECEIVE_SMS"]
+
+
+def _obfuscation(**overrides) -> ObfuscationSignal:
+    """An ObfuscationSignal shaped like the corpus average clean app."""
+    fields = {
+        "string_entropy_score": 3.28,   # corpus benign mean; threshold is 7.2
+        "flattening_suspected": True,   # true for 30/30 sampled clean apps
+        "flattening_method_count": 9,
+        "analyzed_method_count": 288,
+        "flattening_method_ratio": 0.031,   # corpus benign median
+        "dex_method_count": 25338,      # corpus benign median
+        "declared_component_count": 120,
+        "method_parse_failure_rate": 0.0,
+        "unresolved_reflection_targets": 0,
+        "coverage_note": "test",
+    }
+    fields.update(overrides)
+    return ObfuscationSignal(**fields)
+
+
+# ─── N5: the accessibility gate reads the declaration, not the permission ────
+
+class TestAccessibilityDeclarationGate(unittest.TestCase):
+
+    def test_service_intent_action_declares_accessibility(self):
+        self.assertTrue(
+            declares_accessibility_service(
+                permissions=[], intent_actions=[ACCESSIBILITY_SERVICE_ACTION]
+            )
+        )
+
+    def test_uses_permission_still_declares_accessibility(self):
+        """6 of 133 corpus malware do write it; they must not regress."""
+        self.assertTrue(
+            declares_accessibility_service(
+                permissions=[A11Y_PERMISSION], intent_actions=[]
+            )
+        )
+
+    def test_neither_route_declared_is_false(self):
+        self.assertFalse(
+            declares_accessibility_service(
+                permissions=["android.permission.INTERNET"],
+                intent_actions=["android.intent.action.MAIN"],
+            )
+        )
+
+    def test_forensic_dictionary_shares_the_action_constant(self):
+        """One restated copy of the action string is one too many."""
+        self.assertEqual(ACCESSIBILITY_INTENT_ACTIONS, [ACCESSIBILITY_SERVICE_ACTION])
+
+    def test_matrix_rules_fire_off_the_service_declaration(self):
+        """
+        SMS_OTP_STEALER_PATTERN needs accessibility + SMS. Gated on the
+        <uses-permission> it reached 6/133 malware; on the declaration, 75/133.
+        """
+        with_action = detect_permission_matrix(
+            SMS_PERMISSIONS, [ACCESSIBILITY_SERVICE_ACTION]
+        )
+        without = detect_permission_matrix(SMS_PERMISSIONS, [])
+        self.assertIn("SMS_OTP_STEALER_PATTERN", with_action)
+        self.assertNotIn("SMS_OTP_STEALER_PATTERN", without)
+
+    def test_accessibility_full_control_needs_overlay_as_well(self):
+        """The declaration enables the rule; it does not satisfy it on its own."""
+        alone = detect_permission_matrix([], [ACCESSIBILITY_SERVICE_ACTION])
+        with_overlay = detect_permission_matrix(
+            ["android.permission.SYSTEM_ALERT_WINDOW"], [ACCESSIBILITY_SERVICE_ACTION]
+        )
+        self.assertNotIn("ACCESSIBILITY_FULL_CONTROL", alone)
+        self.assertIn("ACCESSIBILITY_FULL_CONTROL", with_overlay)
+
+    def test_intent_actions_are_optional_for_existing_callers(self):
+        self.assertEqual(detect_permission_matrix(SMS_PERMISSIONS), [])
+
+    def test_config_flags_map_onto_weighted_matrix_ids(self):
+        """
+        ingest_apk used to splice the *raw* config flags into
+        permission_matrix_flags, where the scorer has no weight for them and fell
+        back to its 0.6 default for unknowns. Only mapped IDs may reach it.
+        """
+        mapped = accessibility_matrix_flags([
+            "accessibility_config:res/xml/service.xml",
+            "canRetrieveWindowContent=true",
+            "canPerformGestures=true",
+            "keylogging_event_mask:typeAllMasks",
+        ])
+        self.assertEqual(
+            sorted(mapped),
+            ["ACCESSIBILITY_GESTURE_CONTROL", "ACCESSIBILITY_KEYLOGGING_MASK",
+             "ACCESSIBILITY_WINDOW_CONTENT"],
+        )
+        for flag in mapped:
+            self.assertIn(flag, MATRIX_FLAG_SEVERITY)
+
+    def test_unremarkable_config_maps_to_no_matrix_flag(self):
+        self.assertEqual(
+            accessibility_matrix_flags([
+                "accessibility_config:res/xml/service.xml",
+                "accessibility_config_not_statically_resolved",
+            ]),
+            [],
+        )
+
+
+# ─── N6: self-signing is how Android works, and YARA breadth is not evidence ─
+
+def _certificate(cn: str, org: str = "GuardGraph Test", issuer_cn: str | None = None,
+                 not_before=None, not_after=None) -> bytes:
+    """
+    A parseable DER certificate. Only the fields analyze_certificate_anomalies reads
+    are meaningful — it never verifies the signature — so asn1crypto alone suffices
+    and the suite needs no `cryptography` dependency.
+    """
+    from asn1crypto import algos, core, keys, x509
+
+    now = datetime.now(timezone.utc)
+    tbs = x509.TbsCertificate({
+        "version": "v3",
+        "serial_number": 1,
+        "signature": algos.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
+        "issuer": x509.Name.build(
+            {"common_name": issuer_cn or cn, "organization_name": org}
+        ),
+        "validity": x509.Validity({
+            "not_before": x509.Time(
+                {"utc_time": not_before or now - timedelta(days=1)}
+            ),
+            "not_after": x509.Time(
+                {"utc_time": not_after or now + timedelta(days=3650)}
+            ),
+        }),
+        "subject": x509.Name.build(
+            {"common_name": cn, "organization_name": org}
+        ),
+        "subject_public_key_info": keys.PublicKeyInfo({
+            "algorithm": keys.PublicKeyAlgorithm(
+                {"algorithm": "rsa", "parameters": core.Null()}
+            ),
+            "public_key": keys.RSAPublicKey(
+                {"modulus": 0xDEADBEEF, "public_exponent": 65537}
+            ),
+        }),
+    })
+    return x509.Certificate({
+        "tbs_certificate": tbs,
+        "signature_algorithm": algos.SignedDigestAlgorithm({"algorithm": "sha256_rsa"}),
+        "signature_value": b"\x00" * 32,
+    }).dump()
+
+
+class TestCertificateAnomalies(unittest.TestCase):
+
+    def test_ordinary_self_signed_release_cert_is_not_an_anomaly(self):
+        """
+        The N6 regression. Android has no CA in its signing model, so subject ==
+        issuer holds for essentially every APK; reporting it put a constant 0.15 into
+        ioc_component for 27 of 30 sampled clean apps.
+        """
+        self.assertEqual(
+            analyze_certificate_anomalies([_certificate("Example App Publisher")]), []
+        )
+
+    def test_self_signed_with_a_junk_dn_is_still_an_anomaly(self):
+        anomalies = analyze_certificate_anomalies([_certificate("a", org="")])
+        self.assertTrue(anomalies, "a one-character CN must still be flagged")
+
+    def test_debug_key_is_still_an_anomaly(self):
+        anomalies = analyze_certificate_anomalies([_certificate("Android Debug")])
+        self.assertTrue(any(a.startswith("debug_or_test_key") for a in anomalies))
+
+    def test_expired_certificate_is_still_an_anomaly(self):
+        now = datetime.now(timezone.utc)
+        anomalies = analyze_certificate_anomalies([_certificate(
+            "Example App Publisher",
+            not_before=now - timedelta(days=800),
+            not_after=now - timedelta(days=400),
+        )])
+        self.assertTrue(any(a.startswith("expired") for a in anomalies))
+
+    def test_missing_certificate_is_still_an_anomaly(self):
+        self.assertIn("missing_certificate", analyze_certificate_anomalies([]))
+
+
+class TestIocComponent(unittest.TestCase):
+
+    def test_generic_yara_breadth_no_longer_saturates(self):
+        """
+        The measured clean-app shape: 11 community rules, max declared severity 0.85,
+        nothing else. It used to score 0.765 of the 1.0 cap on that alone.
+        """
+        clean = ioc_component(0, yara_match_count=11, yara_max_severity=0.85)
+        self.assertLess(clean, 0.35)
+
+    def test_yara_match_count_does_not_multiply(self):
+        """Rule-declared severity is metadata; matching more generic rules is not
+        more evidence."""
+        few = ioc_component(0, yara_match_count=3, yara_max_severity=0.85)
+        many = ioc_component(0, yara_match_count=40, yara_max_severity=0.85)
+        self.assertEqual(few, many)
+
+    def test_circumstantial_evidence_alone_cannot_reach_the_cap(self):
+        piled_on = ioc_component(
+            matched_c2_indicators=5,
+            yara_match_count=30,
+            yara_max_severity=1.0,
+            cert_anomaly_count=6,
+            dropper_signal_count=9,
+        )
+        self.assertLessEqual(piled_on, 0.35 + 1e-9)
+
+    def test_a_signature_hash_hit_still_dominates(self):
+        self.assertGreaterEqual(ioc_component(0, signature_match_count=1), 0.5)
+
+    def test_exact_extracted_iocs_still_carry_the_component(self):
+        """A Telegram bot token or .onion address names *this* sample."""
+        self.assertGreaterEqual(ioc_component(0, extracted_c2_count=2), 0.7)
+
+    def test_malware_shape_outscores_clean_shape(self):
+        clean = ioc_component(0, yara_match_count=11, yara_max_severity=0.85)
+        malware = ioc_component(
+            0, signature_match_count=1, yara_match_count=14, yara_max_severity=0.9,
+            extracted_c2_count=1, cert_anomaly_count=1, secondary_dex_count=2,
+            dropper_signal_count=1,
+        )
+        self.assertGreater(malware, clean * 3)
+
+
+# ─── N7: the obfuscation component measures evasion, not app size ────────────
+
+class TestObfuscationComponent(unittest.TestCase):
+
+    def test_average_clean_app_scores_zero(self):
+        """It used to score a constant 0.4 — 6.00 of 15 — for 216 of 220 clean apps."""
+        self.assertEqual(obfuscation_component(_obfuscation()), 0.0)
+
+    def test_flattening_prevalence_is_reported_but_not_scored(self):
+        """
+        Reading flattening as a prevalence rather than an existential does not rescue
+        it: over the full corpus, benign p75 is 0.119 against malware's 0.118, and no
+        threshold from 0.05 to 0.50 gives a lift outside 0.79-1.07.
+        """
+        rare = _obfuscation(flattening_method_ratio=1 / 300)
+        widespread = _obfuscation(
+            flattening_method_count=60, analyzed_method_count=200,
+            flattening_method_ratio=0.30,
+        )
+        self.assertEqual(obfuscation_component(rare), 0.0)
+        self.assertEqual(obfuscation_component(widespread), 0.0)
+
+    def test_no_recoverable_code_is_the_strongest_signal(self):
+        """
+        The samples that defeated the analyser scored 0.0 here, because an empty CFG
+        set has nothing that can look flattened — the component that exists to measure
+        evasion read zero on exactly the apps it was meant to catch.
+        """
+        packed = _obfuscation(
+            string_entropy_score=0.0, flattening_suspected=False,
+            flattening_method_count=0, analyzed_method_count=0,
+            flattening_method_ratio=0.0, dex_method_count=0,
+            declared_component_count=70,
+        )
+        self.assertGreaterEqual(obfuscation_component(packed), 0.6)
+
+    def test_a_dex_too_small_for_its_own_manifest_is_evasion(self):
+        """
+        A corpus sample declares 539 activities, 42 services and 49 receivers, and
+        ships 57 methods. No Android app implements 630 components in 57 methods; the
+        payload is decrypted at runtime.
+        """
+        stub = _obfuscation(
+            analyzed_method_count=0, flattening_method_ratio=0.0,
+            flattening_suspected=False, flattening_method_count=0,
+            dex_method_count=57, declared_component_count=630,
+        )
+        self.assertGreaterEqual(obfuscation_component(stub), 0.6)
+
+    def test_a_real_app_is_far_from_the_manifest_vs_code_floor(self):
+        """The lowest ratio in the 219-app clean corpus is 56.85 methods per declared
+        component, 28x above the floor."""
+        real = _obfuscation(dex_method_count=25338, declared_component_count=120)
+        self.assertEqual(obfuscation_component(real), 0.0)
+
+    def test_unmeasured_method_count_is_not_treated_as_zero(self):
+        """`None` is "we did not look", which must not earn an evasion penalty."""
+        self.assertEqual(
+            obfuscation_component(_obfuscation(dex_method_count=None)), 0.0
+        )
+        self.assertEqual(
+            obfuscation_component(
+                _obfuscation(dex_method_count=57, declared_component_count=None)
+            ),
+            0.0,
+        )
+
+    def test_relevance_filter_selecting_nothing_is_not_evasion(self):
+        """A small clean app whose methods touch nothing in the forensic dictionary."""
+        signal = _obfuscation(
+            flattening_suspected=False, flattening_method_count=0,
+            analyzed_method_count=0, flattening_method_ratio=0.0,
+            dex_method_count=1444, declared_component_count=8,  # com.reteclock
+        )
+        self.assertEqual(obfuscation_component(signal), 0.0)
+
+    def test_string_pool_entropy_no_longer_moves_the_score(self):
+        """
+        Mean per-string Shannon entropy cannot reach the 7.2 threshold (7.2 bits needs
+        ~147 distinct characters per string; the corpus maximum is 3.47), and it runs
+        backwards: benign 3.28 against malware 2.78.
+        """
+        low = obfuscation_component(_obfuscation(string_entropy_score=0.5))
+        high = obfuscation_component(_obfuscation(string_entropy_score=7.9))
+        self.assertEqual(low, high)
+
+    def test_parse_failures_still_raise_the_score(self):
+        signal = _obfuscation(method_parse_failure_rate=0.25)
+        self.assertGreater(obfuscation_component(signal), 0.0)
+
+    def test_noise_level_parse_failures_do_not(self):
+        signal = _obfuscation(method_parse_failure_rate=0.02)
+        self.assertEqual(obfuscation_component(signal), 0.0)
+
+
+# ─── N8 + bands ──────────────────────────────────────────────────────────────
+
+class TestVerdictBands(unittest.TestCase):
+
+    def test_boundaries_are_ordered(self):
+        self.assertLess(BAND_LOW_CEILING, BAND_SUSPICIOUS_CEILING)
+        self.assertLess(BAND_SUSPICIOUS_CEILING, BAND_HIGH_CEILING)
+
+    def test_each_band_is_reachable_and_inclusive_at_its_ceiling(self):
+        self.assertEqual(_band_for(0.0), "low")
+        self.assertEqual(_band_for(BAND_LOW_CEILING), "low")
+        self.assertEqual(_band_for(BAND_LOW_CEILING + 0.01), "suspicious")
+        self.assertEqual(_band_for(BAND_SUSPICIOUS_CEILING), "suspicious")
+        self.assertEqual(_band_for(BAND_SUSPICIOUS_CEILING + 0.01), "high")
+        self.assertEqual(_band_for(BAND_HIGH_CEILING), "high")
+        self.assertEqual(_band_for(BAND_HIGH_CEILING + 0.01), "malicious")
+        self.assertEqual(_band_for(100.0), "malicious")
+
+    def test_unparseable_score_still_reads_suspicious(self):
+        """
+        routes.UNPARSEABLE_RISK_SCORE exists to say "look at this by hand". If a band
+        boundary ever moves past it, the fallback silently starts claiming a verdict
+        about a file nothing was observed from.
+        """
+        from app.api.routes import UNPARSEABLE_RISK_SCORE
+
+        self.assertEqual(_band_for(UNPARSEABLE_RISK_SCORE), "suspicious")
+
+    def test_a_single_confident_technique_cannot_reach_the_high_band_alone(self):
+        """
+        `com.symeonchen.wakeupscreen` scored 62.67 / `high` with one predicted
+        technique at 0.9828 and no forensic anchors: 24.57 of the 25-point classifier
+        cap from a label whose calibrated boundary is 0.10.
+        """
+        confidence = classifier_confidence_component(
+            {"T1516": 0.9828}, ttp_thresholds={"T1516": 0.10}
+        )
+        self.assertLess(confidence * 25, BAND_SUSPICIOUS_CEILING)
+
+
+if __name__ == "__main__":
+    unittest.main()

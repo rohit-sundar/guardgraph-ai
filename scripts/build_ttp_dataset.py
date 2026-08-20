@@ -149,6 +149,11 @@ def extract_ttp_row(apk_path: str) -> tuple[list[float], dict] | None:
         entropy_threshold=settings.entropy_high_threshold,
         flattening_zscore=settings.flattening_degree_outlier_zscore,
         method_parse_failure_rate=parse_failure_rate,
+        dex_method_count=ingestion.dex_method_count,
+        declared_component_count=(
+            len(ingestion.activities) + len(ingestion.services)
+            + len(ingestion.receivers)
+        ),
     )
 
     vec = build_ttp_feature_vector(
