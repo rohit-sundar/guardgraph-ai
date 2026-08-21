@@ -43,18 +43,36 @@ ZERO_DAY_OBF_MIN = 0.5      # obfuscation_component (0-1) at/above this = strong
 ZERO_DAY_CONF_MAX = 0.4     # classifier_confidence_component (0-1) below this = weak model familiarity
 
 # ── Calibration constants (N6-N8) ─────────────────────────────────────────────
-# Every number in this block was picked by measuring the 353-APK corpus
-# (220 F-Droid benign / 133 MalwareBazaar malware), not by intuition. Re-derive
-# them with `python scripts/score_corpus.py` after any change to the analysis
-# stages; the script prints the same tables the values below were chosen from.
+# Every number in this block was picked by measuring the corpus, not by intuition.
+# Re-derive them with `python scripts/score_corpus.py` after any change to the
+# analysis stages; the script prints the same tables the values below were chosen
+# from.
+#
+# Re-measured 2026-08-21 against the expanded corpus: **618 rows, 300 F-Droid
+# benign / 318 MalwareBazaar malware across 21 families** (was 353 = 220/133).
+# The benign side is two disjoint seeded selections — 220 apps under 12 MB plus 80
+# between 12 and 60 MB — because the original <=12 MB cap is why the clean corpus
+# was all small utilities. A further 30 large apps are held out of training
+# entirely (data/benign_holdout) and are what distinguishes a real boundary from
+# one fitted to the corpus.
+#
+# **These boundaries were derived with online reputation DISABLED**
+# (settings.online_lookups_enabled = False), so `signature_match_count` is 0 and
+# `is_known_malware` is False for every sample — verified, max signature_matches
+# across all 616 scored samples was 0. That makes them conservative rather than
+# optimistic: VirusTotal only returns a verdict when malicious > 0, so enabling
+# reputation can push malware totals up and never benign ones. It also makes the
+# run deterministic, which the two-run variance noted in earlier revisions of this
+# block was not.
 
 # classifier_confidence_component (N8). Fallback decision boundary for a technique
 # the trained bundle carries no calibrated threshold for — matches
 # pipeline.TTP_PREDICT_THRESHOLD, which decides what reaches this function.
 DEFAULT_TTP_THRESHOLD = 0.5
-# Summed threshold margin at which confidence reaches 1 - 1/e ≈ 0.63. Malware
-# predicts a median of 8 techniques (mass well past this); the 7 clean apps that
-# predict anything at all mostly predict one or two.
+# Summed threshold margin at which confidence reaches 1 - 1/e ≈ 0.63. Re-counted
+# over the 618-row corpus: malware predicts a median of 7 techniques (mass well
+# past this), while the clean median is 0 — most clean apps predict nothing at all.
+# The separation this constant assumes is intact, so it is unchanged.
 CONFIDENCE_SATURATION_MASS = 2.5
 
 # obfuscation_component (N7). Measured over the corpus, all four original inputs
@@ -62,7 +80,8 @@ CONFIDENCE_SATURATION_MASS = 2.5
 # the wrong way (benign 3.28 vs malware 2.78); `flattening_suspected` is an
 # existential over every analysed method and fired on 30/30 sampled clean apps;
 # `unresolved_reflection_targets` is a documented stub pinned at 0;
-# `method_parse_failure_rate` was 0.0 on all 353. So the component was a constant
+# `method_parse_failure_rate` was 0.0 on all 353 then, and on all 616 now. So the
+# component was a constant
 # 6.00/15 for 216 of 220 clean apps and 108 of 133 malware — 39.3% of cap for benign
 # against 32.5% for malware, an inverted constant.
 #
@@ -77,20 +96,20 @@ CODE_NOT_RECOVERED_WEIGHT = 0.60
 # An Android class that exists at all costs a constructor and at least one lifecycle
 # override, so a manifest declaring N components needs on the order of 2N methods
 # before anything else. Below that the recovered DEX cannot be the app the manifest
-# describes — a loader stub whose payload is decrypted at runtime. Measured, the
-# lowest ratio in the 219-app clean corpus is 56.85 methods per declared component,
-# 28x above this floor; on the malware side 12 samples fall below it, one of them
-# declaring 539 activities, 42 services and 49 receivers with 57 methods in its DEX.
+# describes — a loader stub whose payload is decrypted at runtime. Re-measured over
+# 299 clean apps (2026-08-21), the lowest ratio is still 56.85 dex methods per
+# declared component — the identical app and ratio as the 219-app corpus — leaving
+# 28.4x of margin above this floor; on the malware side 37 of 318 samples fall
+# below it, one declaring 539 activities, 42 services and 49 receivers with 57
+# methods in its DEX.
 MIN_METHODS_PER_DECLARED_COMPONENT = 2.0
-PARSE_FAILURE_MIN = 0.10            # below this, CFG failures are ordinary noise
-PARSE_FAILURE_WEIGHT = 2.0          # rate * this, capped at PARSE_FAILURE_CAP
-PARSE_FAILURE_CAP = 0.40
 UNRESOLVED_REFLECTION_WEIGHT = 0.10
 
 # ioc_component (N6). The old tiers let three weak signals saturate the cap: a
 # YARA term of severity * 0.3 * min(n, 3) paid 0.765 to any app matching three
 # rules at severity 0.85, and clean apps match a mean of 10.8 community rules at
-# exactly that severity. Rule-declared severity is author metadata, not a measure of
+# exactly that severity (re-measured over 300 clean apps: 14.03 rules at mean max
+# severity 0.84 — the breadth grew, which is exactly why it must not multiply). Rule-declared severity is author metadata, not a measure of
 # specificity, so YARA breadth no longer multiplies. Evidence is split: signals that
 # identify *this* sample can reach the cap alone; ubiquitous ones share a small
 # allowance and can never carry a verdict by themselves.
@@ -110,34 +129,56 @@ IOC_CIRCUMSTANTIAL_CAP = 0.35       # joint ceiling on the four weak terms above
 # rather than by cutting 0-100 into four. Measured *after* the N5-N8 component fixes,
 # over two full corpus runs; reproduce with `python scripts/score_corpus.py`.
 #
-#   clean corpus:   median 11.81, p95 26.73, max 53.33     (220 apps)
-#   malware corpus: p25 64.33-65.99, median 69.15-72.64     (133 samples)
+# Measured 2026-08-21 with online lookups disabled, so the run is deterministic —
+# earlier revisions of this block quoted a range across two runs because live
+# VirusTotal/MalwareBazaar answers moved malware totals by about four points a day.
+# That variance is gone, not averaged over.
 #
-# The malware range is given as a span across the two runs on purpose. Phase 1.5
-# queries VirusTotal and MalwareBazaar live, so `signature_match_count` — and through
-# it `ioc_component` and `reputation_component` — depends on what those services
-# answered that day: mean signature hits per malware sample were 0.80 in one run and
-# 0.15 in the next, moving malware totals by about four points. Boundaries are chosen
-# to be insensitive to that; the clean side does not move (0.02 hits either run).
+#   clean corpus:   median 11.81, p95 27.73, max 69.19      (298 apps scored)
+#   malware corpus: p25 64.03, median 68.26, max 75.22      (318 samples)
+#   holdout:        median 12.31, p95 35.89, max 50.31      (30 apps, never trained on)
 #
-# `low` — "costs no analyst time". Above the clean corpus's 95th percentile (26.73),
-# leaving 212 of 220 clean apps here. 5-14 malware land here too; every one of them
+# The holdout is the check that matters. Against the 80 training apps drawn from the
+# same 12-60 MB window it tracks almost exactly — median 12.31 vs 12.44, p75 18.71 vs
+# 19.81 — so the boundaries below are not fitted to apps the model saw.
+#
+# `low` — "costs no analyst time". Above the clean corpus's 95th percentile (27.73),
+# leaving 285 of 298 clean apps here. Malware lands here too; every one of those
 # recovered no forensic evidence at all, which is a limit on analysis depth that no
 # boundary can move.
 BAND_LOW_CEILING = 30.0
-# `suspicious` — the ceiling below which the tool never asserts a verdict. Above the
-# *highest* score any app in the 220-app clean corpus reaches (53.33), so `high` is a
-# band the clean corpus never enters, with 6.67 points of margin. Youden's J peaks far
-# lower, at 27.0 (J=0.921); that difference is deliberately spent on never showing an
-# analyst a clean app marked `high`.
+# `suspicious` — the ceiling below which the tool never asserts a verdict. Youden's J
+# peaks far lower, at 27.0 (J=0.933); that difference is deliberately spent on almost
+# never showing an analyst a clean app marked `high`.
+#
+# "Almost", as of the 2026-08-21 corpus. The original criterion was "above the highest
+# score any clean app reaches", and on the 220-app corpus that was 53.33. Two apps in
+# the expanded clean corpus now exceed this ceiling, and they are kept as known
+# exceptions rather than designed around:
+#
+#   com.jens.automation2         69.19   43 permissions, ACCESSIBILITY_FULL_CONTROL,
+#                                        OVERLAY_ATTACK_PATTERN, OVERLAY_BOOT_PERSISTENCE,
+#                                        BANKING_TARGET_ENUMERATION, STEALTH_SMS_INTERCEPTION,
+#                                        DYNAMIC_CODE_LOADING
+#   dev.kerballone.spamblocker   61.90   OTP_INTERCEPTION, STEALTH_SMS_INTERCEPTION,
+#                                        OVERLAY_ATTACK_PATTERN, OVERLAY_BOOT_PERSISTENCE
+#
+# Both are clean, and both genuinely hold the capability surface of a banking trojan —
+# a Tasker-style automation app and an SMS spam blocker really do intercept SMS, read
+# OTPs, draw overlays and persist across boot. This is capability overlap, not a
+# scoring defect, and no boundary separates them: raising this ceiling above 69.19
+# would reclassify 189 of 318 malware (59%) as merely `suspicious`. The rest of the
+# clean corpus is nowhere near — the next highest score is 37.05, and 296 of 298
+# clean apps sit at or below it.
 BAND_SUSPICIOUS_CEILING = 60.0
-# `high` — the strongest claim, so it is placed where a few points of third-party
-# lookup variance cannot move dozens of samples across it. Below the malware first
-# quartile in both runs (64.33 / 65.99), which puts 98-102 of 133 samples (74-77%) at
-# `malicious` either way; at 70 the same two runs gave 55 and 85, because 70 falls
-# inside the distribution's mode. 11.7 points clear of the highest clean-corpus score.
-# Was 80.0, where only 12 of 133 malware reached `malicious` at all.
-BAND_HIGH_CEILING = 65.0
+# `high` — the strongest claim, so it is placed below the malware first quartile,
+# where the boundary sits outside the distribution's mode and a few points of
+# movement cannot carry dozens of samples across it. On the expanded corpus that
+# quartile is 64.03, which the previous value of 65.0 sat just above — so it is
+# lowered to 62.0 to restore the criterion with margin. At 70 the boundary would fall
+# inside the mode (median 68.26) and become sensitive to exactly the variance it
+# exists to avoid. Was 80.0, where only 12 of 133 malware reached `malicious` at all.
+BAND_HIGH_CEILING = 62.0
 
 RISKY_PERMISSIONS = {
     "android.permission.BIND_ACCESSIBILITY_SERVICE": 1.0,
@@ -331,13 +372,22 @@ def obfuscation_component(
     * Flattening prevalence is measured and reported but not scored: benign p75 0.119
       against malware p75 0.118, and no threshold from 0.05 to 0.50 gives a lift
       outside 0.79-1.07. Paying points for it is paying for noise.
-    * Manifest-vs-code is new, and is what the component now rests on: a DEX that
-      cannot possibly implement the manifest it ships with. Twelve corpus malware fail
-      that test — including a sample declaring 539 activities, 42 services and 49
-      receivers with 57 methods — and no clean app comes within 28x of it. Those
-      samples used to score 0.0 here, because an empty CFG set has nothing that can
-      look flattened: the component that exists to measure evasion read zero on
-      exactly the samples that defeated the analyser.
+    * Manifest-vs-code is what the component now rests on: a DEX that cannot
+      possibly implement the manifest it ships with. Re-measured over 300 clean and
+      318 malware samples, 37 malware fail that test — including a sample declaring
+      539 activities, 42 services and 49 receivers with 57 methods — and the lowest
+      ratio any clean app reaches is 56.85 dex methods per declared component,
+      28.4x above the floor. Tripling the corpus and adding 80 apps up to 60 MB did
+      not move that minimum at all: it is the same app (net.pgaskin.windy, 1137
+      methods / 20 declared) at the same ratio. Those samples used to score 0.0
+      here, because an empty CFG set has nothing that can look flattened: the
+      component that exists to measure evasion read zero on exactly the samples
+      that defeated the analyser.
+    * Method parse-failure rate was measured and dropped, not merely left unscored.
+      `method_parse_failure_rate` was 0.0 on all 353 samples of the old corpus and
+      is still 0.0 on all 616 of this one. A threshold, a multiplier and a cap
+      governing a signal with zero observations across two corpora is surface area,
+      not calibration, so the branch and its three constants were deleted.
 
     On this corpus that leaves the component at 0.0 for every clean app and non-zero
     only where the code genuinely could not be reached. A component that is silent
@@ -356,13 +406,6 @@ def obfuscation_component(
             and recovered < MIN_METHODS_PER_DECLARED_COMPONENT * declared
         ):
             score += CODE_NOT_RECOVERED_WEIGHT
-
-    # Methods that broke Androguard's block parser, over those attempted.
-    if obfuscation.method_parse_failure_rate >= PARSE_FAILURE_MIN:
-        score += min(
-            PARSE_FAILURE_CAP,
-            PARSE_FAILURE_WEIGHT * obfuscation.method_parse_failure_rate,
-        )
 
     # Reflection targets that constant propagation could not resolve. Still a stub in
     # obfuscation.count_reflection_calls (always 0); wired so that implementing the

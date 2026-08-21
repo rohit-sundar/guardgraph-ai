@@ -338,6 +338,41 @@ def _missing_samples(targets: dict[str, dict], apk_dir: str) -> list[str]:
     ]
 
 
+# ATT&CK software names carry qualifiers that MalwareBazaar signatures do not:
+# the ontology says "SpyNote RAT", "S.O.V.A.", "Pegasus for Android"; the bazaar
+# tags samples "SpyNote", "SOVA", "Pegasus". The `aliases` field does not rescue
+# this -- in data/ontology/software_technique_map.json it is almost always just
+# [name]. Measured 2026-08-21: querying names and aliases alone reaches 15
+# families and 142 APKs, while adding these variants reaches 23 families and 523
+# APKs. That gap is the real content of the manifest's "96 families returned zero
+# Android samples", which is a name-matching artefact, not the bazaar's answer.
+_SIGNATURE_SUFFIXES = (
+    " RAT", " Trojan", " Banker", " Bot", " Malware", " Spyware", " Stealer",
+)
+
+
+def _signature_variants(name: str, aliases: list[str]) -> list[str]:
+    """MalwareBazaar signature strings worth trying, most specific first.
+
+    Order matters: the caller stops as soon as it has enough hashes, so the
+    unmodified name must come first and the lossiest variant (first word) last.
+    """
+    out: list[str] = []
+    for base in [name, *aliases]:
+        candidates = [base]
+        for suffix in _SIGNATURE_SUFFIXES:
+            if base.endswith(suffix):
+                candidates.append(base[: -len(suffix)].strip())
+        if any(ch in base for ch in ". -"):
+            candidates.append(base.replace(".", "").replace(" ", "").replace("-", ""))
+        if " " in base:
+            candidates.append(base.split()[0])
+        for candidate in candidates:
+            if candidate and candidate not in out:
+                out.append(candidate)
+    return out
+
+
 def _resolve_stage_a_targets(
     software_map: list[dict],
     max_per_family: int,
@@ -375,8 +410,11 @@ def _resolve_stage_a_targets(
 
         hashes: list[str] = []
         query_ok = True
-        for sig in [name, *sw.get("aliases", [])]:
+        matched_sig = name
+        for sig in _signature_variants(name, sw.get("aliases", [])):
             found, ok = _mb_hashes_for_signature(sig, max_per_family, auth_key)
+            if found and not hashes:
+                matched_sig = sig
             hashes.extend(found)
             query_ok = query_ok and ok
             if len(hashes) >= max_per_family:
@@ -387,9 +425,14 @@ def _resolve_stage_a_targets(
         for h in wanted:
             targets.setdefault(h, {"family": name, "techniques": techniques})
         # Only call a family done when every query behind it actually answered.
-        family_status[name] = {"resolved": query_ok, "count": len(wanted)}
+        family_status[name] = {
+            "resolved": query_ok, "count": len(wanted), "signature": matched_sig,
+        }
         if wanted:
-            logger.info(f"[dataset] {name}: {len(wanted)} candidate samples")
+            logger.info(
+                f"[dataset] {name}: {len(wanted)} candidate samples"
+                + (f" (as '{matched_sig}')" if matched_sig != name else "")
+            )
         elif not query_ok:
             logger.warning(f"[dataset] {name}: unresolved (API error) — will retry on rerun")
 

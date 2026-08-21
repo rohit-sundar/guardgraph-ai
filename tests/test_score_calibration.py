@@ -1,14 +1,19 @@
 """
 Regression tests for the N5-N8 calibration pass.
 
-Each finding below was opened by *measuring* the 353-APK corpus (220 F-Droid benign /
-133 MalwareBazaar malware) rather than by reading code, so each test here pins the
-measured behaviour, not the implementation:
+Each finding below was opened by *measuring* the corpus rather than by reading code,
+so each test here pins the measured behaviour, not the implementation. Figures were
+re-measured on 2026-08-21 against the expanded corpus — 618 rows, 300 F-Droid benign
+(220 under 12 MB plus 80 between 12 and 60 MB) and 318 MalwareBazaar malware across
+21 families, with online reputation lookups disabled — and the originals from the
+353-APK corpus (220/133) are kept alongside where the comparison is the point:
 
   N5  accessibility parsing and the ACCESSIBILITY_* matrix flags were gated on
       `<uses-permission android:name="...BIND_ACCESSIBILITY_SERVICE">`, which 6 of 133
       malware declare. The service's intent-filter action, which 75 of 133 declare, is
-      the real signal.
+      the real signal. Re-measured over 318 malware the gap is wider still: 7 declare
+      the permission, 191 declare the service — and 9 of 300 clean apps do too, which
+      is why the declaration gates the rule rather than scoring on its own.
   N6  `ioc_component` consumed 93.4% of its cap on clean apps against 97.6% on
       malware. Two causes: `self_signed` reported as an anomaly on every APK, and a
       YARA term that paid 0.765 for matching three generic community rules.
@@ -57,12 +62,12 @@ SMS_PERMISSIONS = ["android.permission.READ_SMS", "android.permission.RECEIVE_SM
 def _obfuscation(**overrides) -> ObfuscationSignal:
     """An ObfuscationSignal shaped like the corpus average clean app."""
     fields = {
-        "string_entropy_score": 3.28,   # corpus benign mean; threshold is 7.2
+        "string_entropy_score": 3.18,   # corpus benign mean (was 3.28/220 apps); threshold is 7.2
         "flattening_suspected": True,   # true for 30/30 sampled clean apps
         "flattening_method_count": 9,
         "analyzed_method_count": 288,
-        "flattening_method_ratio": 0.031,   # corpus benign median
-        "dex_method_count": 25338,      # corpus benign median
+        "flattening_method_ratio": 0.056,   # corpus benign median (was 0.031/220 apps)
+        "dex_method_count": 26553,      # corpus benign median (was 25338/220 apps)
         "declared_component_count": 120,
         "method_parse_failure_rate": 0.0,
         "unresolved_reflection_targets": 0,
@@ -84,7 +89,7 @@ class TestAccessibilityDeclarationGate(unittest.TestCase):
         )
 
     def test_uses_permission_still_declares_accessibility(self):
-        """6 of 133 corpus malware do write it; they must not regress."""
+        """6 of 133 corpus malware did write it (7 of 318 now); must not regress."""
         self.assertTrue(
             declares_accessibility_service(
                 permissions=[A11Y_PERMISSION], intent_actions=[]
@@ -107,6 +112,7 @@ class TestAccessibilityDeclarationGate(unittest.TestCase):
         """
         SMS_OTP_STEALER_PATTERN needs accessibility + SMS. Gated on the
         <uses-permission> it reached 6/133 malware; on the declaration, 75/133.
+        Re-measured over 318 malware: 7 and 191 respectively.
         """
         with_action = detect_permission_matrix(
             SMS_PERMISSIONS, [ACCESSIBILITY_SERVICE_ACTION]
@@ -285,13 +291,17 @@ class TestIocComponent(unittest.TestCase):
 class TestObfuscationComponent(unittest.TestCase):
 
     def test_average_clean_app_scores_zero(self):
-        """It used to score a constant 0.4 — 6.00 of 15 — for 216 of 220 clean apps."""
+        """It used to score a constant 0.4 — 6.00 of 15 — for 216 of 220 clean apps.
+
+        Still 0.0 for every one of the 298 clean apps scored on the expanded corpus.
+        """
         self.assertEqual(obfuscation_component(_obfuscation()), 0.0)
 
     def test_flattening_prevalence_is_reported_but_not_scored(self):
         """
         Reading flattening as a prevalence rather than an existential does not rescue
-        it: over the full corpus, benign p75 is 0.119 against malware's 0.118, and no
+        it: over the full corpus, benign p75 is 0.119 against malware's 0.118 (on the
+        expanded corpus 0.125 against 0.112 — still no lift, and still the wrong way), and no
         threshold from 0.05 to 0.50 gives a lift outside 0.79-1.07.
         """
         rare = _obfuscation(flattening_method_ratio=1 / 300)
@@ -330,7 +340,7 @@ class TestObfuscationComponent(unittest.TestCase):
         self.assertGreaterEqual(obfuscation_component(stub), 0.6)
 
     def test_a_real_app_is_far_from_the_manifest_vs_code_floor(self):
-        """The lowest ratio in the 219-app clean corpus is 56.85 methods per declared
+        """The lowest ratio in the 299-app clean corpus is 56.85 methods per declared
         component, 28x above the floor."""
         real = _obfuscation(dex_method_count=25338, declared_component_count=120)
         self.assertEqual(obfuscation_component(real), 0.0)
@@ -359,20 +369,31 @@ class TestObfuscationComponent(unittest.TestCase):
     def test_string_pool_entropy_no_longer_moves_the_score(self):
         """
         Mean per-string Shannon entropy cannot reach the 7.2 threshold (7.2 bits needs
-        ~147 distinct characters per string; the corpus maximum is 3.47), and it runs
-        backwards: benign 3.28 against malware 2.78.
+        ~147 distinct characters per string; the corpus maximum is 3.47, and 3.86 on the
+        expanded corpus), and it runs backwards: benign 3.28 against malware 2.78
+        (3.18 against 2.68 re-measured). Tripling the corpus did not reverse it.
         """
         low = obfuscation_component(_obfuscation(string_entropy_score=0.5))
         high = obfuscation_component(_obfuscation(string_entropy_score=7.9))
         self.assertEqual(low, high)
 
-    def test_parse_failures_still_raise_the_score(self):
-        signal = _obfuscation(method_parse_failure_rate=0.25)
-        self.assertGreater(obfuscation_component(signal), 0.0)
+    def test_parse_failure_rate_is_not_scored_at_all(self):
+        """
+        The parse-failure branch and its three constants (PARSE_FAILURE_MIN / _WEIGHT
+        / _CAP) were deleted on 2026-08-21, not merely left unscored.
 
-    def test_noise_level_parse_failures_do_not(self):
-        signal = _obfuscation(method_parse_failure_rate=0.02)
-        self.assertEqual(obfuscation_component(signal), 0.0)
+        `method_parse_failure_rate` measured 0.0 on all 353 samples of the original
+        corpus and 0.0 on all 616 of the expanded one. A threshold, a multiplier and a
+        cap governing a signal with zero observations across two corpora is surface
+        area, not calibration. This test pins the removal: were the branch restored,
+        a rate no corpus sample has ever produced would start moving live scores.
+        """
+        for rate in (0.02, 0.25, 0.9):
+            self.assertEqual(
+                obfuscation_component(_obfuscation(method_parse_failure_rate=rate)),
+                0.0,
+                f"parse-failure rate {rate} must not contribute to the score",
+            )
 
 
 # ─── N8 + bands ──────────────────────────────────────────────────────────────
@@ -408,6 +429,13 @@ class TestVerdictBands(unittest.TestCase):
         `com.symeonchen.wakeupscreen` scored 62.67 / `high` with one predicted
         technique at 0.9828 and no forensic anchors: 24.57 of the 25-point classifier
         cap from a label whose calibrated boundary is 0.10.
+
+        The 0.10 threshold is kept deliberately after the 2026-08-21 retrain moved
+        T1516's calibrated boundary to 0.45. It is not a stale copy of the shipped
+        model: a *lower* threshold means a larger margin for the same probability,
+        so 0.10 is the harsher case this invariant has to survive. Reading the
+        threshold from the model instead would weaken the test every time a retrain
+        happened to raise it.
         """
         confidence = classifier_confidence_component(
             {"T1516": 0.9828}, ttp_thresholds={"T1516": 0.10}

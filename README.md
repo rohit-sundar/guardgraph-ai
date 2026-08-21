@@ -22,7 +22,9 @@ guardgraph-ai/
 │   └── reports/        risk scoring, GraphRAG report generation
 ├── data/
 │   ├── samples/        put test APKs here (gitignored)
-│   ├── benign_apks/    known-clean Stage C corpus (gitignored, ~1 GB)
+│   ├── benign_apks/    known-clean Stage C corpus, 300 apps (gitignored, ~3.1 GB)
+│   ├── benign_holdout/ 30 clean apps held out of training, for calibration only (~0.7 GB).
+│   │                   Kept in its own directory on purpose — see the quickstart.
 │   └── models/         put trained model.json here
 ├── scripts/
 │   ├── train_model.py            CICMalDroid2020 training script skeleton
@@ -92,13 +94,13 @@ curl -X POST http://localhost:8000/analyze -F "file=@data/samples/test.apk"
 | Forensic dictionary / anchor detection | Working. Each rule is gated on a manifest declaration and its patterns are grouped into clauses that must corroborate each other within one method. |
 | 4-hop subgraph extraction | Working |
 | Topological feature mining | Working (degree/closeness/clustering; eigenvector/Katz stubbed — slow on large graphs, add if needed) |
-| Obfuscation / anti-analysis scoring | Working, recalibrated. String-pool entropy and control-flow flattening are still measured and reported, but neither is scored: measured over the 353-APK corpus, entropy cannot reach its threshold and runs backwards, and flattening prevalence has no lift. The component now scores what it was for — a DEX too small to implement its own manifest, and CFG parse failures. |
+| Obfuscation / anti-analysis scoring | Working, recalibrated. String-pool entropy and control-flow flattening are still measured and reported, but neither is scored: measured over the 618-APK corpus, entropy cannot reach its threshold and runs backwards (benign 3.18 vs malware 2.68), and flattening prevalence has no lift (benign p75 0.125 vs malware 0.112). Tripling the corpus reversed neither. The component now scores the one thing that held up: a DEX too small to implement its own manifest — 37 of 318 malware, and no clean app within 28x. The CFG parse-failure branch was **deleted**, not left unscored: it measured 0.0 on all 353 samples of the old corpus and all 616 of this one. |
 | Signature + YARA scanning (hash/cert DB, VirusTotal, MalwareBazaar, YARA rules) | Working; online triage (VT/MalwareBazaar) needs API keys in `.env`, otherwise local hash/cert + YARA run offline. 8 built-in rules always load; the ~500 community rule *files* require quickstart step 5 — without it the engine runs built-in-only and says so in the startup log |
 | Family XGBoost inference (auxiliary) | Stub — needs `data/models/guardgraph_xgb_v1.json`. Not loaded by default, so `classifier_confidence` contributes 0 to the score until trained |
 | Multi-label MITRE ATT&CK TTP classifier (primary, cold path) | Working code; needs `data/models/guardgraph_ttp_br_v1.joblib` from `train_model.py --target ttp`. Degrades gracefully (empty TTPs) until trained — until then `ttp_severity` contributes 0 |
 | Neo4j cache lookup (hot path) | Working, needs Neo4j running + ontology loaded. Cold-path caching only writes a `Sample` node when the family model predicts a family, so with the model untrained nothing is cached back |
-| Risk scoring formula | Working; weights match the paper's spec and the component internals are calibrated against the 353-APK corpus (`python scripts/score_corpus.py`). With both XGBoost models untrained the verdict rests entirely on the deterministic static signals (permissions, forensic anchors, obfuscation, signature/YARA, IOCs) + the zero-day floor |
-| Verdict bands (`low` / `suspicious` / `high` / `malicious`) | Calibrated at 30 / 60 / 65 against the corpus, each boundary by its own criterion (see `app/reports/scoring.py`). Measured: 212 of 220 clean apps read `low` and **none** reaches `high`; 106 of 133 malware read `high` or above. |
+| Risk scoring formula | Working; weights match the paper's spec and the component internals are calibrated against the 618-APK corpus — 300 benign / 318 malware, with a further 30 clean apps held out of training entirely (`python scripts/score_corpus.py`). Calibrated with online reputation **disabled**, which is the conservative direction: VirusTotal only returns a verdict when `malicious > 0`, so enabling it can raise malware scores and never benign ones. With both XGBoost models untrained the verdict rests entirely on the deterministic static signals (permissions, forensic anchors, obfuscation, signature/YARA, IOCs) + the zero-day floor |
+| Verdict bands (`low` / `suspicious` / `high` / `malicious`) | Calibrated at **30 / 60 / 62** against the corpus, each boundary by its own criterion (see `app/reports/scoring.py`). `high` was lowered from 65 because the expanded corpus put the malware first quartile at 64.03, just under the old boundary. Measured: 285 of 298 clean apps read `low`, and the clean median is 11.81 against a malware median of 68.26. **Two** clean apps reach `high` — `com.jens.automation2` (69.19) and `dev.kerballone.spamblocker` (61.90) — both kept as documented exceptions: an automation app and an SMS spam blocker genuinely hold a banking trojan's capability surface, and raising the ceiling to exclude them would reclassify 59% of malware as merely `suspicious`. The 30-app holdout, never trained on, reaches a maximum of 50.31 with none above `suspicious`. |
 | Zero-day risk indicator | Working — strong deterministic/structural evidence + low model confidence + cache miss raises `zero_day_indicator` |
 | GraphRAG report generation (local LLM via Ollama) | Working — calls Ollama (`qwen2.5:7b-instruct-q4_K_M`), no cloud key needed. **Caveat:** the local 7B model drifts under the strict grounding prompt (can invent subgraphs/figures) — prompt hardening / output validation still pending |
 | Auth, queues, multi-user | Not built — out of scope for prototype |
@@ -136,13 +138,28 @@ class. Run Stage A's two phases separately — analysis is memory-hungry and can
 process, which you don't want to cost you the downloads.
 
 ```bash
-# 1. Download malware — network-bound, resumable, parallelizable. Writes data/ttp_apks/_manifest.json.
-python scripts/build_ttp_dataset.py --stage a --phase download --max-per-family 15 --download-workers 8
+# 1. Download malware — network-bound and resumable. Writes data/ttp_apks/_manifest.json.
+#    --download-workers 3, not 8: at 8, abuse.ch drops ~18% of transfers mid-body
+#    (IncompleteRead / "Remote end closed connection"). Reruns retry only what is missing.
+python scripts/build_ttp_dataset.py --stage a --phase download --max-per-family 40 --download-workers 3
 ```
 
 ```bash
-# 2. Download the benign corpus from F-Droid — ~1 GB, a couple of minutes.
+# 2a. Benign corpus, small window (<=12 MB) — ~1 GB, a couple of minutes.
 python scripts/download_benign_apks.py
+
+# 2b. Benign corpus, large window (12-60 MB) — ~3 GB, into the SAME directory, and
+#     --holdout-count carves out the calibration holdout in the same pass.
+#
+python scripts/download_benign_apks.py --count 110 --seed 42 --holdout-count 30 \
+  --min-size 12582913 --max-size 62914560 \
+  --out-dir data/benign_apks --index-cache data/benign_apks/_fdroid_index.json
+
+#     Verify against F-Droid's published hashes — checks both directories in one
+#     pass. 
+python scripts/download_benign_apks.py --verify-existing --count 110 --seed 42 --holdout-count 30 \
+  --min-size 12582913 --max-size 62914560 \
+  --out-dir data/benign_apks --index-cache data/benign_apks/_fdroid_index.json
 ```
 
 ```bash
@@ -162,7 +179,7 @@ python scripts/train_model.py --target ttp
 ```
 
 Reruns of the download phase are incremental. On "families still unresolved" (transient
-abuse.ch 502s), just rerun — only those families are retried; `--force-resolve` re-sweeps all. `--stage all` runs everything back-to-back including Stage B.
+abuse.ch 502s), just rerun — only those families are retried; `--force-resolve` re-sweeps all.
 
 The analyse phase is incremental too: rows are appended as each APK finishes, so a crash
 costs one sample rather than the whole pass, and a rerun skips what is already in the CSV.

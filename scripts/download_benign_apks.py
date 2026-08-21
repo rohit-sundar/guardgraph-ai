@@ -27,13 +27,26 @@ is waiting for.
 Selection is seeded, so the same --seed and --count reproduce the same corpus.
 Files already on disk are skipped, making reruns cheap and interruptions harmless.
 
+    Holdout. --holdout-count N routes the last N apps of the selection, ordered by
+    package name, to --holdout-dir instead of --out-dir. It is a split of one seeded
+    selection, not a second draw, so `--count 110 --holdout-count 30` always yields
+    the same 80/30 partition and never downloads an app twice.
+
+    The holdout exists to answer "are the verdict bands real, or fitted to the apps
+    the model saw?", and it can only answer that if it stays out of training. It gets
+    its own DIRECTORY rather than a marker file because `--benign-dir` globs *.apk
+    with no exclusion mechanism: co-located, the next Stage C run would train on it
+    silently, with no error, and the calibration evidence would quietly become
+    circular. Nothing in code enforces the rule — this separation is the enforcement.
+
 Usage:
     python scripts/download_benign_apks.py                      # 220 apps -> data/benign_apks/
     python scripts/download_benign_apks.py --count 300          # a larger corpus
+    python scripts/download_benign_apks.py --count 110 --holdout-count 30
     python scripts/download_benign_apks.py --dry-run            # resolve + report, fetch nothing
     python scripts/download_benign_apks.py --verify-existing    # re-hash what is already on disk
 
-Then build the negatives and retrain:
+Then build the negatives and retrain — note that only --out-dir is passed to Stage C:
     python scripts/build_ttp_dataset.py --stage c --benign-dir data/benign_apks
     python scripts/train_model.py --target ttp
 """
@@ -54,6 +67,7 @@ from loguru import logger  # noqa: E402
 
 DEFAULT_REPO_URL = "https://f-droid.org/repo"
 DEFAULT_OUT_DIR = "data/benign_apks"
+DEFAULT_HOLDOUT_DIR = "data/benign_holdout"
 # index-v1.json is ~58 MB and ships inside a signed JAR (index-v1.jar). The plain
 # .json is served alongside it and is what we read; we are not verifying the repo
 # signature here, only each APK's published SHA-256.
@@ -140,18 +154,59 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
-def _download_one(entry: dict, repo_url: str, out_dir: str) -> tuple[str, str]:
+def target_path(entry: dict, min_bytes: int, max_bytes: int) -> str:
+    """
+    Where this specific build belongs on disk.
+
+    Normally `<dest_dir>/<package>.apk`. The exception is a package that appears in
+    two size windows as two different *versions* For example, `com.sidhant.queens` ships a 7.9 MB
+    build and an 18.1 MB one, and both are legitimate, separately-hashed members of
+    their respective corpora. Naming both `<package>.apk` means the second run's skip
+    check sees the first run's file, calls it done, and the second build never lands:
+    the corpus silently comes up short with every command reporting success.
+
+    The test is the on-disk file's SIZE against the current window, not its hash:
+
+      * size inside this window  -> same selection. Skip it, even if the bytes differ
+        from the index. F-Droid publishes new builds continuously, so a corpus
+        downloaded weeks ago legitimately disagrees with today's index for most of
+        its apps — measured, 203 of the original 220. Those were verified against the
+        index current at download time and re-fetching them would silently roll the
+        corpus forward under a dataset already keyed to the old hashes.
+      * size outside this window -> a different selection's file. Disambiguate with
+        `<package>__<sha8>.apk`, taken from this build's own published hash so the
+        name is deterministic and reproduces on a fresh machine.
+
+    Hashing to make this decision would be both slower and wrong: it cannot tell
+    "stale version of my own app" from "the other window's app".
+    """
+    base = os.path.join(entry["dest_dir"], f"{entry['package']}.apk")
+    if not os.path.exists(base) or os.path.getsize(base) == 0:
+        return base
+    if min_bytes <= os.path.getsize(base) <= max_bytes:
+        return base
+    return os.path.join(
+        entry["dest_dir"], f"{entry['package']}__{entry['sha256'][:8]}.apk"
+    )
+
+
+def _download_one(entry: dict, repo_url: str, min_bytes: int, max_bytes: int) -> tuple[str, str]:
     """
     Fetch one APK and verify it against the index hash. Returns (package, status).
 
     status is one of: "ok", "skipped", "hash-mismatch", "not-an-apk", "error:<...>".
+
+    The destination comes from `entry["dest_dir"]`, assigned once by assign_split(),
+    so the skip check, the dry-run report and --verify-existing all look in the same
+    place a download would write to. Deriving it separately in each of those paths is
+    how a holdout app ends up re-downloaded into the training directory.
 
     Written to a thread-unique temp file and renamed into place, so an interrupted
     run can never leave a truncated file that the next run's skip check would
     mistake for a completed download.
     """
     package = entry["package"]
-    out_path = os.path.join(out_dir, f"{package}.apk")
+    out_path = target_path(entry, min_bytes, max_bytes)
     if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
         return package, "skipped"
 
@@ -180,18 +235,43 @@ def _download_one(entry: dict, repo_url: str, out_dir: str) -> tuple[str, str]:
             os.remove(tmp_path)
 
 
+def assign_split(
+    selected: list[dict], out_dir: str, holdout_dir: str, holdout_count: int
+) -> tuple[list[dict], list[dict]]:
+    """
+    Route the last `holdout_count` apps of the selection to `holdout_dir`.
+
+    `selected` is already sorted by package name, so the partition is a property of
+    the sorted list rather than of `random.sample`'s internal ordering — which means
+    it reproduces from what is on disk, not from an implementation detail of the RNG.
+
+    Returns (train, holdout) and stamps `dest_dir` on every entry.
+    """
+    holdout_count = max(0, min(holdout_count, len(selected)))
+    split = len(selected) - holdout_count
+    train, holdout = selected[:split], selected[split:]
+    for entry in train:
+        entry["dest_dir"] = out_dir
+    for entry in holdout:
+        entry["dest_dir"] = holdout_dir
+    return train, holdout
+
+
 def download_corpus(
-    selected: list[dict], repo_url: str, out_dir: str, workers: int
+    selected: list[dict], repo_url: str, workers: int, min_bytes: int, max_bytes: int
 ) -> dict[str, int]:
     """Fetch every selected APK concurrently; returns a status -> count tally."""
-    os.makedirs(out_dir, exist_ok=True)
+    for directory in {e["dest_dir"] for e in selected}:
+        os.makedirs(directory, exist_ok=True)
     total = len(selected)
     tally: dict[str, int] = {}
-    logger.info(f"[benign] downloading {total} APKs with {workers} workers -> {out_dir}")
+    destinations = ", ".join(sorted({e["dest_dir"] for e in selected}))
+    logger.info(f"[benign] downloading {total} APKs with {workers} workers -> {destinations}")
 
     with ThreadPoolExecutor(max_workers=min(workers, total)) as pool:
         futures = {
-            pool.submit(_download_one, e, repo_url, out_dir): e for e in selected
+            pool.submit(_download_one, e, repo_url, min_bytes, max_bytes): e
+            for e in selected
         }
         for done, fut in enumerate(as_completed(futures), 1):
             package, status = fut.result()
@@ -204,12 +284,19 @@ def download_corpus(
     return tally
 
 
-def verify_existing(selected: list[dict], out_dir: str) -> int:
-    """Re-hash on-disk APKs against the index. Returns the number of mismatches."""
+def verify_existing(selected: list[dict], min_bytes: int, max_bytes: int) -> int:
+    """Re-hash on-disk APKs against the index. Returns the number of mismatches.
+
+    Reads `entry["dest_dir"]`, so a split selection is verified across both
+    directories in one pass. Note that this only ever checks apps in the CURRENT
+    selection: run it with the same --count/--seed/--min-size/--max-size you
+    downloaded with, or it rebuilds a different selection, matches nothing on disk
+    and reports "verified 0/0" while exiting 0 — a check that cannot fail.
+    """
     bad = 0
     checked = 0
     for entry in selected:
-        path = os.path.join(out_dir, f"{entry['package']}.apk")
+        path = target_path(entry, min_bytes, max_bytes)
         if not os.path.exists(path):
             continue
         checked += 1
@@ -228,6 +315,14 @@ def main() -> None:
                     help="How many apps to select (default 220 — roughly 1.6x the "
                          "malware row count, which balanced the classes well).")
     ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
+    ap.add_argument("--holdout-count", type=int, default=0,
+                    help="Route the last N apps of the selection (ordered by package "
+                         "name) to --holdout-dir instead of --out-dir. A split of one "
+                         "seeded selection, so nothing is downloaded twice. The "
+                         "holdout is for calibration only and must never be passed to "
+                         "build_ttp_dataset.py --benign-dir.")
+    ap.add_argument("--holdout-dir", default=DEFAULT_HOLDOUT_DIR,
+                    help=f"Where --holdout-count apps go (default {DEFAULT_HOLDOUT_DIR}).")
     ap.add_argument("--repo-url", default=DEFAULT_REPO_URL)
     ap.add_argument("--seed", type=int, default=42,
                     help="Selection seed. Same seed + same count = same corpus.")
@@ -257,31 +352,57 @@ def main() -> None:
             "— taking all of them."
         )
 
+    if args.holdout_count >= args.count:
+        logger.error(
+            f"[benign] --holdout-count {args.holdout_count} leaves nothing to train on "
+            f"out of --count {args.count}."
+        )
+        sys.exit(1)
+    if args.holdout_count and args.holdout_dir == args.out_dir:
+        logger.error("[benign] --holdout-dir must differ from --out-dir; see the module docstring.")
+        sys.exit(1)
+
     rng = random.Random(args.seed)
     selected = rng.sample(candidates, min(args.count, len(candidates)))
     selected.sort(key=lambda c: c["package"])
     total_mb = sum(e["size"] for e in selected) / 1e6
     logger.info(f"[benign] selected {len(selected)} apps (~{total_mb:.0f} MB) with seed={args.seed}")
 
+    train, holdout = assign_split(
+        selected, args.out_dir, args.holdout_dir, args.holdout_count
+    )
+    if holdout:
+        logger.info(
+            f"[benign] split: {len(train)} -> {args.out_dir}, "
+            f"{len(holdout)} -> {args.holdout_dir} (calibration holdout, never trained on)"
+        )
+
     if args.verify_existing:
-        sys.exit(1 if verify_existing(selected, args.out_dir) else 0)
+        sys.exit(1 if verify_existing(selected, args.min_size, args.max_size) else 0)
 
     if args.dry_run:
-        on_disk = sum(
-            1 for e in selected
-            if os.path.exists(os.path.join(args.out_dir, f"{e['package']}.apk"))
-        )
-        logger.info(
-            f"[benign] --dry-run: {on_disk}/{len(selected)} already in {args.out_dir}, "
-            f"{len(selected) - on_disk} would be downloaded"
-        )
+        for label, group in (("train", train), ("holdout", holdout)):
+            if not group:
+                continue
+            on_disk = sum(
+                1 for e in group
+                if os.path.exists(target_path(e, args.min_size, args.max_size))
+            )
+            logger.info(
+                f"[benign] --dry-run [{label}]: {on_disk}/{len(group)} already in "
+                f"{group[0]['dest_dir']}, {len(group) - on_disk} would be downloaded"
+            )
         for entry in selected[:10]:
             logger.info(f"[benign]   {entry['package']} ({entry['size'] / 1e6:.1f} MB)")
         return
 
-    tally = download_corpus(selected, args.repo_url, args.out_dir, args.workers)
-    on_disk = len([f for f in os.listdir(args.out_dir) if f.endswith(".apk")])
-    logger.info(f"[benign] done: {tally} — {on_disk} APKs now in {args.out_dir}")
+    tally = download_corpus(
+        selected, args.repo_url, args.workers, args.min_size, args.max_size
+    )
+    for directory in sorted({e["dest_dir"] for e in selected}):
+        count = len([f for f in os.listdir(directory) if f.endswith(".apk")])
+        logger.info(f"[benign] {count} APKs now in {directory}")
+    logger.info(f"[benign] done: {tally}")
 
     failed = sum(v for k, v in tally.items() if k not in ("ok", "skipped"))
     if failed:
@@ -293,6 +414,11 @@ def main() -> None:
         "[benign] next: python scripts/build_ttp_dataset.py --stage c "
         f"--benign-dir {args.out_dir}"
     )
+    if holdout:
+        logger.warning(
+            f"[benign] {args.holdout_dir} is a calibration holdout — do NOT pass it to "
+            "--benign-dir. Nothing in code enforces this."
+        )
 
 
 if __name__ == "__main__":
