@@ -1,0 +1,2 @@
+# Drop custom .yar YARA rule files in this directory.
+# They will be auto-loaded alongside built-in rules during analysis.

@@ -16,4 +16,7 @@ yara-python>=4.5.0
 loguru>=0.7.2
 iterative-stratification>=0.1.7
 pyzipper>=0.3.6
-pyelftools>=0.31
+pyelftools>=0.31
+# Launcher-icon decoding for brand-impersonation detection
+# (app/analysis/impersonation.py). Was only present transitively before N11.
+Pillow>=10.0.0
