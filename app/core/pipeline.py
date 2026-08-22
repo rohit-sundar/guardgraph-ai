@@ -20,7 +20,7 @@ from app.analysis.ingest import ingest_apk
 from app.analysis.cfg import build_all_method_cfgs
 from app.analysis.forensic import ManifestContext, match_anchors, extract_anchor_subgraph
 from app.analysis.topology import compute_topological_invariants, aggregate_subgraph_invariants
-from app.analysis.obfuscation import build_obfuscation_signal
+from app.analysis.obfuscation import build_obfuscation_signal, count_reflection_calls
 from app.analysis.signatures import match_signatures
 from app.analysis.yara_engine import scan_apk_with_payloads
 from app.analysis.apk_static import extract_c2_indicators
@@ -50,6 +50,12 @@ from app.core.schemas import (
 )
 
 # Limitation text surfaced to the analyst when the gate below fires.
+def _format_resolved_reflection(entry: Dict[str, str]) -> str:
+    """Renders a resolved reflection-target record as a readable "before -> after" call."""
+    short_api = entry["target_api"].replace("L", "", 1).replace(";->", ".").replace("/", ".")
+    return f'{short_api}("{entry["resolved_value"]}") [reflection target resolved]'
+
+
 NO_CLASSIFIER_EVIDENCE_NOTE = (
     "TTP classifier suppressed — no methods were parsed and no forensic anchors "
     "matched, so its predictions would reflect the training-set label prior rather "
@@ -190,6 +196,14 @@ class AnalysisPipeline:
         behavioral_subgraphs: List[BehavioralSubgraph] = []
         all_strings: List[str] = []
 
+        # Resolved reflection targets (Class.forName / getMethod / etc. that traced
+        # back to a literal), grouped by method so DYNAMIC_REFLECTION subgraphs can
+        # surface the human-readable call instead of a raw invoke instruction.
+        _, _, resolved_reflection = count_reflection_calls(cfgs)
+        resolved_by_method: Dict[str, List[Dict[str, str]]] = {}
+        for entry in resolved_reflection:
+            resolved_by_method.setdefault(entry["method_sig"], []).append(entry)
+
         for method_sig, g in cfgs.items():
             method_node_count = g.number_of_nodes()
             matches = match_anchors(g, manifest)
@@ -203,6 +217,15 @@ class AnalysisPipeline:
                         api for _, data in sub.nodes(data=True)
                         for api in data.get("api_calls", [])
                     ]
+                    if behavior == "DYNAMIC_REFLECTION":
+                        sub_node_ids = set(sub.nodes())
+                        resolved_calls = [
+                            _format_resolved_reflection(entry)
+                            for entry in resolved_by_method.get(method_sig, [])
+                            if entry["node_id"] in sub_node_ids
+                        ]
+                        # Resolved calls go first so they survive the [:10] cap below.
+                        matched_apis = resolved_calls + matched_apis
                     size_ratio = (sub.number_of_nodes() / method_node_count) if method_node_count > 0 else 0.0
 
                     behavioral_subgraphs.append(
