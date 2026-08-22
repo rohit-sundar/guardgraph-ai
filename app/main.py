@@ -1,13 +1,25 @@
 import sys
 from loguru import logger
 
-# Suppress verbose debug logs from Androguard (level.no < 30 is below WARNING)
+# Suppress verbose debug logs from Androguard (level.no < 30 is below WARNING).
+# Also silences the "dummy data are found between elements" AXML resync
+# warning specifically — it's expected, harmless noise on a padded/corrupted
+# manifest (see ingest.py's manifest-independent DEX fallback, which handles
+# this case), and it can fire hundreds/thousands of times on a single sample
+# since Androguard logs one line per resync byte it steps over.
+_NOISY_ANDROGUARD_MESSAGES = ("dummy data are found between elements",)
+
+
+def _log_filter(record: dict) -> bool:
+    if "androguard" not in record["name"]:
+        return True
+    if record["level"].no < 30:
+        return False
+    return not any(m in record["message"] for m in _NOISY_ANDROGUARD_MESSAGES)
+
+
 logger.remove()
-logger.add(
-    sys.stderr,
-    filter=lambda record: "androguard" not in record["name"] or record["level"].no >= 30,
-    level="DEBUG",
-)
+logger.add(sys.stderr, filter=_log_filter, level="DEBUG")
 
 import os
 from fastapi import FastAPI
