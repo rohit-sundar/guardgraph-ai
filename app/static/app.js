@@ -39,7 +39,6 @@ document.addEventListener('DOMContentLoaded', () => {
 function setupUploadEvents() {
   const dropZone = document.getElementById('dropZone');
   const fileInput = document.getElementById('fileInput');
-  const btnTestSample = document.getElementById('btnTestSample');
   const btnStartAnalyze = document.getElementById('btnStartAnalyze');
 
   // Drag & drop handlers
@@ -72,11 +71,6 @@ function setupUploadEvents() {
     }
   });
 
-  btnTestSample.addEventListener('click', (e) => {
-    e.stopPropagation();
-    runSampleAnalysis();
-  });
-
   btnStartAnalyze.addEventListener('click', () => {
     if (selectedFile) {
       uploadAndAnalyze(selectedFile);
@@ -95,27 +89,6 @@ function handleFileSelected(file) {
   if (preview) {
     preview.classList.remove('hidden');
     preview.style.display = 'flex';
-  }
-}
-
-async function runSampleAnalysis() {
-  document.getElementById('uploadSection').classList.add('hidden');
-  document.getElementById('progressSection').classList.remove('hidden');
-  document.getElementById('resultsSection').classList.add('hidden');
-
-  simulatePipelineProgress();
-
-  try {
-    const response = await fetch('/analyze_sample', { method: 'POST' });
-    if (!response.ok) {
-      throw new Error(`Server returned HTTP ${response.status}`);
-    }
-    const data = await response.json();
-    renderResults(data);
-  } catch (err) {
-    alert("Error running sample analysis: " + err.message);
-    document.getElementById('uploadSection').classList.remove('hidden');
-    document.getElementById('progressSection').classList.add('hidden');
   }
 }
 

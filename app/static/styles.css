@@ -213,13 +213,6 @@ body {
   font-family: var(--font-mono);
 }
 
-.upload-actions {
-  display: flex;
-  justify-content: center;
-  gap: 1rem;
-  flex-wrap: wrap;
-}
-
 /* Buttons */
 .btn {
   font-family: var(--font-sans);

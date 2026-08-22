@@ -121,14 +121,6 @@ async def analyze(file: UploadFile = File(...)):
     return result
 
 
-@router.post("/analyze_sample", response_model=AnalysisReport)
-async def analyze_sample():
-    sample_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "guardgraph_test", "guardgraph_test.apk"))
-    if not os.path.exists(sample_path):
-        raise HTTPException(404, f"Sample file not found at {sample_path}")
-    return _run_analysis(sample_path)
-
-
 def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
     """
     Builds the verdict returned when static analysis cannot complete.
