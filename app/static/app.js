@@ -183,7 +183,12 @@ function renderResults(data) {
   const strokeOffset = 264 - (264 * (score / 100));
   gaugeFill.style.strokeDashoffset = strokeOffset;
 
-  // Badges
+  // Badges — explicitly reset both first. Without this, a badge shown for
+  // one sample stayed visible on the next report even when that sample's
+  // own zero_day_indicator/is_known_malware was false, since .remove('hidden')
+  // was only ever called on the truthy branch.
+  document.getElementById('zeroDayBadge').classList.add('hidden');
+  document.getElementById('knownMalwareBadge').classList.add('hidden');
   if (risk.zero_day_indicator) {
     document.getElementById('zeroDayBadge').classList.remove('hidden');
   }
@@ -194,9 +199,30 @@ function renderResults(data) {
   // Metadata
   document.getElementById('targetPackage').textContent = manifest.target_package || 'Unknown';
   document.getElementById('targetHash').textContent = manifest.sha256 || 'Unknown';
-  document.getElementById('familyBadge').textContent = manifest.predicted_family || 'trojan.btmob/spyagent';
+  document.getElementById('familyBadge').textContent = manifest.predicted_family || 'Unclassified';
   document.getElementById('secondaryDexCount').textContent = `${manifest.secondary_dex_count || 0} payload assets`;
-  document.getElementById('certAnomalies').textContent = (manifest.cert_anomalies || ['Self-Signed']).join(', ');
+  const certAnomalies = manifest.cert_anomalies || [];
+  const certEl = document.getElementById('certAnomalies');
+  certEl.textContent = certAnomalies.length > 0 ? certAnomalies.join(', ') : 'None detected';
+  certEl.className = certAnomalies.length > 0 ? 'spec-value warning' : 'spec-value';
+
+  // VirusTotal status — signature_yara is null entirely on a cache hit (Phase
+  // 1.5 is skipped, see AnalysisManifest.signature_yara's docstring), which is
+  // a different state from "queried and found nothing" and must read as such
+  // rather than silently reusing whatever the previous sample's element showed.
+  const vtEl = document.getElementById('vtStatus');
+  const vtSigMatches = (manifest.signature_yara && manifest.signature_yara.signature_matches) || [];
+  const vtMatch = vtSigMatches.find(s => s.source === 'VirusTotal' && s.detection_ratio);
+  if (!manifest.signature_yara) {
+    vtEl.textContent = 'Not queried (cached result)';
+    vtEl.className = 'spec-value';
+  } else if (vtMatch) {
+    vtEl.textContent = vtMatch.detection_ratio + ' Engines Flagged';
+    vtEl.className = 'spec-value highlight-red';
+  } else {
+    vtEl.textContent = 'No VirusTotal detections';
+    vtEl.className = 'spec-value';
+  }
 
   // 1. AI Report Markdown
   const markdownText = data.narrative_report || 'No report generated.';
@@ -235,11 +261,6 @@ function renderResults(data) {
       `;
       yaraContainer.appendChild(card);
     });
-
-    // Update VT status from actual data
-    if (sigMatches[0] && sigMatches[0].detection_ratio) {
-      document.getElementById('vtStatus').textContent = sigMatches[0].detection_ratio + ' Engines Flagged';
-    }
   }
 
   // Render YARA rule matches
