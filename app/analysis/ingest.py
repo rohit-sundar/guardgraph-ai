@@ -21,6 +21,7 @@ from androguard.misc import AnalyzeAPK
 from loguru import logger
 
 from app.core.schemas import IngestionResult
+from app.analysis.impersonation import extract_icon_phash
 from app.analysis.apk_static import (
     accessibility_matrix_flags,
     declares_accessibility_service,
@@ -314,6 +315,8 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
     activities: list[str] = []
     services: list[str] = []
     receivers: list[str] = []
+    app_label = None
+    icon_phash = None
 
     if apk_obj is not None:
         der_certs = extract_der_certificates(apk_obj)
@@ -342,6 +345,17 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
 
         package_name = apk_obj.get_package()
         cert_thumbprint = extract_cert_thumbprint(apk_obj)
+
+        # App identity for brand-impersonation checks. Both are best-effort: a
+        # missing label or an adaptive (XML) launcher icon is a coverage gap the
+        # impersonation module reports, never a match.
+        try:
+            app_label = apk_obj.get_app_name() or None
+        except Exception as e:
+            logger.debug(f"App label unavailable: {e}")
+            app_label = None
+        phash = extract_icon_phash(apk_obj)
+        icon_phash = f"{phash:016x}" if phash is not None else None
         activities = list(apk_obj.get_activities())
         services = list(apk_obj.get_services())
         receivers = list(apk_obj.get_receivers())
@@ -361,6 +375,8 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
         sha256=sha256,
         package_name=package_name,
         cert_thumbprint=cert_thumbprint,
+        app_label=app_label,
+        icon_phash=icon_phash,
         permissions=permissions,
         activities=activities,
         services=services,

@@ -36,6 +36,26 @@ document.addEventListener('DOMContentLoaded', () => {
   setupUploadEvents();
 });
 
+// Everything an analysed APK contains is attacker-controlled: package and
+// permission names, YARA rule names, extracted C2 strings, certificate fields, and
+// the exception text embedded in a coverage note. Several of those are interpolated
+// into innerHTML below, so a crafted sample could declare
+//   <uses-permission android:name="<img src=x onerror=...>">
+// and run script in the analyst's browser, on the machine holding the malware
+// corpus. Every interpolated VALUE goes through esc(); only markup this file writes
+// itself is left raw. Where a block was simple enough to rebuild with textContent
+// instead (see renderImpersonation), that is preferred over escaping.
+function esc(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+
 function setupUploadEvents() {
   const dropZone = document.getElementById('dropZone');
   const fileInput = document.getElementById('fileInput');
@@ -193,6 +213,8 @@ function renderResults(data) {
   // was only ever called on the truthy branch.
   document.getElementById('zeroDayBadge').classList.add('hidden');
   document.getElementById('knownMalwareBadge').classList.add('hidden');
+  const impBadge = document.getElementById('impersonationBadge');
+  if (impBadge) impBadge.classList.add('hidden');
   if (risk.zero_day_indicator) {
     document.getElementById('zeroDayBadge').classList.remove('hidden');
   }
@@ -221,12 +243,15 @@ function renderResults(data) {
     vtEl.textContent = 'Not queried (cached result)';
     vtEl.className = 'spec-value';
   } else if (vtMatch) {
-    vtEl.textContent = vtMatch.detection_ratio + ' Engines Flagged';
+    vtEl.textContent = vtMatch.detection_ratio + ' flagged';
     vtEl.className = 'spec-value highlight-red';
   } else {
     vtEl.textContent = 'No VirusTotal detections';
     vtEl.className = 'spec-value';
   }
+
+  // 0. Grounding — did the narrative cite anything it wasn't given?
+  renderGrounding(data.grounding);
 
   // 1. AI Report Markdown
   const markdownText = data.narrative_report || 'No report generated.';
@@ -254,7 +279,7 @@ function renderResults(data) {
       card.innerHTML = `
         <div class="yara-card-header">
           <span class="rule-name">${esc(sig.source || sig.match_type)} Match</span>
-          <span class="severity-pill" style="background: ${severityColor}22; color: ${severityColor}">Severity: ${sig.severity}</span>
+          <span class="severity-pill" style="background: ${severityColor}22; color: ${severityColor}">Severity: ${esc(sig.severity)}</span>
         </div>
         <p class="rule-desc">${esc(sig.description || `${sig.match_type} match via ${sig.source}`)}</p>
         <div class="rule-target">
@@ -281,7 +306,7 @@ function renderResults(data) {
       card.innerHTML = `
         <div class="yara-card-header">
           <span class="rule-name">${esc(rule.rule_name)}</span>
-          <span class="severity-pill" style="background: ${severityColor}22; color: ${severityColor}">Severity: ${rule.severity}</span>
+          <span class="severity-pill" style="background: ${severityColor}22; color: ${severityColor}">Severity: ${esc(rule.severity)}</span>
         </div>
         <p class="rule-desc">${esc(rule.description || 'Detects threat behavior pattern in DEX targets.')}</p>
         <div class="rule-target">
@@ -353,6 +378,9 @@ function renderResults(data) {
 
   // Reverse Engineering Findings (crypto / DCL / WebView / native)
   renderReFindings(manifest);
+
+  // Brand impersonation / app identity
+  renderImpersonation(manifest, risk);
 
   // MITRE ATT&CK Mobile Technique Mapping
   renderMitreMapping(manifest);
@@ -475,6 +503,166 @@ function renderReFindings(manifest) {
   const countEl = document.getElementById('reFindingsCount');
   if (countEl) countEl.textContent = total;
 }
+
+function renderGrounding(grounding) {
+  const panel = document.getElementById('groundingPanel');
+  const pill = document.getElementById('groundingPill');
+  const list = document.getElementById('groundingChecks');
+  if (!panel || !pill || !list) return;
+
+  list.innerHTML = '';
+  panel.classList.remove('hidden');
+
+  // No grounding object means no narrative was generated, so no check ran. That
+  // is NOT a pass, and must not render as one.
+  if (!grounding) {
+    pill.textContent = 'NOT CHECKED';
+    pill.className = 'grounding-pill grounding-none';
+    const row = document.createElement('div');
+    row.className = 'grounding-check';
+    row.textContent = 'No narrative was generated, so the fabrication checks did not run.';
+    list.appendChild(row);
+    return;
+  }
+
+  const passed = grounding.passed_count;
+  const total = grounding.total_count;
+  pill.textContent = grounding.passed
+    ? `GROUNDED — ${passed}/${total} CHECKS PASSED`
+    : `FABRICATION DETECTED — ${passed}/${total} PASSED`;
+  pill.className = 'grounding-pill ' + (grounding.passed ? 'grounding-pass' : 'grounding-fail');
+
+  (grounding.checks || []).forEach(check => {
+    const row = document.createElement('div');
+    row.className = 'grounding-check ' + (check.passed ? 'ok' : 'bad');
+
+    const mark = document.createElement('span');
+    mark.className = 'mark';
+    mark.textContent = check.passed ? '✓' : '✗';
+
+    const name = document.createElement('span');
+    name.textContent = check.name;
+
+    // check.detail can quote values the model emitted, which originate in an
+    // attacker-controlled sample. textContent, never innerHTML.
+    const detail = document.createElement('span');
+    detail.className = 'detail';
+    detail.textContent = '— ' + (check.detail || '');
+
+    row.appendChild(mark);
+    row.appendChild(name);
+    row.appendChild(detail);
+    list.appendChild(row);
+  });
+}
+
+
+function renderImpersonation(manifest, risk) {
+  const list = document.getElementById('impersonationList');
+  const coverageEl = document.getElementById('impersonationCoverage');
+  const countEl = document.getElementById('impersonationCount');
+  if (!list || !coverageEl) return;
+
+  const imp = manifest.impersonation || null;
+  const findings = (imp && imp.findings) || [];
+  const coverage = (imp && imp.coverage) || [];
+
+  if (countEl) countEl.textContent = findings.length;
+
+  setText('identityLabel', manifest.app_label || 'Not recovered');
+  setText('identityIconHash', manifest.icon_phash || 'No raster icon (adaptive/XML)');
+  setText('identityBrandCount', imp ? `${imp.brands_checked} protected brands` : 'Not assessed');
+
+  list.innerHTML = '';
+  if (!imp) {
+    list.appendChild(emptyNote('Impersonation checks did not run for this analysis.'));
+  } else if (findings.length === 0) {
+    // "No findings" and "could not check" are different answers. Say which.
+    list.appendChild(emptyNote(
+      coverage.length > 0
+        ? 'No impersonation of the brands that could be checked — see coverage below for what could not be.'
+        : 'No impersonation detected against any protected brand.'
+    ));
+  } else {
+    findings.forEach(f => {
+      // Every value below originates in the uploaded APK (package name, label,
+      // certificate) or in the reference table. Built with textContent, never
+      // innerHTML — a crafted sample must not be able to run script here.
+      const item = document.createElement('div');
+      item.className = 're-finding-item re-finding-weak';
+
+      const head = document.createElement('div');
+      head.className = 'mitre-item-header';
+      const kind = document.createElement('span');
+      kind.className = 'mitre-id';
+      kind.textContent = (f.kind || '').replace(/_/g, ' ').toUpperCase();
+      const brandEl = document.createElement('span');
+      brandEl.className = 'mitre-name';
+      brandEl.textContent = `impersonates ${f.brand || 'unknown brand'}`;
+      head.appendChild(kind);
+      head.appendChild(brandEl);
+
+      const detail = document.createElement('p');
+      detail.className = 'mitre-description';
+      detail.textContent = f.detail || '';
+
+      const compare = document.createElement('div');
+      compare.className = 'rule-target';
+      const observed = document.createElement('code');
+      observed.textContent = f.observed || '';
+      const expected = document.createElement('code');
+      expected.textContent = f.expected || '';
+      compare.appendChild(document.createTextNode('this APK: '));
+      compare.appendChild(observed);
+      compare.appendChild(document.createTextNode('  —  genuine: '));
+      compare.appendChild(expected);
+
+      item.appendChild(head);
+      item.appendChild(detail);
+      item.appendChild(compare);
+      list.appendChild(item);
+    });
+  }
+
+  coverageEl.innerHTML = '';
+  if (coverage.length === 0) {
+    coverageEl.appendChild(emptyNote('All four checks ran against every protected brand.'));
+  } else {
+    coverage.forEach(note => {
+      const row = document.createElement('div');
+      row.className = 're-finding-item';
+      row.textContent = note;
+      coverageEl.appendChild(row);
+    });
+  }
+
+  // The verdict card needs to say when the score came from identity rather than
+  // behaviour — otherwise a near-inert clone reads as though its code earned the band.
+  const badge = document.getElementById('impersonationBadge');
+  if (badge) {
+    const applied = risk && risk.impersonation_floor_applied;
+    badge.classList.toggle('hidden', !applied);
+    if (applied) {
+      const brand = findings.length ? findings[0].brand : 'a protected brand';
+      badge.textContent = `Verdict raised by brand impersonation — clone of ${brand}`;
+    }
+  }
+}
+
+
+function setText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
+}
+
+
+function emptyNote(text) {
+  const span = document.createElement('span');
+  span.className = 're-empty';
+  span.textContent = text;
+  return span;
+}
+
 
 function renderMitreMapping(manifest) {
   const container = document.getElementById('mitreMappingList');

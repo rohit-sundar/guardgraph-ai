@@ -108,7 +108,12 @@ class TestStoreSigAlwaysCalledAfterColdPath(unittest.TestCase):
             # predicted_family is None (classifier untrained / FileNotFoundError path)
             mp.run_phase5_ml_classification.return_value = ({}, None, None)
             mp.run_phase6_risk_scoring.return_value = mock_risk
-            mp.run_phase7_reporting.return_value = ("narrative", ["lim"])
+            mp.run_phase7_reporting.return_value = ("narrative", ["lim"], None)
+            # Phase 5.5 returns a plain dict (AnalysisManifest.impersonation is a
+            # dict field); a bare MagicMock fails schema validation.
+            mp.run_phase5b_impersonation.return_value = {
+                "findings": [], "coverage": [], "brands_checked": 0, "max_severity": 0.0,
+            }
 
             from app.api.routes import _run_analysis
             _run_analysis("/fake/test.apk")
@@ -148,11 +153,20 @@ class TestEnsureModelWarm(unittest.TestCase):
         self.assertEqual(mock_post.call_args[1]["num_predict"], 1,
                          "warm-up only needs the prefill, not a full generation")
 
-    def test_no_warmup_when_model_already_loaded(self):
-        """The effect is tied to the model load, so a resident model needs no
-        second prefill — paying one on every request would buy nothing."""
+    def test_no_warmup_when_model_is_loaded_and_already_warmed(self):
+        """
+        A resident model that has ALREADY had its same-prompt pass needs no second
+        prefill — paying one per request would buy nothing.
+
+        N13: residency alone used to be the whole condition, and was correct while
+        the only thing that ever loaded the model was this function. preload_model()
+        (called at startup to keep the multi-minute load off the request path) breaks
+        that: it makes the model resident WITHOUT a same-prompt pass. So the guard is
+        now residency AND _warmed_since_load, and the test says so.
+        """
         import app.reports.graphrag as g
         with patch.object(g, "_model_is_loaded", return_value=True), \
+             patch.object(g, "_warmed_since_load", True), \
              patch.object(g, "_post_native_chat") as mock_post:
             self.assertTrue(g.ensure_model_warm("prompt"))
 
@@ -327,6 +341,93 @@ class TestGroundingCheckLogic(unittest.TestCase):
         _grounding_check("No techniques predicted.", set())  # must not raise
 
 
+# ─── Bug 3: _identifier_check — fabricated hash/sample-name detection ───────
+# Added 2026-08-22 after observing live: the model invented "MD5: 1234abcd..."
+# (not even valid hex) and "Sample Name: AndroidMalware_Example" for a real
+# Cerberus sample — neither _grounding_check nor _permission_check catch this
+# failure mode, since it's neither a MITRE ID nor a permission.
+
+class TestIdentifierCheckLogic(unittest.TestCase):
+
+    def test_no_flag_when_real_sha256_cited(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "abc123def456" * 5 + "abcd"  # 64 chars
+        narrative = f"SHA-256: {real_sha}"
+        self.assertEqual(_identifier_check(narrative, real_sha, None), [])
+
+    def test_no_flag_for_truncated_real_sha256_preview(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "abc123def456" * 5 + "abcd"
+        narrative = f"Hash: {real_sha[:12]}..."
+        self.assertEqual(_identifier_check(narrative, real_sha, None), [])
+
+    def test_flags_fabricated_md5(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "90abcdef1234567890fedcba1234567890fedcba1234567890fedcba1234567890"
+        narrative = "MD5 Hash: 1234abcd5678efgh"
+        result = _identifier_check(narrative, real_sha, None)
+        self.assertTrue(any("1234abcd5678efgh" in r for r in result))
+
+    def test_flags_fabricated_sample_name(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "90abcdef1234567890fedcba1234567890fedcba1234567890fedcba1234567890"
+        narrative = "Sample Name: AndroidMalware_Example"
+        result = _identifier_check(narrative, real_sha, "com.real.package")
+        self.assertTrue(any("AndroidMalware_Example" in r for r in result))
+
+    def test_no_flag_when_sample_name_matches_real_package(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "90abcdef1234567890fedcba1234567890fedcba1234567890fedcba1234567890"
+        narrative = "Sample Name: com.real.package"
+        result = _identifier_check(narrative, real_sha, "com.real.package")
+        self.assertEqual(result, [])
+
+    def test_no_crash_with_no_labels(self):
+        from app.reports.graphrag import _identifier_check
+        result = _identifier_check("A clean narrative with no hash labels.", "aa" * 32, "com.x")
+        self.assertEqual(result, [])
+
+
+class TestStripFabricatedIdentification(unittest.TestCase):
+    """
+    SYSTEM_PROMPT rule 6b alone does not reliably stop the model from writing
+    a fake "Sample Information" section (observed live, repeatedly, even with
+    the rule in place) — this strips what _identifier_check flags rather than
+    trusting the instruction to work.
+    """
+
+    def test_removes_fabricated_section(self):
+        from app.reports.graphrag import _strip_fabricated_identification
+        real_sha = "047e3ecdb04d695b7e8a3c2789c29ec57da19f58bdcdb1d97fa926205ce718eb"
+        narrative = (
+            "#### Sample Information\n"
+            "- **Sample Name:** `malicious_sample.apk`\n"
+            "- **SHA256 Hash:** `1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef`\n"
+            "\n"
+            "#### Malware Analysis Summary\n"
+            "Real content here.\n"
+        )
+        cleaned = _strip_fabricated_identification(narrative, real_sha, "com.real.package")
+        self.assertNotIn("malicious_sample.apk", cleaned)
+        self.assertNotIn("1234567890abcdef", cleaned)
+        self.assertNotIn("Sample Information", cleaned)
+        self.assertIn("Malware Analysis Summary", cleaned)
+        self.assertIn("Real content here.", cleaned)
+
+    def test_keeps_real_sha256_if_correctly_cited(self):
+        from app.reports.graphrag import _strip_fabricated_identification
+        real_sha = "047e3ecdb04d695b7e8a3c2789c29ec57da19f58bdcdb1d97fa926205ce718eb"
+        narrative = f"The sample's SHA256 Hash: `{real_sha}` matches a known family.\n"
+        cleaned = _strip_fabricated_identification(narrative, real_sha, "com.real.package")
+        self.assertIn(real_sha, cleaned)
+
+    def test_no_change_on_clean_narrative(self):
+        from app.reports.graphrag import _strip_fabricated_identification
+        narrative = "### Verdict\nMalicious, score 73.7/100.\n"
+        cleaned = _strip_fabricated_identification(narrative, "aa" * 32, "com.x")
+        self.assertEqual(cleaned, narrative)
+
+
 # ─── T2: unparseable APKs return a verdict, not a bare 500 ───────────────────
 
 class TestUnparseableApkReturnsVerdict(unittest.TestCase):
@@ -357,7 +458,7 @@ class TestUnparseableApkReturnsVerdict(unittest.TestCase):
         # test doesn't depend on a running Ollama instance.
         with patch(
             "app.core.pipeline.AnalysisPipeline.run_phase7_reporting",
-            return_value=("mocked narrative", []),
+            return_value=("mocked narrative", [], None),
         ):
             report = _unparseable_report(path, ValueError("EOCD signature not found"))
 
@@ -410,3 +511,52 @@ class TestUnparseableApkReturnsVerdict(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestPreloadDoesNotFakeTheWarmup(unittest.TestCase):
+    """
+    N13: preload_model() exists to move the multi-minute Ollama model load off the
+    request path (a cold /analyze was measured at over 15 minutes against 2m33s
+    once resident). It must NOT be mistaken for the reproducibility warm-up, which
+    needs a pass over the same prompt that will actually be sent — a different
+    prompt of comparable size was measured not to substitute (0/2 trials).
+
+    So preloading has to leave the same-prompt warm still outstanding. If it did
+    not, the first real analysis would silently lose decode reproducibility in
+    exchange for the latency win.
+    """
+
+    def test_preload_leaves_the_same_prompt_warmup_outstanding(self):
+        import app.reports.graphrag as g
+
+        with patch.object(g, "_model_is_loaded", return_value=False), \
+             patch.object(g, "_post_native_chat") as mock_post:
+            self.assertTrue(g.preload_model())
+        self.assertFalse(
+            g._warmed_since_load,
+            "preload_model must not mark the same-prompt warm-up as done",
+        )
+
+        # ...and the next analysis therefore still performs it, over its own prompt.
+        prompt = "## JSON Manifest\n" + ("y" * 4000)
+        with patch.object(g, "_model_is_loaded", return_value=True), \
+             patch.object(g, "_post_native_chat") as mock_post:
+            g.ensure_model_warm(prompt)
+        mock_post.assert_called_once()
+        self.assertEqual(mock_post.call_args[0][0], prompt)
+
+    def test_preload_never_raises_when_ollama_is_down(self):
+        """Ollama being unreachable at boot must not stop the API from serving."""
+        import app.reports.graphrag as g
+
+        with patch.object(g, "_model_is_loaded", return_value=False), \
+             patch.object(g, "_post_native_chat", side_effect=OSError("connection refused")):
+            self.assertFalse(g.preload_model())
+
+    def test_preload_is_a_noop_when_already_resident(self):
+        import app.reports.graphrag as g
+
+        with patch.object(g, "_model_is_loaded", return_value=True), \
+             patch.object(g, "_post_native_chat") as mock_post:
+            self.assertTrue(g.preload_model())
+        mock_post.assert_not_called()

@@ -147,6 +147,7 @@
           </div>
           <div class="risk-badges">
             <span class="badge badge-zero-day hidden" id="zeroDayBadge">Zero-Day Anomaly Detected</span>
+            <span class="badge badge-malware hidden" id="impersonationBadge"></span>
             <span class="badge badge-malware hidden" id="knownMalwareBadge">Known VirusTotal Signature Match</span>
           </div>
         </div>
@@ -189,31 +190,34 @@
       <div class="glass-card tabs-card">
         <div class="tabs-header">
           <button class="tab-btn active" onclick="switchTab('aiReport')">
-            ✨ GraphRAG AI Threat Narrative
+            GraphRAG AI Report
           </button>
           <button class="tab-btn" onclick="switchTab('yaraRules')">
-            🛡️ YARA & Signature Detection (<span id="yaraCount">0</span>)
+            YARA Rule & Signature Detection (<span id="yaraCount">0</span>)
           </button>
           <button class="tab-btn" onclick="switchTab('topology')">
-            🕸️ CFG Topology & Obfuscation
+            CFG Topology & Obfuscation
           </button>
           <button class="tab-btn" onclick="switchTab('permissions')">
-            🔑 Permissions Matrix (<span id="permissionCount">0</span>)
+            Permissions Matrix (<span id="permissionCount">0</span>)
           </button>
           <button class="tab-btn" onclick="switchTab('riskBreakdown')">
-            📊 Risk Components Score
+            Risk Scoring
           </button>
           <button class="tab-btn" onclick="switchTab('reFindings')">
-            🔬 Reverse Engineering (<span id="reFindingsCount">0</span>)
+            Rev-Engg Indicators (<span id="reFindingsCount">0</span>)
+          </button>
+          <button class="tab-btn" onclick="switchTab('appIdentity')">
+            App Identity (<span id="impersonationCount">0</span>)
           </button>
           <button class="tab-btn" onclick="switchTab('mitreMapping')">
-            🎯 MITRE ATT&CK Mapping (<span id="mitreCount">0</span>)
+            MITRE ATT&CK Mapping (<span id="mitreCount">0</span>)
           </button>
           <button class="tab-btn" onclick="switchTab('relatedSamples')">
-            🔗 Correlated Samples (<span id="relatedCount">0</span>)
+            Correlated Samples (<span id="relatedCount">0</span>)
           </button>
           <button class="tab-btn" onclick="switchTab('threatLandscape')">
-            🌐 Threat Landscape
+            Threat Landscape
           </button>
         </div>
 
@@ -226,6 +230,13 @@
                   <span class="sparkle">✨</span> Grounded in MITRE ATT&CK Mobile Ontology via Qwen2.5 7B
                 </div>
                 <button class="btn btn-sm" onclick="copyAiReport()">Copy Report</button>
+              </div>
+              <div id="groundingPanel" class="grounding-panel hidden">
+                <div class="grounding-head">
+                  <span class="grounding-pill" id="groundingPill">&mdash;</span>
+                  <span class="grounding-caption">Post-generation checks run against the narrative &mdash; the model is only allowed to cite what it was given.</span>
+                </div>
+                <div class="grounding-checks" id="groundingChecks"></div>
               </div>
               <div class="markdown-body" id="aiReportMarkdown">
                 <!-- Rendered markdown goes here -->
@@ -323,6 +334,41 @@
           </div>
 
           <!-- Tab 6: Reverse Engineering Findings -->
+          <div class="tab-content" id="tabAppIdentity">
+            <p class="graph-subtitle" style="margin-bottom:1rem;">
+              Is this app pretending to be a different, legitimate one? Every other tab asks how
+              malicious the code is; this one asks who the app claims to be. A cloned banking or
+              UPI app is fraud whether or not its payload trips a single behavioural anchor, so
+              these findings raise a floor under the verdict rather than adding to the weighted score.
+            </p>
+            <div class="spec-grid" style="margin-bottom:1rem;">
+              <div class="spec-item">
+                <span class="spec-label">Display Name</span>
+                <span class="spec-value" id="identityLabel">&mdash;</span>
+              </div>
+              <div class="spec-item">
+                <span class="spec-label">Launcher Icon Hash</span>
+                <span class="spec-value code" id="identityIconHash">&mdash;</span>
+              </div>
+              <div class="spec-item">
+                <span class="spec-label">Brands Compared</span>
+                <span class="spec-value" id="identityBrandCount">&mdash;</span>
+              </div>
+            </div>
+            <div class="re-findings-section">
+              <h5>Impersonation Findings</h5>
+              <div class="re-findings-list" id="impersonationList">
+                <span class="re-empty">Not assessed</span>
+              </div>
+            </div>
+            <div class="re-findings-section">
+              <h5>Coverage &mdash; what could not be checked</h5>
+              <div class="re-findings-list" id="impersonationCoverage">
+                <span class="re-empty">&mdash;</span>
+              </div>
+            </div>
+          </div>
+
           <div class="tab-content" id="tabReFindings">
             <p class="graph-subtitle" style="margin-bottom:1rem;">
               Statically resolved reflection/crypto/dynamic-loading/WebView/native targets —

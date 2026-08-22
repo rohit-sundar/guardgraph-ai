@@ -4,6 +4,10 @@ signature nodes in Neo4j. This is the "under 50ms for a cache hit" path
 from the design doc — a great demo beat ("watch how fast known malware
 resolves") if you pre-populate a few signature nodes for your demo samples.
 """
+import json
+
+from loguru import logger
+
 from app.graph.neo4j_client import neo4j_client
 
 
@@ -20,6 +24,7 @@ def lookup_signature(sha256: str) -> dict | None:
            s.risk_score AS base_score,
            s.narrative AS narrative,
            s.limitations AS limitations,
+           s.record_json AS record_json,
            collect(DISTINCT CASE WHEN t IS NULL THEN NULL
                    ELSE {technique_id: t.technique_id, probability: r.probability} END) AS ttps
     """
@@ -32,12 +37,59 @@ def lookup_signature(sha256: str) -> dict | None:
                 for t in (row.get("ttps") or [])
                 if t and t.get("technique_id")
             }
+            # Rehydrate the fields Neo4j cannot hold as native properties. Without
+            # this the hot path returned a total score with every risk component
+            # None, no permissions and no signature panel, while the cached
+            # narrative in the same response described all of them — see
+            # store_signature's record_json for why they are stored this way.
+            row.update(_decode_record(row.pop("record_json", None), row["sha256"]))
             return row
     except Exception:
         pass
 
     # In-memory cache fallback
     return _MEMORY_CACHE.get(sha256)
+
+
+# Fields that make a cached verdict re-renderable but have no sensible native Neo4j
+# representation: nested dicts and lists-of-dicts, which the property graph cannot
+# store (a property must be a primitive or a homogeneous array of primitives). They
+# were previously kept ONLY in _MEMORY_CACHE, which dies with the process — so after
+# a restart a cache hit served a score with every component blank.
+_RECORD_FIELDS = (
+    "risk_components",
+    "obfuscation_data",
+    "signature_yara_data",
+    "permissions",
+    "c2_indicators",
+    "cert_thumbprint",
+    "package_name",
+)
+
+
+def _encode_record(payload: dict) -> str:
+    """Serialises the non-primitive part of a cached verdict for a single property."""
+    return json.dumps({k: payload.get(k) for k in _RECORD_FIELDS}, default=str)
+
+
+def _decode_record(raw, sha256: str) -> dict:
+    """
+    Inverse of _encode_record. Returns {} for records written before this existed —
+    those genuinely have no component breakdown to recover, and the caller reports
+    the gap rather than substituting zeros.
+    """
+    if not raw:
+        logger.debug(
+            f"[cache] {sha256[:12]} predates record_json — component breakdown "
+            "unavailable for this hot-path hit."
+        )
+        return {}
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError) as e:
+        logger.warning(f"[cache] {sha256[:12]} has unreadable record_json: {e}")
+        return {}
+    return {k: v for k, v in decoded.items() if v is not None}
 
 
 def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None, *, signature_yara_data: dict | None = None, permissions: list[str] | None = None, risk_components: dict | None = None, obfuscation_data: dict | None = None, package_name: str | None = None, c2_indicators: list[str] | None = None, cert_thumbprint: str | None = None):
@@ -87,7 +139,9 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
     SET s.risk_score = $risk_score,
         s.narrative = $narrative,
         s.limitations = $limitations,
-        s.app_name = $app_name
+        s.app_name = $app_name,
+        s.package_name = $package_name,
+        s.record_json = $record_json
     MERGE (f:MalwareFamily {name: $family})
     MERGE (s)-[:CLASSIFIED_AS_FAMILY]->(f)
     """
@@ -125,6 +179,8 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
             narrative=narrative,
             limitations=limitations,
             app_name=app_name,
+            package_name=package_name,
+            record_json=_encode_record(_MEMORY_CACHE[sha256]),
         )
         if ttps:
             neo4j_client.run(

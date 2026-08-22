@@ -5,6 +5,12 @@
 > build status, what's real vs stubbed, and what to do next. Read this before
 > touching any code.
 
+> **This file predates 2026-08-22.** Read **`TEAM_CONTEXT.md`'s "Session 12"** entry first — it covers
+> everything added since (RE deep dive, manifest/ZIP resilience, Neo4j graph correlation, GraphRAG
+> anti-fabrication) and, importantly, records what was *tried and found not to work* (e.g. the local
+> LLM does not reliably follow structural output instructions, confirmed across repeated live tests —
+> don't re-attempt a rigid section-header contract without reading why it was reverted).
+
 ---
 
 ## 1. What this project is

@@ -1,9 +1,8 @@
-version: "3.8"
-
 services:
   neo4j:
     image: neo4j:5.24-community
     container_name: guardgraph-neo4j
+    restart: unless-stopped
     ports:
       # Bound to loopback on purpose. This host also handles live malware
       # samples, and the container ships with a well-known default password —

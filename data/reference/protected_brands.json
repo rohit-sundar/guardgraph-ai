@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "description": "Protected brands for app/analysis/impersonation.py. Each entry names an app that fraudsters clone; the module flags APKs that wear a brand's package name, display name, or icon without being that brand's app.",
+  "status": "SEED — package names and labels only. Every entry has verified=false because no icon hash or signing certificate has been recorded yet, and those two fields power the two strongest checks (icon reuse, certificate mismatch). Run scripts/build_brand_reference.py against real APKs to fill them in and flip verified.",
+  "how_to_extend": "Do not hand-write icon_phash or cert_sha256 — both must come from a genuine APK obtained from the official listing, which is what scripts/build_brand_reference.py does. Adding a brand by package name alone still powers the typosquat and label checks.",
+  "warning": "A WRONG package name here creates a false positive on the real app: the genuine bank APK would read as a typosquat of a package that does not exist. Verify each entry against the official store listing before relying on this table in a deployment.",
+  "brands": [
+    {
+      "brand": "PhonePe",
+      "category": "upi",
+      "packages": ["com.phonepe.app"],
+      "labels": ["PhonePe"],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Paytm",
+      "category": "upi",
+      "packages": ["net.one97.paytm"],
+      "labels": ["Paytm"],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Google Pay (India)",
+      "category": "upi",
+      "packages": ["com.google.android.apps.nbu.paisa.user"],
+      "labels": ["Google Pay", "GPay"],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "BHIM",
+      "category": "upi",
+      "packages": ["in.org.npci.upiapp"],
+      "labels": ["BHIM"],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "YONO SBI",
+      "category": "bank",
+      "packages": ["com.sbi.lotusintouch"],
+      "labels": ["YONO SBI", "YONO"],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "HDFC Bank",
+      "category": "bank",
+      "packages": ["com.snapwork.hdfc"],
+      "labels": ["HDFC Bank"],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "ICICI iMobile",
+      "category": "bank",
+      "packages": ["com.csam.icici.bank.imobile"],
+      "labels": ["iMobile Pay", "iMobile"],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Axis Mobile",
+      "category": "bank",
+      "packages": ["com.axis.mobile"],
+      "labels": ["Axis Mobile"],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Kotak Mobile Banking",
+      "category": "bank",
+      "packages": ["com.msf.kbank.mobile"],
+      "labels": ["Kotak Mobile Banking", "Kotak811"],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Bank of Baroda M-Connect",
+      "category": "bank",
+      "packages": ["com.bankofbaroda.mconnect"],
+      "labels": ["bob World", "M-Connect Plus"],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "WhatsApp",
+      "category": "messaging",
+      "packages": ["com.whatsapp"],
+      "labels": ["WhatsApp"],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Amazon Shopping",
+      "category": "commerce",
+      "packages": ["com.amazon.mShop.android.shopping"],
+      "labels": ["Amazon Shopping", "Amazon"],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    }
+  ]
+}

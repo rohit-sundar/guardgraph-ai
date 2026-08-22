@@ -5,14 +5,10 @@ __pycache__/
 .env
 data/samples/*
 !data/samples/.gitkeep
-data/models/*
-!data/models/.gitkeep
-data/*.csv
 *.egg-info/
 .DS_Store
 
 bin/ollama/
-guardgraph_test/*.apk
 
 # Obsidian & Local Task Tracking
 .obsidian/
@@ -22,9 +18,6 @@ AI_ENGINEER_TASKS.md
 # Virtual Environments
 .venv/
 
-# Community YARA rules — downloaded at runtime via scripts/download_yara_rules.py
-# Do not commit — 500+ files, regeneratable, not source code
-data/yara_rules/
 
 # Real malware samples — must never be committed to a public repo
 test_malware_samples/
@@ -44,3 +37,32 @@ logs/*
 
 # Corpus score dumps (scripts/score_corpus.py) — measurement output, regeneratable
 data/corpus_scores*.json
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HACKATHON ARRANGEMENT — revert after the event.
+#
+# The following are normally gitignored and are deliberately TRACKED right now, so
+# that a `git pull` gives a teammate a checkout that actually runs rather than one
+# that silently degrades. Each fails QUIETLY when absent, which is why shipping them
+# beats documenting them:
+#
+#   data/models/*.joblib, *.json   the trained TTP + family models. Without the
+#                                  joblib the MITRE tab is empty and two score
+#                                  components sit at 0 with no error. (5.5 MB)
+#   data/*.csv                     ttp_dataset.csv, needed by train_model.py and
+#                                  scripts/measure_saturation.py. (0.6 MB)
+#   data/yara_rules/               ~500 community rules. The download script works,
+#                                  but it is a network step that can fail on the day;
+#                                  the engine silently falls back to 8 built-in rules
+#                                  and only says so in the startup log. (6.9 MB)
+#   guardgraph_test/*.apk          the demo sample that /analyze_sample depends on.
+#                                  This is REAL MALWARE. It is acceptable here only
+#                                  because this repository is private — it MUST be
+#                                  removed, and this block reverted, before the repo
+#                                  is ever made public. (7.2 MB)
+#
+# Total added to the repository: ~20 MB. Still excluded below: the multi-GB APK
+# corpora, the virtualenv, the Ollama build, and .env (live API keys — those belong
+# in a private message, never in git history, because history outlives the decision
+# to make a repo public).
+# ─────────────────────────────────────────────────────────────────────────────

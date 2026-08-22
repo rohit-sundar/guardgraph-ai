@@ -42,6 +42,13 @@ class IngestionResult(BaseModel):
     # receivers, cert_thumbprint, accessibility_flags, permission_matrix_flags,
     # intent_actions) are empty in this state, not "observed absent".
     manifest_parse_failed: bool = False
+    # App identity, for brand-impersonation detection (app/analysis/impersonation.py).
+    # `app_label` is what the victim reads on the home screen; `icon_phash` is the
+    # 64-bit perceptual hash of the launcher icon as a hex string, or None when the
+    # icon is an adaptive (XML) drawable with no pixels to hash — a coverage gap the
+    # impersonation result reports rather than treating as "no match".
+    app_label: Optional[str] = None
+    icon_phash: Optional[str] = None
 
 
 class CFGNode(BaseModel):
@@ -237,6 +244,14 @@ class AnalysisManifest(BaseModel):
     resolved_dcl_targets: list[str] = []
     resolved_webview_bridges: list[str] = []
     resolved_native_bridges: list[str] = []
+    # App identity, and what the brand-impersonation checks made of it. `app_label`
+    # and `icon_phash` are reported even when nothing matched, so an analyst can see
+    # WHAT was compared. `impersonation` carries findings plus the coverage notes
+    # explaining which of the four checks could not run and why — an empty findings
+    # list with a full coverage list means "not assessed", not "clean".
+    app_label: Optional[str] = None
+    icon_phash: Optional[str] = None
+    impersonation: Optional[dict] = None
     # MITRE ATT&CK Mobile context for predicted_ttps — same ontology lookup
     # GraphRAG grounds its narrative in (app/graph/ontology.get_technique_context),
     # so the UI's technique names/tactics/descriptions can never drift from what
@@ -277,6 +292,15 @@ class RiskScoreBreakdown(BaseModel):
     # A model-free escalation signal for first-seen samples the classifier hasn't
     # learned — see scoring.compute_risk_score.
     zero_day_indicator: bool = False
+    # True when brand-impersonation evidence raised the verdict above what the
+    # weighted components alone produced (scoring.IMPERSONATION_SCORE_FLOOR). The
+    # distinction matters to an analyst: a cloned banking app can be near-inert code
+    # scoring in the teens, and without this flag the report would read as though the
+    # behaviour earned the verdict.
+    impersonation_floor_applied: bool = False
+    # The weighted total before any floor. Equal to total_score unless a floor moved
+    # it. None on the hot path, where no component was recomputed.
+    weighted_score: Optional[float] = None
 
 
 class AnalysisReport(BaseModel):
@@ -284,3 +308,8 @@ class AnalysisReport(BaseModel):
     risk_score: RiskScoreBreakdown
     narrative_report: str
     limitations: list[str]
+    # Which post-generation fabrication checks ran over the narrative, and whether
+    # each passed. None when no narrative was generated (LLM unreachable) — the
+    # checks did not run, which is not the same as passing, and the UI must not
+    # render an absent result as a green badge.
+    grounding: Optional[dict] = None

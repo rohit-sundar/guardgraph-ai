@@ -7,8 +7,8 @@ graph TD
     A[Phase 1: Ingestion & Metadata] --> A2[Phase 1.5: Signature & YARA Triage]
     A2 --> B[Phase 2: Graph Representation]
     B --> C[Phase 3: Forensic Anchor Extraction]
-    C --> C2[Phase 3.5: Reverse-Engineering Deep Dive]
-    C2 --> D[Phase 4: Feature Engineering]
+    C --> C5[Phase 3.5: RE Deep Dive]
+    C5 --> D[Phase 4: Feature Engineering]
     D --> E[Phase 5: ML Classification]
     E --> F[Phase 6: Risk Scoring]
     F --> G[Phase 7: GraphRAG Reporting]
@@ -33,9 +33,9 @@ graph TD
 - **Module**: `app/analysis/forensic.py`
 - **Actions**: Scans the method CFGs against the forensic dictionary to identify sensitive "anchor" APIs (e.g. BroadcastReceivers, SMS interception calls) and extracts 4-hop subgraphs around these anchor nodes.
 
-### Phase 3.5: Reverse-Engineering Deep Dive
-- **Modules**: `app/analysis/static_resolution.py`, `crypto_recovery.py`, `dcl_tracing.py`, `webview_bridge.py`, `native_bridge.py`
-- **Actions**: Propagates register constants within each method to resolve what obfuscated call sites actually reach — reflection targets, cipher transformations (flagging weak modes), `DexClassLoader` payload paths cross-referenced against the flagged asset inventory, `addJavascriptInterface` bridge names, and `System.loadLibrary` targets correlated with the `.so`'s ELF dynamic symbol table. Anything that does not trace back to a literal is reported unresolved rather than guessed.
+### Phase 3.5: Reverse-Engineering Deep Dive [NEW Session 12]
+- **Module**: `app/analysis/static_resolution.py`, `crypto_recovery.py`, `dcl_tracing.py`, `webview_bridge.py`, `native_bridge.py`, `app/core/pipeline.py::run_phase3b_re_deepdive`
+- **Actions**: Runs the shared register-constant propagation engine (also used by `obfuscation.py`'s reflection resolution) against the CFGs to resolve `Cipher.getInstance`/`SecretKeySpec` crypto configs, `DexClassLoader` dynamic-loading targets, `addJavascriptInterface` WebView bridges, and `System.loadLibrary` + JNI native symbol correlation — all static, no execution.
 
 ### Phase 4: Feature Engineering
 - **Module**: `app/analysis/topology.py` and `app/analysis/obfuscation.py`

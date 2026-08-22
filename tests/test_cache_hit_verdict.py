@@ -102,3 +102,69 @@ class TestCacheHitPreservesVerdict(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestCachedRecordSurvivesRestart(unittest.TestCase):
+    """
+    N12: store_signature wrote eleven fields to _MEMORY_CACHE but only five to Neo4j.
+    Risk components, obfuscation, YARA results and permissions lived only in the
+    in-process dict, so after a restart a cache hit served a total score with EVERY
+    component None, no permissions and no signature panel — while the cached
+    narrative in the same response still described all of them.
+
+    These tests clear _MEMORY_CACHE between write and read, which is what a process
+    restart looks like to this module.
+    """
+
+    SHA = "c0ffee11" * 8
+
+    def setUp(self):
+        from app.graph.cache import _MEMORY_CACHE
+
+        _MEMORY_CACHE.pop(self.SHA, None)
+
+    def test_encode_decode_roundtrip_without_neo4j(self):
+        """The serialisation itself, independent of whether a database is reachable."""
+        from app.graph.cache import _encode_record, _decode_record
+
+        payload = {
+            "risk_components": {"ioc_component": 4.2, "total_score": 73.5},
+            "obfuscation_data": {"string_entropy_score": 3.1},
+            "signature_yara_data": {"yara_matches": [{"rule_name": "r"}]},
+            "permissions": ["android.permission.READ_SMS"],
+            "c2_indicators": ["telegram:bot123"],
+            "cert_thumbprint": "ab" * 32,
+            "package_name": "com.test.clone",
+        }
+        decoded = _decode_record(_encode_record(payload), self.SHA)
+        for key, value in payload.items():
+            self.assertEqual(decoded[key], value, f"{key} did not survive the round trip")
+
+    def test_record_written_before_this_field_existed_decodes_to_empty(self):
+        """
+        Older Sample nodes carry no record_json. They genuinely have no breakdown to
+        recover, so the correct answer is {} — the caller then reports the gap rather
+        than substituting zeros, which would assert "we looked and found nothing".
+        """
+        from app.graph.cache import _decode_record
+
+        self.assertEqual(_decode_record(None, self.SHA), {})
+        self.assertEqual(_decode_record("", self.SHA), {})
+
+    def test_unreadable_record_does_not_raise(self):
+        from app.graph.cache import _decode_record
+
+        self.assertEqual(_decode_record("{not json", self.SHA), {})
+
+    def test_none_valued_fields_are_dropped_not_resurrected_as_null(self):
+        """
+        A None component means "not computed". It must not come back as a key whose
+        value is None and shadow a real fallback — absent and null are different.
+        """
+        from app.graph.cache import _encode_record, _decode_record
+
+        decoded = _decode_record(
+            _encode_record({"permissions": ["p"], "risk_components": None}), self.SHA
+        )
+        self.assertIn("permissions", decoded)
+        self.assertNotIn("risk_components", decoded)

@@ -33,6 +33,7 @@ from app.analysis.crypto_recovery import recover_crypto_configs
 from app.analysis.dcl_tracing import trace_dcl_targets
 from app.analysis.webview_bridge import map_webview_bridges
 from app.analysis.native_bridge import resolve_native_bridges
+from app.analysis.impersonation import detect_impersonation
 from app.ml.classifier import classifier, ttp_classifier
 from app.ml.features import build_feature_vector, build_ttp_feature_vector
 from app.reports.scoring import compute_risk_score
@@ -653,6 +654,50 @@ class AnalysisPipeline:
         return predicted_ttps, predicted_family, family_confidence
 
     @staticmethod
+    def run_phase5b_impersonation(ingestion: IngestionResult) -> dict:
+        """
+        Phase 5.5: is this app pretending to be a different, legitimate app?
+
+        Separate from the malware phases on purpose. Every other phase asks how
+        malicious the code is; this one asks who the app claims to be, and the two
+        answers are independent — a cloned banking app can carry an unremarkable
+        payload and still be the most damaging thing in the queue.
+
+        Never raises: a missing or malformed reference table costs the checks, not
+        the analysis.
+        """
+        logger.info("[Phase 5.5] Starting Brand Impersonation Checks...")
+        start_time = time.time()
+        try:
+            phash = ingestion.icon_phash
+            result = detect_impersonation(
+                package_name=ingestion.package_name,
+                app_label=ingestion.app_label,
+                cert_sha256=ingestion.cert_thumbprint,
+                icon_phash=int(phash, 16) if phash else None,
+            ).to_dict()
+        except Exception as e:
+            logger.error(f"[Phase 5.5] Impersonation checks failed: {e}")
+            result = {
+                "findings": [], "coverage": [f"impersonation checks failed: {e}"],
+                "brands_checked": 0, "max_severity": 0.0,
+            }
+
+        duration = time.time() - start_time
+        findings = result.get("findings") or []
+        if findings:
+            logger.warning(
+                f"[Phase 5.5] Completed in {duration:.3f}s. IMPERSONATION DETECTED: "
+                + "; ".join(f"{f['kind']} of {f['brand']}" for f in findings)
+            )
+        else:
+            logger.info(
+                f"[Phase 5.5] Completed in {duration:.3f}s. No impersonation of the "
+                f"{result.get('brands_checked', 0)} protected brands checked."
+            )
+        return result
+
+    @staticmethod
     def run_phase6_risk_scoring(
         predicted_ttps: Dict[str, float],
         permissions: List[str],
@@ -663,6 +708,7 @@ class AnalysisPipeline:
         sig_yara: Optional[SignatureYaraResult] = None,
         ingestion: Optional[IngestionResult] = None,
         classifier_evidence_present: bool = True,
+        impersonation: Optional[dict] = None,
     ) -> RiskScoreBreakdown:
         """Phase 6: Calculate weighted risk score component breakdown and verdict.
 
@@ -730,26 +776,43 @@ class AnalysisPipeline:
             dropper_signal_count=dropper_sigs,
             classifier_evidence_present=classifier_evidence_present,
             ttp_thresholds=ttp_thresholds,
+            impersonation_findings=(impersonation or {}).get("findings"),
         )
         duration = time.time() - start_time
         logger.info(f"[Phase 6] Completed in {duration:.3f}s. Risk Score: {risk_score.total_score} ({risk_score.verdict_band})")
         return risk_score
 
     @staticmethod
-    def run_phase7_reporting(manifest: AnalysisManifest, risk_score: RiskScoreBreakdown) -> Tuple[str, List[str]]:
-        """Phase 7: Generate narrative analyst report via GraphRAG (local Ollama)."""
+    def run_phase7_reporting(
+        manifest: AnalysisManifest, risk_score: RiskScoreBreakdown
+    ) -> Tuple[str, List[str], Optional[dict]]:
+        """Phase 7: Generate narrative analyst report via GraphRAG (local Ollama).
+
+        The third element is the grounding result — which post-generation
+        fabrication checks ran and whether they passed. `None` when the LLM call
+        itself failed: no narrative was produced, so there is nothing to have
+        checked, and reporting "passed" there would be the same lie as scoring an
+        unparseable APK as clean.
+        """
         logger.info("[Phase 7] Starting GraphRAG Reporting...")
         start_time = time.time()
+        grounding = None
         try:
-            narrative, limitations = generate_report(manifest, risk_score)
+            narrative, limitations, grounding = generate_report(manifest, risk_score)
         except (RuntimeError, openai.OpenAIError, Exception) as e:
             logger.error(f"[Phase 7] LLM report generation failed: {e}")
             narrative = f"[Report generation unavailable: {e}]"
             limitations = [manifest.obfuscation.coverage_note]
 
         duration = time.time() - start_time
-        logger.info(f"[Phase 7] Completed in {duration:.3f}s.")
-        return narrative, limitations
+        if grounding:
+            logger.info(
+                f"[Phase 7] Completed in {duration:.3f}s. Grounding: "
+                f"{grounding['passed_count']}/{grounding['total_count']} checks passed."
+            )
+        else:
+            logger.info(f"[Phase 7] Completed in {duration:.3f}s.")
+        return narrative, limitations, grounding
 
     @staticmethod
     def _empty_topological_invariants() -> Dict[str, float]:
