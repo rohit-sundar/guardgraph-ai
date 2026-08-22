@@ -72,12 +72,6 @@ UNPARSEABLE_RISK_SCORE = 50.0
 MAX_UPLOAD_BYTES = 150 * 1024 * 1024
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
-# The demo APK /analyze_sample runs, relative to the repo root. Kept in its own
-# gitignored directory (not data/samples/) because that is the convention the UI
-# button's label and .gitignore already encode.
-DEMO_SAMPLE_RELPATH = os.path.join("guardgraph_test", "guardgraph_test.apk")
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-
 
 @router.get("/graph/landscape")
 async def graph_landscape(limit: int = 30):
@@ -129,32 +123,10 @@ async def analyze(file: UploadFile = File(...)):
 
 @router.post("/analyze_sample", response_model=AnalysisReport)
 async def analyze_sample():
-    """
-    Analyzes the operator's local demo APK — the UI's "Quick Test Target
-    Sample" button, which names this file in its own label.
-
-    The APK is deliberately absent from git (.gitignore: `guardgraph_test/*.apk`)
-    because it is live malware, so a fresh clone has no such directory. That is
-    expected — the operator drops their own sample in. The 404 names the path
-    relative to the repo root rather than resolving it, since the absolute path
-    discloses the server's filesystem layout to any caller.
-    """
-    sample_path = os.path.join(_REPO_ROOT, DEMO_SAMPLE_RELPATH)
+    sample_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "guardgraph_test", "guardgraph_test.apk"))
     if not os.path.exists(sample_path):
-        raise HTTPException(
-            404,
-            f"No demo sample found. Place the APK at {DEMO_SAMPLE_RELPATH} "
-            "(relative to the repo root) and retry.",
-        )
-
-    # Same fallback as /analyze: a hostile sample that defeats the parser must
-    # produce a verdict, not a 500. Without this the two entry points disagree
-    # on what an unparseable APK means.
-    try:
-        return _run_analysis(sample_path)
-    except Exception as exc:
-        logger.error(f"Unparseable APK fallback triggered: {exc}")
-        return _unparseable_report(sample_path, exc)
+        raise HTTPException(404, f"Sample file not found at {sample_path}")
+    return _run_analysis(sample_path)
 
 
 def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
