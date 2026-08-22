@@ -165,7 +165,7 @@ class RiskScoreBreakdown(BaseModel):
     reputation_component: Optional[float] = None
     ioc_component: Optional[float] = None
     total_score: float
-    verdict_band: str  # low / suspicious / high / malicious
+    verdict_band: str  # low / medium / suspicious / high / malicious
     # Zero-day / novel-variant flag: strong deterministic (forensic anchor) and/or
     # structural (obfuscation/coverage) evidence while model familiarity is low.
     # A model-free escalation signal for first-seen samples the classifier hasn't

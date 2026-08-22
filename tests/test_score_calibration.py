@@ -47,6 +47,7 @@ from app.core.schemas import ObfuscationSignal
 from app.reports.scoring import (
     BAND_HIGH_CEILING,
     BAND_LOW_CEILING,
+    BAND_MEDIUM_CEILING,
     BAND_SUSPICIOUS_CEILING,
     MATRIX_FLAG_SEVERITY,
     _band_for,
@@ -401,13 +402,16 @@ class TestObfuscationComponent(unittest.TestCase):
 class TestVerdictBands(unittest.TestCase):
 
     def test_boundaries_are_ordered(self):
-        self.assertLess(BAND_LOW_CEILING, BAND_SUSPICIOUS_CEILING)
+        self.assertLess(BAND_LOW_CEILING, BAND_MEDIUM_CEILING)
+        self.assertLess(BAND_MEDIUM_CEILING, BAND_SUSPICIOUS_CEILING)
         self.assertLess(BAND_SUSPICIOUS_CEILING, BAND_HIGH_CEILING)
 
     def test_each_band_is_reachable_and_inclusive_at_its_ceiling(self):
         self.assertEqual(_band_for(0.0), "low")
         self.assertEqual(_band_for(BAND_LOW_CEILING), "low")
-        self.assertEqual(_band_for(BAND_LOW_CEILING + 0.01), "suspicious")
+        self.assertEqual(_band_for(BAND_LOW_CEILING + 0.01), "medium")
+        self.assertEqual(_band_for(BAND_MEDIUM_CEILING), "medium")
+        self.assertEqual(_band_for(BAND_MEDIUM_CEILING + 0.01), "suspicious")
         self.assertEqual(_band_for(BAND_SUSPICIOUS_CEILING), "suspicious")
         self.assertEqual(_band_for(BAND_SUSPICIOUS_CEILING + 0.01), "high")
         self.assertEqual(_band_for(BAND_HIGH_CEILING), "high")

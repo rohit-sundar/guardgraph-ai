@@ -29,7 +29,7 @@ Usage:
     python scripts/score_corpus.py                        # whole corpus, 8 workers
     python scripts/score_corpus.py --sample 30            # 30 per class, quick look
     python scripts/score_corpus.py --workers 4 --out out.json
-    python scripts/score_corpus.py --bands 35,50,75       # try candidate boundaries
+    python scripts/score_corpus.py --bands 30,40,60,75    # try candidate boundaries
     python scripts/score_corpus.py --resume               # skip APKs already in --out
     python scripts/score_corpus.py --sample 6 --online    # metered, 1 worker, 15s/APK
 """
@@ -214,10 +214,12 @@ def _quantile(sorted_values: list[float], p: float) -> float:
     return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (i - lo)
 
 
-def _band_of(total: float, bands: tuple[float, float, float]) -> str:
-    low, suspicious, high = bands
+def _band_of(total: float, bands: tuple[float, float, float, float]) -> str:
+    low, medium, suspicious, high = bands
     if total <= low:
         return "low"
+    if total <= medium:
+        return "medium"
     if total <= suspicious:
         return "suspicious"
     if total <= high:
@@ -225,7 +227,7 @@ def _band_of(total: float, bands: tuple[float, float, float]) -> str:
     return "malicious"
 
 
-def report(records: list[dict], bands: tuple[float, float, float]) -> None:
+def report(records: list[dict], bands: tuple[float, float, float, float]) -> None:
     ok = [r for r in records if "error" not in r]
     failed = [r for r in records if "error" in r]
     groups = {
@@ -251,7 +253,7 @@ def report(records: list[dict], bands: tuple[float, float, float]) -> None:
 
     print(f"\n── verdict bands at {bands} " + "─" * 40)
     print(f"{'band':<14}{'benign':>10}{'malware':>10}")
-    for band in ("low", "suspicious", "high", "malicious"):
+    for band in ("low", "medium", "suspicious", "high", "malicious"):
         counts = [
             sum(1 for r in group if _band_of(r["total"], bands) == band)
             for group in groups.values()
@@ -319,8 +321,8 @@ def main() -> None:
     parser.add_argument("--out", default=DEFAULT_OUT)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--bands", default=None,
-                        help="comma-separated low,suspicious,high ceilings to report "
-                             "against; defaults to the shipped thresholds")
+                        help="comma-separated low,medium,suspicious,high ceilings to "
+                             "report against; defaults to the shipped thresholds")
     parser.add_argument("--from-json", default=None,
                         help="re-report an earlier run instead of re-scoring")
     parser.add_argument("--resume", action="store_true",
@@ -364,13 +366,17 @@ def main() -> None:
 
     if args.bands:
         bands = tuple(float(x) for x in args.bands.split(","))
-        if len(bands) != 3:
-            parser.error("--bands takes exactly three ceilings, e.g. 35,50,75")
+        if len(bands) != 4:
+            parser.error("--bands takes exactly four ceilings, e.g. 30,40,60,75")
     else:
         from app.reports.scoring import (
-            BAND_LOW_CEILING, BAND_SUSPICIOUS_CEILING, BAND_HIGH_CEILING,
+            BAND_LOW_CEILING, BAND_MEDIUM_CEILING, BAND_SUSPICIOUS_CEILING,
+            BAND_HIGH_CEILING,
         )
-        bands = (BAND_LOW_CEILING, BAND_SUSPICIOUS_CEILING, BAND_HIGH_CEILING)
+        bands = (
+            BAND_LOW_CEILING, BAND_MEDIUM_CEILING, BAND_SUSPICIOUS_CEILING,
+            BAND_HIGH_CEILING,
+        )
 
     if args.from_json:
         with open(args.from_json, encoding="utf-8") as fh:

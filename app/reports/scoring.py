@@ -147,6 +147,14 @@ IOC_CIRCUMSTANTIAL_CAP = 0.35       # joint ceiling on the four weak terms above
 # recovered no forensic evidence at all, which is a limit on analysis depth that no
 # boundary can move.
 BAND_LOW_CEILING = 30.0
+# `medium` — the 9 clean apps that clear `low` are not spread evenly through the old
+# `suspicious` range: all 9 top out at 37.05, and the next malware score above that is
+# 42.17 — a real 5-point gap with nothing in it, benign or malware. BAND_MEDIUM_CEILING
+# sits in that gap. This exists to stop labelling that clean-app tail `suspicious`,
+# which was overstating it — it is an analyst-trust fix, not a new detection boundary:
+# 4 malware samples fall in this band alongside the 9 benign ones, so `medium` reads as
+# "ambiguous", not "clean". Added 2026-08-22, derived from data/corpus_scores_v2.json.
+BAND_MEDIUM_CEILING = 40.0
 # `suspicious` — the ceiling below which the tool never asserts a verdict. Youden's J
 # peaks far lower, at 27.0 (J=0.933); that difference is deliberately spent on almost
 # never showing an analyst a clean app marked `high`.
@@ -169,16 +177,28 @@ BAND_LOW_CEILING = 30.0
 # scoring defect, and no boundary separates them: raising this ceiling above 69.19
 # would reclassify 189 of 318 malware (59%) as merely `suspicious`. The rest of the
 # clean corpus is nowhere near — the next highest score is 37.05, and 296 of 298
-# clean apps sit at or below it.
+# clean apps sit at or below it. (Those 9 apps between 30 and 37.05 now read `medium`,
+# not `suspicious` — see BAND_MEDIUM_CEILING above — so only the two named exceptions
+# remain above this ceiling.)
 BAND_SUSPICIOUS_CEILING = 60.0
-# `high` — the strongest claim, so it is placed below the malware first quartile,
-# where the boundary sits outside the distribution's mode and a few points of
-# movement cannot carry dozens of samples across it. On the expanded corpus that
-# quartile is 64.03, which the previous value of 65.0 sat just above — so it is
-# lowered to 62.0 to restore the criterion with margin. At 70 the boundary would fall
-# inside the mode (median 68.26) and become sensitive to exactly the variance it
-# exists to avoid. Was 80.0, where only 12 of 133 malware reached `malicious` at all.
-BAND_HIGH_CEILING = 62.0
+# `high` — was placed below the malware first quartile (64.03) to maximize how much
+# malware reaches `malicious`; that criterion put the ceiling at 62.0, and both named
+# `suspicious`-ceiling exceptions above (69.19, 61.90) clear it, so `malicious` fired on
+# a clean app. Moved 2026-08-22 to the same criterion BAND_LOW_CEILING and the original
+# BAND_SUSPICIOUS_CEILING already use: placed above every known clean score (69.19)
+# instead of below the malware quartile. 70.0 is the smallest round number that clears
+# it.
+#
+# Measured tradeoff (data/corpus_scores_v2.json, malware n=318): `malicious` becomes
+# reachable by 0 of 298 clean apps (both outliers now read `high`), but the malware
+# share reaching `malicious` drops from 247/318 (78%) to 103/318 (32%) — 70.0 sits
+# almost exactly at the split between the corpus's two largest buckets, (65,70]=124 and
+# (70,75]=102, close to the malware median (68.26). Nothing drops below `high`: total
+# malware at `high`-or-above is unchanged, 251/318 (79%), either way — this only moves
+# which of the two top labels a malware sample gets. Accepted deliberately: a false
+# `malicious` verdict on a legitimate app is judged worse than a real trojan reading
+# `high` instead of `malicious`.
+BAND_HIGH_CEILING = 70.0
 
 RISKY_PERMISSIONS = {
     "android.permission.BIND_ACCESSIBILITY_SERVICE": 1.0,
@@ -502,6 +522,8 @@ def _band_for(total: float) -> str:
     a cold-path run would have for the same total_score."""
     if total <= BAND_LOW_CEILING:
         return "low"
+    if total <= BAND_MEDIUM_CEILING:
+        return "medium"
     if total <= BAND_SUSPICIOUS_CEILING:
         return "suspicious"
     if total <= BAND_HIGH_CEILING:
