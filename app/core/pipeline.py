@@ -338,6 +338,7 @@ class AnalysisPipeline:
                 len(ingestion.activities) + len(ingestion.services)
                 + len(ingestion.receivers)
             ),
+            manifest_parse_failed=ingestion.manifest_parse_failed,
         )
 
         # Legacy family (35) vector — unchanged: first-subgraph invariants.

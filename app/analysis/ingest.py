@@ -8,9 +8,13 @@ Androguard successfully parsing the APK, so failures here should be loud,
 not swallowed.
 """
 import hashlib
+import zipfile
 from pathlib import Path
 from typing import Any
 
+from androguard.core import dex
+from androguard.core.analysis.analysis import Analysis
+from androguard.decompiler import decompiler as _decompiler
 from androguard.misc import AnalyzeAPK
 from loguru import logger
 
@@ -25,6 +29,46 @@ from app.analysis.apk_static import (
     inspect_apk_payloads,
     parse_accessibility_configs,
 )
+
+
+def _fallback_dex_analysis(filepath: str) -> tuple[list, Any] | tuple[None, None]:
+    """
+    Manifest-independent DEX/CFG extraction — the fallback when apk.APK()
+    (which parses AndroidManifest.xml as its first step) fails.
+
+    A corrupted-but-recoverable manifest is a documented Android
+    anti-analysis technique: junk bytes inserted between AXML chunk headers
+    force Androguard's parser into a byte-by-byte resync search, which can
+    fail outright (raising ResParserError / IndexError deep in axml parsing)
+    even though the DEX itself is perfectly intact. classes*.dex sit at the
+    ZIP root and need zero manifest parsing to read, so a corrupted manifest
+    doesn't have to mean zero coverage — CFG-level analysis (forensic
+    anchors that don't require a manifest `declares` gate, reflection/
+    crypto/DCL/WebView/native resolution) can still run against them.
+
+    Mirrors androguard.misc.AnalyzeAPK's own DEX/Analysis construction
+    (using_api omitted — there is no target-SDK value available without the
+    manifest; Androguard defaults it internally).
+    """
+    try:
+        with zipfile.ZipFile(filepath) as z:
+            dex_names = sorted(
+                n for n in z.namelist() if n.startswith("classes") and n.endswith(".dex")
+            )
+            if not dex_names:
+                return None, None
+            dx = Analysis()
+            dfs = []
+            for name in dex_names:
+                df = dex.DEX(z.read(name))
+                dx.add(df)
+                dfs.append(df)
+                df.set_decompiler(_decompiler.DecompilerDAD(df, dx))
+            dx.create_xref()
+            return dfs, dx
+    except Exception as e:
+        logger.warning(f"Manifest-independent DEX fallback also failed: {e}")
+        return None, None
 
 
 def compute_sha256(filepath: str) -> str:
@@ -94,9 +138,28 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
     """
     sha256 = compute_sha256(filepath)
 
-    apk_obj, dvm, analysis = AnalyzeAPK(filepath)
+    manifest_parse_failed = False
+    try:
+        apk_obj, dvm, analysis = AnalyzeAPK(filepath)
+    except Exception as e:
+        logger.warning(
+            f"AndroidManifest.xml parsing failed ({e}) — likely a deliberately "
+            "corrupted manifest (junk bytes between AXML chunk headers is a known "
+            "anti-analysis technique). Falling back to manifest-independent DEX/CFG "
+            "extraction; permission/component/cert fields will be unavailable, not "
+            "analysed."
+        )
+        apk_obj = None
+        dvm, analysis = _fallback_dex_analysis(filepath)
+        manifest_parse_failed = True
+        if analysis is None:
+            # Both the manifest AND a raw-ZIP DEX read failed — nothing left to
+            # analyze. Re-raise so the caller's existing unparseable-sample
+            # handling takes over, same as before this fallback existed.
+            raise
 
-    # 1. Inspect payloads (secondary DEX and assets)
+    # 1. Inspect payloads (secondary DEX and assets) — reads the raw ZIP directly,
+    #    independent of apk_obj, so this still runs even without a parsed manifest.
     payload_info = inspect_apk_payloads(filepath)
     secondary_dex_count = payload_info.get("secondary_dex_count", 0)
     yara_targets = payload_info.get("yara_targets", [])
@@ -105,34 +168,52 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
     # 2. Extract C2 from asset strings
     c2_indicators = extract_c2_indicators(asset_strings)
 
-    # 3. Analyze cert anomalies
-    der_certs = extract_der_certificates(apk_obj)
-    cert_anomalies = analyze_certificate_anomalies(der_certs)
-
-    # 4. Detect permission matrices. The declared intent actions go in too: the
-    #    accessibility rules key off BIND_ACCESSIBILITY_SERVICE, which is the
-    #    permission the system holds over a service and so almost never appears in
-    #    <uses-permission> — see apk_static.ACCESSIBILITY_SERVICE_ACTION (N5).
-    permissions = list(apk_obj.get_permissions())
-    intent_actions = extract_intent_actions(apk_obj)
-    permission_matrix_flags = detect_permission_matrix(permissions, intent_actions)
-
-    # 4b. Accessibility service config. Gated on the *declaration* — gating on the
-    #     <uses-permission> left accessibility_flags empty for 69 of the 75 corpus
-    #     malware samples that declare an accessibility service. Only the mapped
-    #     ACCESSIBILITY_* IDs join permission_matrix_flags; the raw config strings
-    #     stay in accessibility_flags, where the report and the matrix flags read
-    #     them, instead of reaching the scorer as unweighted unknowns.
-    a11y_flags: list[str] = []
-    if declares_accessibility_service(permissions, intent_actions):
-        a11y_flags = parse_accessibility_configs(apk_obj)
-        permission_matrix_flags.extend(
-            f for f in accessibility_matrix_flags(a11y_flags)
-            if f not in permission_matrix_flags
-        )
-
     payload_assets = payload_info.get("payload_assets", [])
     dropper_signals = payload_info.get("dropper_signals", [])
+
+    # 3-4b. Everything below needs apk_obj (the parsed manifest). None of it is
+    # recoverable from the fallback path — reported empty, not guessed.
+    cert_anomalies: list[str] = []
+    permissions: list[str] = []
+    intent_actions: list[str] = []
+    permission_matrix_flags: list[str] = []
+    a11y_flags: list[str] = []
+    package_name = None
+    cert_thumbprint = None
+    activities: list[str] = []
+    services: list[str] = []
+    receivers: list[str] = []
+
+    if apk_obj is not None:
+        der_certs = extract_der_certificates(apk_obj)
+        cert_anomalies = analyze_certificate_anomalies(der_certs)
+
+        # Detect permission matrices. The declared intent actions go in too: the
+        # accessibility rules key off BIND_ACCESSIBILITY_SERVICE, which is the
+        # permission the system holds over a service and so almost never appears in
+        # <uses-permission> — see apk_static.ACCESSIBILITY_SERVICE_ACTION (N5).
+        permissions = list(apk_obj.get_permissions())
+        intent_actions = extract_intent_actions(apk_obj)
+        permission_matrix_flags = detect_permission_matrix(permissions, intent_actions)
+
+        # Accessibility service config. Gated on the *declaration* — gating on the
+        # <uses-permission> left accessibility_flags empty for 69 of the 75 corpus
+        # malware samples that declare an accessibility service. Only the mapped
+        # ACCESSIBILITY_* IDs join permission_matrix_flags; the raw config strings
+        # stay in accessibility_flags, where the report and the matrix flags read
+        # them, instead of reaching the scorer as unweighted unknowns.
+        if declares_accessibility_service(permissions, intent_actions):
+            a11y_flags = parse_accessibility_configs(apk_obj)
+            permission_matrix_flags.extend(
+                f for f in accessibility_matrix_flags(a11y_flags)
+                if f not in permission_matrix_flags
+            )
+
+        package_name = apk_obj.get_package()
+        cert_thumbprint = extract_cert_thumbprint(apk_obj)
+        activities = list(apk_obj.get_activities())
+        services = list(apk_obj.get_services())
+        receivers = list(apk_obj.get_receivers())
 
     # 5. How much code Androguard actually recovered. Counted here rather than in
     #    cfg.py because it is a property of the sample, not of the CFG pass, and
@@ -147,12 +228,12 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
 
     result = IngestionResult(
         sha256=sha256,
-        package_name=apk_obj.get_package(),
-        cert_thumbprint=extract_cert_thumbprint(apk_obj),
+        package_name=package_name,
+        cert_thumbprint=cert_thumbprint,
         permissions=permissions,
-        activities=list(apk_obj.get_activities()),
-        services=list(apk_obj.get_services()),
-        receivers=list(apk_obj.get_receivers()),
+        activities=activities,
+        services=services,
+        receivers=receivers,
         intent_actions=intent_actions,
         c2_indicators=c2_indicators,
         cert_anomalies=cert_anomalies,
@@ -162,6 +243,7 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
         accessibility_flags=a11y_flags,
         payload_assets=payload_assets,
         dropper_signals=dropper_signals,
+        manifest_parse_failed=manifest_parse_failed,
     )
 
     logger.info(
@@ -172,7 +254,8 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
         f"dex_methods={result.dex_method_count}, "
         f"a11y={len(result.accessibility_flags)}, "
         f"dropper_signals={len(result.dropper_signals)}, "
-        f"yara_targets={len(yara_targets)}"
+        f"yara_targets={len(yara_targets)}, "
+        f"manifest_parse_failed={manifest_parse_failed}"
     )
 
     return result, apk_obj, dvm, analysis, yara_targets

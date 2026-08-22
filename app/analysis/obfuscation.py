@@ -102,6 +102,7 @@ def build_obfuscation_signal(
     method_parse_failure_rate: float = 0.0,
     dex_method_count: int | None = None,
     declared_component_count: int | None = None,
+    manifest_parse_failed: bool = False,
 ) -> ObfuscationSignal:
     entropy_score = compute_string_pool_entropy(all_strings)
 
@@ -138,6 +139,21 @@ def build_obfuscation_signal(
         coverage_notes.append(
             f"{pct}% of relevant methods failed CFG parsing — "
             "analysis coverage reduced; possible heavy obfuscation"
+        )
+
+    # A deliberately corrupted manifest (junk bytes between AXML chunk headers,
+    # forcing Androguard's parser into a byte-by-byte resync that can fail
+    # outright) is a strong, deliberate anti-analysis signal on its own — no
+    # legitimate app has a reason to malform its own manifest. Reported, not
+    # scored: unlike the manifest-vs-code check below, this hasn't been
+    # measured against a corpus, so it doesn't get a calibrated weight — see
+    # obfuscation_component's docstring in scoring.py for why that measurement
+    # comes first here.
+    if manifest_parse_failed:
+        coverage_notes.insert(
+            0, "AndroidManifest.xml failed to parse (corrupted/anti-analysis) — "
+               "permissions, components, and certificate data are unavailable; "
+               "DEX/CFG-level analysis still ran"
         )
 
     # N7: the code that was recovered cannot account for the app the manifest

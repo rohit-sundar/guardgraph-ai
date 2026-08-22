@@ -33,6 +33,15 @@ class IngestionResult(BaseModel):
     exported_risks: list[str] = []
     payload_assets: list[str] = []
     dropper_signals: list[str] = []
+    # True when AndroidManifest.xml failed to parse (Androguard's apk.APK()
+    # construction raised) and ingestion fell back to manifest-independent
+    # DEX/CFG extraction straight off the ZIP. A deliberately corrupted
+    # manifest (junk bytes between AXML chunk headers) is a known
+    # anti-analysis technique — see ingest.py's fallback path. All
+    # manifest-derived fields above (permissions, activities/services/
+    # receivers, cert_thumbprint, accessibility_flags, permission_matrix_flags,
+    # intent_actions) are empty in this state, not "observed absent".
+    manifest_parse_failed: bool = False
 
 
 class BehavioralSubgraph(BaseModel):
