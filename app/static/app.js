@@ -347,14 +347,16 @@ function renderResults(data) {
   // 5. Risk Score Breakdown (use real API values)
   const breakdownContainer = document.getElementById('riskBreakdownList');
   breakdownContainer.innerHTML = '';
+  // Caps must match the weights in app/reports/scoring.py's compute_risk_score
+  // (classifier*25, permission*20, ttp*15, anchor*15, obfuscation*15, reputation*5, ioc*5 — sums to 100).
   const components = [
-    { name: 'Permission & API Analysis', score: risk.permission_api_component, max: 25 },
-    { name: 'Forensic Anchor Matching', score: risk.forensic_anchor_component, max: 25 },
+    { name: 'Permission & API Analysis', score: risk.permission_api_component, max: 20 },
+    { name: 'Forensic Anchor Matching', score: risk.forensic_anchor_component, max: 15 },
     { name: 'Obfuscation Signals', score: risk.obfuscation_component, max: 15 },
-    { name: 'Reputation & VT Engine Hits', score: risk.reputation_component, max: 15 },
-    { name: 'IoC Match Component', score: risk.ioc_component, max: 10 },
+    { name: 'Reputation & VT Engine Hits', score: risk.reputation_component, max: 5 },
+    { name: 'IoC Match Component', score: risk.ioc_component, max: 5 },
     { name: 'TTP Severity', score: risk.ttp_severity_component, max: 15 },
-    { name: 'Classifier Confidence', score: risk.classifier_confidence_component, max: 10 },
+    { name: 'Classifier Confidence', score: risk.classifier_confidence_component, max: 25 },
   ];
 
   components.forEach(c => {
