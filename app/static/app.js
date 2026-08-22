@@ -326,6 +326,15 @@ function renderResults(data) {
   // Render interactive Cytoscape graph
   renderGraphExplorer(manifest);
 
+  // Reverse Engineering Findings (crypto / DCL / WebView / native)
+  renderReFindings(manifest);
+
+  // MITRE ATT&CK Mobile Technique Mapping
+  renderMitreMapping(manifest);
+
+  // Correlated samples (Neo4j graph — shared techniques / C2 infrastructure)
+  renderRelatedSamples(manifest);
+
   // 4. Permissions Matrix
   const permContainer = document.getElementById('permissionsList');
   permContainer.innerHTML = '';
@@ -366,14 +375,16 @@ function renderResults(data) {
   // 5. Risk Score Breakdown (use real API values)
   const breakdownContainer = document.getElementById('riskBreakdownList');
   breakdownContainer.innerHTML = '';
+  // Caps must match the weights in app/reports/scoring.py's compute_risk_score
+  // (classifier*25, permission*20, ttp*15, anchor*15, obfuscation*15, reputation*5, ioc*5 — sums to 100).
   const components = [
-    { name: 'Permission & API Analysis', score: risk.permission_api_component, max: 25 },
-    { name: 'Forensic Anchor Matching', score: risk.forensic_anchor_component, max: 25 },
+    { name: 'Permission & API Analysis', score: risk.permission_api_component, max: 20 },
+    { name: 'Forensic Anchor Matching', score: risk.forensic_anchor_component, max: 15 },
     { name: 'Obfuscation Signals', score: risk.obfuscation_component, max: 15 },
-    { name: 'Reputation & VT Engine Hits', score: risk.reputation_component, max: 15 },
-    { name: 'IoC Match Component', score: risk.ioc_component, max: 10 },
+    { name: 'Reputation & VT Engine Hits', score: risk.reputation_component, max: 5 },
+    { name: 'IoC Match Component', score: risk.ioc_component, max: 5 },
     { name: 'TTP Severity', score: risk.ttp_severity_component, max: 15 },
-    { name: 'Classifier Confidence', score: risk.classifier_confidence_component, max: 10 },
+    { name: 'Classifier Confidence', score: risk.classifier_confidence_component, max: 25 },
   ];
 
   components.forEach(c => {
@@ -407,7 +418,222 @@ function renderResults(data) {
   });
 }
 
+function renderReFindings(manifest) {
+  const sections = [
+    { listId: 'reCryptoList', items: manifest.resolved_crypto_configs || [] },
+    { listId: 'reDclList', items: manifest.resolved_dcl_targets || [] },
+    { listId: 'reWebviewList', items: manifest.resolved_webview_bridges || [] },
+    { listId: 'reNativeList', items: manifest.resolved_native_bridges || [] },
+  ];
+
+  let total = 0;
+  sections.forEach(({ listId, items }) => {
+    const container = document.getElementById(listId);
+    if (!container) return;
+    container.innerHTML = '';
+    total += items.length;
+    if (items.length === 0) {
+      container.innerHTML = '<span class="re-empty">None found</span>';
+      return;
+    }
+    items.forEach(finding => {
+      const item = document.createElement('div');
+      item.className = 're-finding-item';
+      // WEAK: flags a real risk — highlight it distinctly rather than blending
+      // it into the same neutral text as an ordinary resolved finding.
+      item.classList.toggle('re-finding-weak', finding.includes('WEAK:'));
+      item.textContent = finding;
+      container.appendChild(item);
+    });
+  });
+
+  const countEl = document.getElementById('reFindingsCount');
+  if (countEl) countEl.textContent = total;
+}
+
+function renderMitreMapping(manifest) {
+  const container = document.getElementById('mitreMappingList');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const ttps = manifest.ttp_context || [];
+  const countEl = document.getElementById('mitreCount');
+  if (countEl) countEl.textContent = ttps.length;
+
+  if (ttps.length === 0) {
+    container.innerHTML = '<span class="re-empty">No techniques predicted for this sample</span>';
+    return;
+  }
+
+  ttps.forEach(t => {
+    const pct = ((t.probability || 0) * 100).toFixed(1);
+    const barColor = t.probability > 0.66 ? '#ff4444' : t.probability > 0.33 ? '#ff8800' : '#22c55e';
+    const item = document.createElement('div');
+    item.className = 'mitre-item';
+    item.innerHTML = `
+      <div class="mitre-item-header">
+        <span class="mitre-id">${t.technique_id}</span>
+        <span class="mitre-name">${t.name || 'Unknown Technique'}</span>
+        <span class="mitre-tactic">${t.tactic || 'Unknown Tactic'}</span>
+      </div>
+      <div class="progress-bar-container" style="height:6px; margin: 0.4rem 0;">
+        <div class="progress-bar-fill" style="width: ${pct}%; background: ${barColor};"></div>
+      </div>
+      <div class="mitre-item-footer">
+        <span class="spec-value code">${pct}% confidence</span>
+        ${t.description ? `<p class="mitre-description">${t.description}</p>` : ''}
+      </div>
+    `;
+    container.appendChild(item);
+  });
+}
+
+function renderRelatedSamples(manifest) {
+  const container = document.getElementById('relatedSamplesList');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const related = manifest.related_samples || [];
+  const countEl = document.getElementById('relatedCount');
+  if (countEl) countEl.textContent = related.length;
+
+  if (related.length === 0) {
+    container.innerHTML = '<span class="re-empty">No overlapping samples in the graph yet</span>';
+    return;
+  }
+
+  related.forEach(r => {
+    const item = document.createElement('div');
+    item.className = 'related-sample-item';
+    const sharedTech = (r.shared_techniques || []).map(t => `<span class="chip">${t}</span>`).join('');
+    const sharedC2 = (r.shared_c2 || []).map(c => `<span class="chip chip-danger">${c}</span>`).join('');
+    item.innerHTML = `
+      <div class="related-sample-header">
+        <span class="mitre-name">${r.app_name || r.sha256}</span>
+        ${r.family ? `<span class="mitre-tactic">${r.family}</span>` : ''}
+        ${r.risk_score !== null && r.risk_score !== undefined ? `<span class="spec-value code" style="margin-left:auto;">score ${Number(r.risk_score).toFixed(1)}</span>` : ''}
+      </div>
+      ${sharedTech ? `<div class="related-sample-row"><span class="spec-label">Shared techniques:</span> ${sharedTech}</div>` : ''}
+      ${sharedC2 ? `<div class="related-sample-row"><span class="spec-label">Shared C2 infrastructure:</span> ${sharedC2}</div>` : ''}
+    `;
+    container.appendChild(item);
+  });
+}
+
 let cyInstance = null;
+let cyLandscapeInstance = null;
+
+const LANDSCAPE_COLORS = {
+  Sample: '#eab308',
+  MalwareFamily: '#84cc16',
+  Technique: '#3b82f6',
+  C2Indicator: '#ef4444',
+  Certificate: '#a855f7',
+};
+
+async function loadThreatLandscape() {
+  const container = document.getElementById('landscapeGraphContainer');
+  if (!container || typeof cytoscape === 'undefined') return;
+  container.innerHTML = '<div class="graph-placeholder-text">Loading from Neo4j…</div>';
+
+  let elements;
+  try {
+    const resp = await fetch('/graph/landscape?limit=30');
+    const data = await resp.json();
+    elements = [...(data.nodes || []), ...(data.edges || [])];
+  } catch (e) {
+    container.innerHTML = '<div class="graph-placeholder-text">Failed to load graph — is the server reachable?</div>';
+    return;
+  }
+
+  if (elements.length === 0) {
+    container.innerHTML = '<div class="graph-placeholder-text">No cached samples in Neo4j yet — analyze a few APKs first.</div>';
+    return;
+  }
+
+  container.innerHTML = '';
+  if (cyLandscapeInstance) {
+    cyLandscapeInstance.destroy();
+  }
+
+  cyLandscapeInstance = cytoscape({
+    container: container,
+    elements: elements,
+    style: [
+      {
+        selector: 'node',
+        style: {
+          'background-color': ele => LANDSCAPE_COLORS[ele.data('type')] || '#94a3b8',
+          'label': 'data(label)',
+          'color': '#e2e8f0',
+          'font-size': '9px',
+          'text-valign': 'center',
+          'text-halign': 'center',
+          'text-wrap': 'wrap',
+          'text-max-width': '70px',
+          'width': ele => ele.data('type') === 'Sample' ? 42 : 30,
+          'height': ele => ele.data('type') === 'Sample' ? 42 : 30,
+          'border-width': 2,
+          'border-color': 'rgba(255,255,255,0.15)',
+        }
+      },
+      {
+        selector: 'edge',
+        style: {
+          'width': 1.2,
+          'line-color': 'rgba(148,163,184,0.35)',
+          'target-arrow-color': 'rgba(148,163,184,0.35)',
+          'target-arrow-shape': 'triangle',
+          'curve-style': 'bezier',
+        }
+      },
+      // Click-to-isolate: everything NOT in the tapped node's neighborhood
+      // fades out instead of leaving the whole tangled graph lit at once.
+      {
+        selector: '.landscape-faded',
+        style: { 'opacity': 0.08 }
+      },
+      {
+        selector: '.landscape-highlighted',
+        style: {
+          'border-width': 3,
+          'border-color': '#f8fafc',
+          'z-index': 999,
+        }
+      }
+    ],
+    layout: { name: 'cose', animate: false, padding: 30, nodeRepulsion: 8000, idealEdgeLength: 80 }
+  });
+
+  // Tighter initial framing than the default fit — the raw layout leaves a lot
+  // of dead space around a graph this size, which makes it look smaller/emptier
+  // than it is at a glance.
+  cyLandscapeInstance.ready(() => {
+    cyLandscapeInstance.fit(undefined, 20);
+  });
+
+  cyLandscapeInstance.on('tap', 'node', function (evt) {
+    const node = evt.target;
+    console.log(`${node.data('type')}: ${node.data('label')}`);
+
+    const neighborhood = node.closedNeighborhood();
+    cyLandscapeInstance.elements().not(neighborhood).addClass('landscape-faded').removeClass('landscape-highlighted');
+    neighborhood.removeClass('landscape-faded').addClass('landscape-highlighted');
+  });
+
+  // Tap on empty canvas background clears the isolation.
+  cyLandscapeInstance.on('tap', function (evt) {
+    if (evt.target === cyLandscapeInstance) {
+      cyLandscapeInstance.elements().removeClass('landscape-faded landscape-highlighted');
+    }
+  });
+}
+
+function relayoutLandscape(layoutName) {
+  if (cyLandscapeInstance) {
+    cyLandscapeInstance.layout({ name: layoutName, animate: true, animationDuration: 500, padding: 30 }).run();
+  }
+}
 
 // Dispatchers drawn without a surrounding subgraph, and outlier chips listed under
 // the stats. An obfuscated APK produces hundreds of both; past these counts the
@@ -428,6 +654,7 @@ function renderGraphExplorer(manifest) {
   const container = document.getElementById('cyGraphContainer');
   if (!container || typeof cytoscape === 'undefined') return;
 
+<<<<<<< HEAD
   const obf = manifest.obfuscation || {};
   const outlierNodes = obf.flattening_outlier_nodes || [];
   const subgraphs = manifest.behavioral_subgraphs || [];
@@ -443,20 +670,28 @@ function renderGraphExplorer(manifest) {
       const data = { id, label, type, tooltip };
       if (parent) data.parent = parent;
       elements.push({ data });
+=======
+  // This sample's own neighborhood in the same Neo4j graph the Threat
+  // Landscape tab draws from — real predicted family/techniques/C2, not a
+  // synthetic mock of CFG structure. Built entirely from fields already on
+  // this response (no extra request needed).
+  const elements = [];
+  const nodeSet = new Set();
+
+  function addNode(id, label, type) {
+    if (!nodeSet.has(id)) {
+      nodeSet.add(id);
+      elements.push({ data: { id, label, type } });
+>>>>>>> c47d6df938ca58831f1efa56b8729a19d1141dbd
     }
   }
-
   function addEdge(source, target, label) {
     elements.push({
-      data: {
-        id: `e_${source}_${target}_${Math.random().toString(36).substr(2, 4)}`,
-        source,
-        target,
-        label: label || ''
-      }
+      data: { id: `e_${source}_${target}_${Math.random().toString(36).slice(2, 6)}`, source, target, label },
     });
   }
 
+<<<<<<< HEAD
   // Every node drawn below is a real basic block from the backend's induced
   // subgraph, and every edge is a real control transition. Behavior flag and
   // matched API are properties *of* a block, not nodes of their own.
@@ -576,8 +811,36 @@ function renderGraphExplorer(manifest) {
         `Flattening dispatcher at block offset ${nodeNum} (method not recorded)`
       );
     });
+=======
+  const sampleId = 'sample:current';
+  const sampleLabel = manifest.target_package || (manifest.sha256 || 'this sample').slice(0, 16);
+  addNode(sampleId, sampleLabel, 'Sample');
+
+  if (manifest.predicted_family) {
+    const famId = `family:${manifest.predicted_family}`;
+    addNode(famId, manifest.predicted_family, 'MalwareFamily');
+    addEdge(sampleId, famId, 'CLASSIFIED_AS_FAMILY');
+>>>>>>> c47d6df938ca58831f1efa56b8729a19d1141dbd
   }
 
+  (manifest.ttp_context || []).forEach(t => {
+    const techId = `technique:${t.technique_id}`;
+    addNode(techId, t.name || t.technique_id, 'Technique');
+    addEdge(sampleId, techId, 'MAPS_TO_TECHNIQUE');
+  });
+
+  (manifest.c2_indicators || []).forEach(c2 => {
+    const c2Id = `c2:${c2}`;
+    addNode(c2Id, c2, 'C2Indicator');
+    addEdge(sampleId, c2Id, 'CONTACTS');
+  });
+
+  if (elements.length <= 1) {
+    container.innerHTML = '<div class="graph-placeholder-text">No family/technique/C2 correlations recorded for this sample</div>';
+    return;
+  }
+
+  container.innerHTML = '';
   if (cyInstance) {
     cyInstance.destroy();
     cyInstance = null;
@@ -605,16 +868,18 @@ function renderGraphExplorer(manifest) {
       {
         selector: 'node',
         style: {
+          'background-color': ele => LANDSCAPE_COLORS[ele.data('type')] || '#94a3b8',
           'label': 'data(label)',
-          'color': '#f8fafc',
+          'color': '#e2e8f0',
           'font-size': '10px',
-          'font-family': 'Outfit, sans-serif',
           'text-valign': 'bottom',
-          'text-margin-y': 5,
-          'background-color': '#475569',
-          'width': 26,
-          'height': 26,
+          'text-margin-y': 6,
+          'text-wrap': 'wrap',
+          'text-max-width': '90px',
+          'width': ele => ele.data('type') === 'Sample' ? 46 : 30,
+          'height': ele => ele.data('type') === 'Sample' ? 46 : 30,
           'border-width': 2,
+<<<<<<< HEAD
           'border-color': '#1e293b',
           'transition-property': 'background-color, line-color, target-arrow-color',
           'transition-duration': '0.3s'
@@ -672,6 +937,9 @@ function renderGraphExplorer(manifest) {
           'width': 26,
           'height': 26,
           'color': '#7dd3fc'
+=======
+          'border-color': 'rgba(255,255,255,0.15)',
+>>>>>>> c47d6df938ca58831f1efa56b8729a19d1141dbd
         }
       },
       {
@@ -718,18 +986,19 @@ function renderGraphExplorer(manifest) {
       }
     ],
     layout: {
-      name: 'cose',
+      name: 'concentric',
       animate: false,
       padding: 30,
-      nodeRepulsion: 6500,
-      idealEdgeLength: 60
+      concentric: node => node.data('type') === 'Sample' ? 2 : 1,
+      levelWidth: () => 1,
     }
   });
 
+  cyInstance.ready(() => cyInstance.fit(undefined, 30));
+
   cyInstance.on('tap', 'node', function(evt) {
     const node = evt.target;
-    const tooltip = node.data('tooltip') || node.data('label');
-    console.log("Selected Graph Node:", tooltip);
+    console.log(`${node.data('type')}: ${node.data('label')}`);
   });
 }
 
@@ -766,6 +1035,12 @@ function switchTab(tabId) {
       cyInstance.resize();
       cyInstance.fit();
     }, 100);
+  }
+
+  // Threat Landscape is a global graph view, not tied to the current report —
+  // lazy-load it the first time the tab is opened rather than on every result.
+  if (tabId === 'threatLandscape' && !cyLandscapeInstance) {
+    loadThreatLandscape();
   }
 }
 

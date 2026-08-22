@@ -44,6 +44,13 @@ First-time setup, in order. Assumes **Docker**, **Python 3.12**, and
 [**Ollama**](https://ollama.com) are installed. Report generation runs fully
 offline via Ollama.
 
+> **Ollama is not part of this repo.** Download it yourself from
+> [ollama.com](https://ollama.com) (or drop a portable build under `bin/ollama/`,
+> which is gitignored) — GraphRAG report generation needs it, but everything else
+> (upload, static analysis, forensic anchors, signature/YARA, risk scoring) works
+> without it. Do not commit Ollama binaries/models to this repo — they run
+> hundreds of MB to multiple GB and belong nowhere near git history.
+
 ```bash
 # 1. Create + activate a virtualenv and install dependencies
 python -m venv .venv

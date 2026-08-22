@@ -15,4 +15,5 @@ pandas
 yara-python>=4.5.0
 loguru>=0.7.2
 iterative-stratification>=0.1.7
-pyzipper>=0.3.6
+pyzipper>=0.3.6
+pyelftools>=0.31

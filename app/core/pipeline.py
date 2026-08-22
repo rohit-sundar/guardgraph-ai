@@ -5,6 +5,7 @@ Provides explicit phases for cold path analysis:
 - Phase 1.5: Signature Detection & YARA Scanning
 - Phase 2:   Graph Representation (CFGs & ACFGs)
 - Phase 3:   Forensic Anchor Matching & Subgraph Extraction
+- Phase 3.5: Reverse-Engineering Deep Dive (crypto/DCL/WebView/native resolution)
 - Phase 4:   Feature Engineering (Topology & Obfuscation)
 - Phase 5:   Machine Learning Classification & Intelligence mapping
 - Phase 6:   Risk Scoring & Verdict Formulation
@@ -19,15 +20,24 @@ from loguru import logger
 from app.analysis.ingest import ingest_apk
 from app.analysis.cfg import build_all_method_cfgs, method_key, split_method_signature
 from app.analysis.forensic import ManifestContext, match_anchors, extract_anchor_subgraph
+<<<<<<< HEAD
 from app.analysis.topology import (
     compute_topological_invariants,
     aggregate_subgraph_invariants,
     detect_flattening_outlier,
 )
 from app.analysis.obfuscation import build_obfuscation_signal
+=======
+from app.analysis.topology import compute_topological_invariants, aggregate_subgraph_invariants
+from app.analysis.obfuscation import build_obfuscation_signal, count_reflection_calls
+>>>>>>> c47d6df938ca58831f1efa56b8729a19d1141dbd
 from app.analysis.signatures import match_signatures
 from app.analysis.yara_engine import scan_apk_with_payloads
 from app.analysis.apk_static import extract_c2_indicators
+from app.analysis.crypto_recovery import recover_crypto_configs
+from app.analysis.dcl_tracing import trace_dcl_targets
+from app.analysis.webview_bridge import map_webview_bridges
+from app.analysis.native_bridge import resolve_native_bridges
 from app.ml.classifier import classifier, ttp_classifier
 from app.ml.features import build_feature_vector, build_ttp_feature_vector
 from app.reports.scoring import compute_risk_score
@@ -73,6 +83,12 @@ _MAX_NODE_DETAILS = 3
 _MAX_LITERAL_CHARS = 120
 
 # Limitation text surfaced to the analyst when the gate below fires.
+def _format_resolved_reflection(entry: Dict[str, str]) -> str:
+    """Renders a resolved reflection-target record as a readable "before -> after" call."""
+    short_api = entry["target_api"].replace("L", "", 1).replace(";->", ".").replace("/", ".")
+    return f'{short_api}("{entry["resolved_value"]}") [reflection target resolved]'
+
+
 NO_CLASSIFIER_EVIDENCE_NOTE = (
     "TTP classifier suppressed — no methods were parsed and no forensic anchors "
     "matched, so its predictions would reflect the training-set label prior rather "
@@ -340,6 +356,14 @@ class AnalysisPipeline:
         # topology post-pass can serialize the ones it selects without re-extracting.
         pending_topology: List[Tuple[nx.DiGraph, str, str, Set[str]]] = []
 
+        # Resolved reflection targets (Class.forName / getMethod / etc. that traced
+        # back to a literal), grouped by method so DYNAMIC_REFLECTION subgraphs can
+        # surface the human-readable call instead of a raw invoke instruction.
+        _, _, resolved_reflection = count_reflection_calls(cfgs)
+        resolved_by_method: Dict[str, List[Dict[str, str]]] = {}
+        for entry in resolved_reflection:
+            resolved_by_method.setdefault(entry["method_sig"], []).append(entry)
+
         for method_sig, g in cfgs.items():
             method_node_count = g.number_of_nodes()
             matches = match_anchors(g, manifest)
@@ -367,6 +391,15 @@ class AnalysisPipeline:
                         api for _, data in sub.nodes(data=True)
                         for api in data.get("api_calls", [])
                     ]
+                    if behavior == "DYNAMIC_REFLECTION":
+                        sub_node_ids = set(sub.nodes())
+                        resolved_calls = [
+                            _format_resolved_reflection(entry)
+                            for entry in resolved_by_method.get(method_sig, [])
+                            if entry["node_id"] in sub_node_ids
+                        ]
+                        # Resolved calls go first so they survive the [:10] cap below.
+                        matched_apis = resolved_calls + matched_apis
                     size_ratio = (sub.number_of_nodes() / method_node_count) if method_node_count > 0 else 0.0
                     class_name, method_name = split_method_signature(method_sig)
                     contained_outliers = [n for n in sub.nodes if n in method_outliers]
@@ -407,6 +440,46 @@ class AnalysisPipeline:
             f"suspicious behavioral subgraphs ({drawn} with serialized topology)."
         )
         return all_matches, behavioral_subgraphs, all_strings
+
+    @staticmethod
+    def run_phase3b_re_deepdive(
+        cfgs: Dict[str, nx.DiGraph],
+        ingestion: IngestionResult,
+        apk_obj: Any = None,
+        analysis_obj: Any = None,
+    ) -> Tuple[List[str], List[str], List[str], List[str]]:
+        """
+        Phase 3.5: reverse-engineering deep dive built on the shared
+        static_resolution engine — crypto config recovery, dynamic
+        code-loading target tracing, WebView JS-interface bridge mapping, and
+        JNI/native library symbol correlation. Each returns a list of
+        already-formatted, human-readable finding strings for the manifest
+        and GraphRAG (see each module's dataclass `describe()`).
+
+        apk_obj/analysis_obj are Androguard's raw APK and Analysis objects
+        from Phase 1 — needed here (unlike reflection resolution) because
+        native-bridge resolution reads .so files out of the APK zip and
+        WebView bridge mapping looks up a class's declared methods.
+        """
+        logger.info("[Phase 3.5] Starting Reverse-Engineering Deep Dive...")
+        start_time = time.time()
+
+        crypto_findings = [f.describe() for f in recover_crypto_configs(cfgs)]
+        dcl_findings = [
+            f.describe() for f in trace_dcl_targets(cfgs, payload_assets=ingestion.payload_assets)
+        ]
+        webview_findings = [f.describe() for f in map_webview_bridges(cfgs, analysis_obj=analysis_obj)]
+        native_findings = [
+            f.describe() for f in resolve_native_bridges(cfgs, apk_obj=apk_obj, analysis_obj=analysis_obj)
+        ]
+
+        duration = time.time() - start_time
+        logger.info(
+            f"[Phase 3.5] Completed in {duration:.3f}s. "
+            f"crypto={len(crypto_findings)} dcl={len(dcl_findings)} "
+            f"webview={len(webview_findings)} native={len(native_findings)}"
+        )
+        return crypto_findings, dcl_findings, webview_findings, native_findings
 
     @staticmethod
     def merge_c2_from_strings(ingestion: IngestionResult, all_strings: List[str]) -> IngestionResult:
@@ -456,6 +529,7 @@ class AnalysisPipeline:
                 len(ingestion.activities) + len(ingestion.services)
                 + len(ingestion.receivers)
             ),
+            manifest_parse_failed=ingestion.manifest_parse_failed,
         )
 
         # Legacy family (35) vector — unchanged: first-subgraph invariants.

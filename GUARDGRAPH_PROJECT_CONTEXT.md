@@ -219,18 +219,24 @@ guardgraph-ai/
 │   │   ├── neo4j_client.py      Thin driver wrapper
 │   │   ├── cache.py             Hot-path signature lookup/store
 │   │   └── ontology.py          MITRE ATT&CK Mobile starter ontology loader
+│   ├── static/                  [S9] Web UI (index.html, app.js, styles.css) served by FastAPI at `/`
 │   └── reports/
-│       ├── scoring.py           Risk score formula (matches paper's weights exactly)
-│       └── graphrag.py          Claude-based report generation with anti-hallucination system prompt
+│       ├── scoring.py           [S11] Risk score formula — weights match the paper (0.25/0.20/0.15/
+│       │                        0.15/0.15/0.05/0.05), component internals recalibrated against a
+│       │                        353-APK measured corpus
+│       └── graphrag.py          Local-LLM (Ollama) report generation with anti-hallucination system prompt
 ├── scripts/
 │   ├── train_model.py           CICMalDroid2020 training script skeleton
 │   ├── load_ontology.py         One-time Neo4j ontology seed
 │   ├── download_yara_rules.py   [S4] Downloads + filters Yara-Rules/rules community GitHub repo
+│   ├── score_corpus.py          [S11] Measures all scoring components against the 353-APK corpus
 │   └── test_upload.py           [S4] Local script to POST an APK and pretty-print analysis report
 ├── tests/
 │   ├── test_features.py         Feature vector length invariant test (currently 33)
 │   ├── test_pipeline_phases.py  Pipeline phase contract tests
-│   └── test_signatures_yara.py  [S4] Signature matching + YARA scan unit tests
+│   ├── test_signatures_yara.py  [S4] Signature matching + YARA scan unit tests
+│   ├── test_forensic_gating.py  [S10] Manifest-gate + clause forensic rule tests
+│   └── test_score_calibration.py [S11] Pins calibration constants + verdict band boundaries
 ├── data/{samples,models}/       Gitignored, for local APKs and trained model
 ├── data/signatures/
 │   └── known_hashes.json        [S4] Local signature DB (Anubis, Cerberus, TeaBot, FluBot, etc.)
@@ -245,7 +251,9 @@ guardgraph-ai/
 - Full ingestion → CFG → ACFG → anchor detection → 4-hop subgraph extraction → topological feature mining → obfuscation scoring → risk scoring → Neo4j hot-path cache → GraphRAG report generation chain.
 - **[S4] Signature detection + online triage**: local hash/cert DB lookup → VirusTotal API v3 (detection ratio + clickable report URL) → MalwareBazaar public API. Inserted as Phase 1.5 before CFG construction.
 - **[S4] YARA scanning**: 8 built-in banking-trojan rules + 455 community rules from Yara-Rules/rules GitHub repo, compiled with per-rule validation (broken rules auto-skipped, not crash).
-- Risk scoring formula matches the paper's weights exactly.
+- **[S9] Web UI**: static single-page frontend at `app/static/` (upload form, verdict display, narrative rendering, Cytoscape.js subgraph view), served by FastAPI at `/`. No build step.
+- **[S10] Forensic dictionary is manifest-gated**: each rule now requires a declared permission or intent-filter action before it can fire, plus same-method corroborating clauses. The original flat-OR dictionary ran backwards on a 353-APK corpus (clean apps fired *more* behaviors than malware); see TEAM_CONTEXT.md Session 10.
+- **[S11] Risk scoring is recalibrated against a 353-APK corpus** (220 F-Droid benign + 133 MalwareBazaar malware) via `scripts/score_corpus.py` — component *weights* (0.25/0.20/0.15/0.15/0.15/0.05/0.05) are unchanged from the paper, but three of seven components' internal definitions changed (classifier confidence, obfuscation, IoC) after measurement showed they were dead or inverted; verdict band boundaries are now named constants at 30/60/65, not an even 0/30/60/80/100 cut. See TEAM_CONTEXT.md Session 11 for the full measurement writeup.
 - GraphRAG prompt enforces all five guardrails from the original design doc (grounded-only, "not observed" for gaps, separate deterministic vs. predicted, confidence values required, prioritized actions).
 
 ### What's stubbed (on purpose, fails loudly rather than faking success)
@@ -413,3 +421,20 @@ explicit instructions not to.
 - **`app/core/schemas.py`** updated: Extended `IngestionResult` and `AnalysisManifest` with `c2_indicators`, `cert_anomalies`, `permission_matrix_flags`, `secondary_dex_count`, `accessibility_flags`, `exported_risks`, `payload_assets`, and `dropper_signals`.
 - **`app/reports/scoring.py`** updated: Integrated static anchors into `permission_api_component`, `reputation_component`, and `ioc_component`.
 - **`tests/test_apk_enhancements.py`** [NEW]: Unit test suite covering C2 extraction, permission matrices, cert anomalies, Tor base32 validation, and schema validation. Full test suite passing (8/8 green).
+
+### Web UI (August 18, 2026) | Author: Tarun
+- **`app/static/`** [NEW]: static single-page frontend (`index.html`, `app.js`, `styles.css`) — upload form, verdict/risk-score display, narrative report rendering via `marked.js`, and a Cytoscape.js graph view of behavioral subgraphs. No build step, CDN script tags only.
+- **`app/main.py`** [MOD]: mounts `app/static/` at `/static` and serves `index.html` at `/` when present. No change to any existing API route.
+- A portable local Ollama build (`bin/ollama/`) was committed once by accident during this session (hundreds of MB of CUDA DLLs) and reset out again before ever reaching the remote. `.gitignore` now excludes `bin/ollama/` explicitly; **never add binaries under `bin/` to git** — download Ollama separately per the README.
+
+### Forensic Rule Gating (August 20, 2026, am) | Author: Rohit
+- **`app/analysis/forensic.py`** [REWRITTEN]: `FORENSIC_DICTIONARY` rules used to OR `apis` + `strings` and never read `permissions` — one bare substring anywhere in the app fired a behavior (`"otp"` matched `"hotpink"`; AndroidX's `AccessibilityNodeInfo` reference fired `ACCESSIBILITY_ABUSE` on 207/220 clean F-Droid apps). Measured on a 353-APK corpus (220 benign / 133 malware), the dictionary ran backwards: clean apps fired 3.91 behaviors on average vs. malware's 4.01. Fixed with a manifest `declares` gate (permission or intent-filter action required before a rule is even eligible) plus `clauses` requiring corroborating patterns to hit **in the same method**.
+- **`tests/test_forensic_gating.py`** [NEW]: 209 lines covering the gate/clause logic and the specific substrings that used to false-positive.
+- Full detail: see TEAM_CONTEXT.md Session 10.
+
+### Risk Score Recalibration (August 20, 2026, pm) | Author: Rohit
+- **`scripts/score_corpus.py`** [NEW]: measures every risk-score component against the same 353-APK corpus (220 F-Droid benign + 133 MalwareBazaar malware). Three of seven components were found dead or actively inverted by measurement, not intuition.
+- **`app/reports/scoring.py`** [REWRITTEN internals, weights unchanged]: `classifier_confidence_component` changed from `max(predicted_ttps.values())` to a threshold-normalized evidence mass summed across all predicted techniques. `obfuscation_component` dropped string-entropy and flattening-prevalence scoring (both measured dead/backwards) in favor of manifest-vs-code method-count mismatch + CFG parse-failure rate. `ioc_component` now separates sample-identifying evidence (can reach the cap alone) from circumstantial evidence (jointly capped at 0.35), since generic YARA rule severity used to let breadth alone saturate the component.
+- **Verdict bands** are now named constants (`BAND_LOW_CEILING=30.0`, `BAND_SUSPICIOUS_CEILING=60.0`, `BAND_HIGH_CEILING=65.0`) each derived from its own criterion against the measured corpus, replacing the original even 0/30/60/80/100 split. Result: 212/220 clean apps read `low`, none reaches `high`; 106/133 malware read `high` or `malicious`.
+- **`tests/test_score_calibration.py`** [NEW]: pins the calibration constants and band boundaries.
+- Full detail, including the per-component measurement tables: see TEAM_CONTEXT.md Session 11.

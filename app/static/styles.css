@@ -831,6 +831,146 @@ body {
   color: var(--text-muted);
 }
 
+/* Reverse Engineering Findings tab */
+.re-findings-section {
+  margin-bottom: 1.5rem;
+}
+
+.re-findings-section h5 {
+  color: var(--text-main);
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+
+.re-findings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.re-finding-item {
+  padding: 0.6rem 0.9rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  border-left: 3px solid var(--accent-purple);
+  font-family: 'SF Mono', Consolas, monospace;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.re-finding-item.re-finding-weak {
+  border-left-color: var(--danger);
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.re-empty {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
+/* MITRE ATT&CK Mapping tab */
+.mitre-mapping-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.mitre-item {
+  padding: 0.75rem 1rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  border-left: 3px solid var(--accent-purple);
+}
+
+.mitre-item-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+.mitre-id {
+  font-family: 'SF Mono', Consolas, monospace;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.mitre-name {
+  font-size: 0.92rem;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.mitre-tactic {
+  margin-left: auto;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+}
+
+.mitre-item-footer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.mitre-description {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+/* Correlated Samples tab */
+.related-samples-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.related-sample-item {
+  padding: 0.75rem 1rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  border-left: 3px solid var(--accent-purple);
+}
+
+.related-sample-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.4rem;
+}
+
+.related-sample-row {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  margin-top: 0.3rem;
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.related-sample-row .chip {
+  font-family: 'SF Mono', Consolas, monospace;
+  font-size: 0.75rem;
+}
+
+.chip-danger {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
 /* Graph Explorer */
 .graph-explorer-wrapper {
   background: rgba(15, 23, 42, 0.6);
@@ -893,6 +1033,13 @@ body {
   border-radius: 10px;
   position: relative;
   overflow: hidden;
+}
+
+/* Threat Landscape is a standalone tab, not sharing space with the per-sample
+   report cards above it, so it can take a lot more vertical room than the CFG
+   explorer's 420px — needed once the graph has 30+ correlated samples. */
+#landscapeGraphContainer {
+  height: 720px;
 }
 
 .graph-placeholder-text {

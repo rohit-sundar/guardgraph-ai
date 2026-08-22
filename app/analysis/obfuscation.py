@@ -14,9 +14,27 @@ from collections import Counter
 
 import networkx as nx
 
+<<<<<<< HEAD
 from app.analysis.cfg import method_key, split_method_signature
+=======
+from app.analysis.static_resolution import resolve_invocations
+>>>>>>> c47d6df938ca58831f1efa56b8729a19d1141dbd
 from app.analysis.topology import detect_flattening_outlier
 from app.core.schemas import ObfuscationSignal, OutlierNode
+
+# APIs whose first (or first-after-`this`) string argument names the class/method
+# being reached reflectively. `arg_index` counts registers left-to-right as they
+# appear in the invoke instruction's output (index 0 = `this` for invoke-virtual).
+_REFLECTION_NAME_APIS = {
+    "Ljava/lang/Class;->forName": 0,
+    "Ljava/lang/ClassLoader;->loadClass": 1,
+    "Ljava/lang/Class;->getMethod": 1,
+    "Ljava/lang/Class;->getDeclaredMethod": 1,
+}
+# Counted as a reflection call site but carries no resolvable name argument of
+# its own — the Method object it invokes was already named upstream via one of
+# the APIs above.
+_REFLECTION_INVOKE_SITE = "Ljava/lang/reflect/Method;->invoke"
 
 
 def shannon_entropy(s: str) -> float:
@@ -39,25 +57,44 @@ def compute_string_pool_entropy(all_strings: list[str]) -> float:
     return sum(entropies) / len(entropies) if entropies else 0.0
 
 
-def count_reflection_calls(cfgs: dict[str, nx.DiGraph]) -> tuple[int, int]:
+def count_reflection_calls(cfgs: dict[str, nx.DiGraph]) -> tuple[int, int, list[dict]]:
     """
-    Counts total reflection call sites and how many have unresolvable
-    (non-literal) target arguments. Full constant-propagation taint
-    tracking is NOT implemented here — this is a placeholder that counts
-    reflection call sites only. Wire in real taint analysis before
-    trusting `unresolved` as meaningful; right now it's a stub that
-    returns 0 unresolved by default.
+    Resolves reflection call targets (Class.forName / getMethod /
+    getDeclaredMethod / ClassLoader.loadClass, plus Method.invoke call sites)
+    back to literal strings via the shared register-constant resolver in
+    static_resolution.py — no execution, no cross-method taint.
+
+    Returns (total reflection call sites, unresolved name-bearing sites,
+    resolved call records). A name-bearing call whose argument doesn't trace
+    back to a literal through an unambiguous chain of assignments stays
+    unresolved rather than guessed.
     """
     total = 0
-    unresolved = 0  # TODO: implement constant-propagation to populate this honestly
+    unresolved = 0
+    resolved: list[dict] = []
 
-    for g in cfgs.values():
-        for _, data in g.nodes(data=True):
-            for call in data.get("api_calls", []):
-                if "Ljava/lang/reflect/Method;->invoke" in call:
-                    total += 1
+    for event in resolve_invocations(cfgs):
+        target = event.target_api
+        if _REFLECTION_INVOKE_SITE in target:
+            total += 1
+            continue
+        for api, arg_index in _REFLECTION_NAME_APIS.items():
+            if api not in target:
+                continue
+            total += 1
+            arg = event.arg(arg_index)
+            if arg is not None and arg[0] == "literal":
+                resolved.append({
+                    "node_id": event.node_id,
+                    "method_sig": event.method_sig,
+                    "target_api": api,
+                    "resolved_value": arg[1],
+                })
+            else:
+                unresolved += 1
+            break
 
-    return total, unresolved
+    return total, unresolved, resolved
 
 
 def build_obfuscation_signal(
@@ -69,6 +106,7 @@ def build_obfuscation_signal(
     method_parse_failure_rate: float = 0.0,
     dex_method_count: int | None = None,
     declared_component_count: int | None = None,
+    manifest_parse_failed: bool = False,
 ) -> ObfuscationSignal:
     entropy_score = compute_string_pool_entropy(all_strings)
 
@@ -107,7 +145,7 @@ def build_obfuscation_signal(
     analyzed_methods = len(cfgs)
     flattening_ratio = (flattening_methods / analyzed_methods) if analyzed_methods else 0.0
 
-    reflection_total, reflection_unresolved = count_reflection_calls(cfgs)
+    reflection_total, reflection_unresolved, _resolved_reflection = count_reflection_calls(cfgs)
 
     coverage_notes = []
     if unanalyzed_native_libs > 0:
@@ -123,6 +161,21 @@ def build_obfuscation_signal(
         coverage_notes.append(
             f"{pct}% of relevant methods failed CFG parsing — "
             "analysis coverage reduced; possible heavy obfuscation"
+        )
+
+    # A deliberately corrupted manifest (junk bytes between AXML chunk headers,
+    # forcing Androguard's parser into a byte-by-byte resync that can fail
+    # outright) is a strong, deliberate anti-analysis signal on its own — no
+    # legitimate app has a reason to malform its own manifest. Reported, not
+    # scored: unlike the manifest-vs-code check below, this hasn't been
+    # measured against a corpus, so it doesn't get a calibrated weight — see
+    # obfuscation_component's docstring in scoring.py for why that measurement
+    # comes first here.
+    if manifest_parse_failed:
+        coverage_notes.insert(
+            0, "AndroidManifest.xml failed to parse (corrupted/anti-analysis) — "
+               "permissions, components, and certificate data are unavailable; "
+               "DEX/CFG-level analysis still ran"
         )
 
     # N7: the code that was recovered cannot account for the app the manifest
@@ -168,5 +221,6 @@ def build_obfuscation_signal(
         declared_component_count=(
             None if declared_component_count is None else int(declared_component_count)
         ),
+        manifest_parse_failed=manifest_parse_failed,
         coverage_note=coverage_note,
     )

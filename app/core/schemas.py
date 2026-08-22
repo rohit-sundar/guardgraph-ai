@@ -33,6 +33,15 @@ class IngestionResult(BaseModel):
     exported_risks: list[str] = []
     payload_assets: list[str] = []
     dropper_signals: list[str] = []
+    # True when AndroidManifest.xml failed to parse (Androguard's apk.APK()
+    # construction raised) and ingestion fell back to manifest-independent
+    # DEX/CFG extraction straight off the ZIP. A deliberately corrupted
+    # manifest (junk bytes between AXML chunk headers) is a known
+    # anti-analysis technique — see ingest.py's fallback path. All
+    # manifest-derived fields above (permissions, activities/services/
+    # receivers, cert_thumbprint, accessibility_flags, permission_matrix_flags,
+    # intent_actions) are empty in this state, not "observed absent".
+    manifest_parse_failed: bool = False
 
 
 class CFGNode(BaseModel):
@@ -143,6 +152,13 @@ class ObfuscationSignal(BaseModel):
     # declares is a loader stub, and that is the one anti-analysis signal that
     # measurably separates the corpus. `None` = not measured.
     declared_component_count: int | None = None
+    # AndroidManifest.xml failed to parse (apk.APK() raised) — see ingest.py's
+    # fallback path. Unlike entropy/flattening, this has no plausible benign
+    # explanation: no legitimate build tool produces a structurally corrupted
+    # manifest, so scoring.obfuscation_component weights it directly rather
+    # than requiring corpus measurement first (see that function's docstring
+    # for why every other signal here does require it).
+    manifest_parse_failed: bool = False
     coverage_note: str  # e.g. "3 native libraries not analyzed"
 
 
@@ -210,7 +226,32 @@ class AnalysisManifest(BaseModel):
     exported_risks: list[str] = []
     payload_assets: list[str] = []
     dropper_signals: list[str] = []
-
+    # Reverse-engineering findings from static_resolution.py's shared register/
+    # class propagation engine — resolved crypto configs (Cipher/SecretKeySpec/
+    # IvParameterSpec), traced DexClassLoader-family targets, WebView
+    # addJavascriptInterface bridge exposure, and JNI/native library symbol
+    # correlation. Each entry is a human-readable, already-formatted finding
+    # string (see the respective module's `describe()`); empty on a cache hit,
+    # since these are cold-path-only enrichments.
+    resolved_crypto_configs: list[str] = []
+    resolved_dcl_targets: list[str] = []
+    resolved_webview_bridges: list[str] = []
+    resolved_native_bridges: list[str] = []
+    # MITRE ATT&CK Mobile context for predicted_ttps — same ontology lookup
+    # GraphRAG grounds its narrative in (app/graph/ontology.get_technique_context),
+    # so the UI's technique names/tactics/descriptions can never drift from what
+    # the LLM was told. Each entry: {technique_id, name, tactic, description,
+    # probability}, sorted by probability descending. Empty when predicted_ttps
+    # is empty (nothing predicted, or classifier evidence gate withheld a verdict).
+    ttp_context: list[dict] = []
+    # Other previously-cached samples correlated via shared MITRE techniques,
+    # shared C2 infrastructure, and/or a reused signing certificate — a
+    # graph-native query over Neo4j (app/graph/cache.find_related_samples)
+    # that a flat JSON cache can't do cheaply. Each entry: {sha256, app_name,
+    # family, risk_score, shared_techniques, shared_c2, shared_cert}. Empty
+    # when nothing in the graph overlaps, or when Neo4j is unreachable (fails
+    # closed, same as the rest of cache.py).
+    related_samples: list[dict] = []
 
 
 class RiskScoreBreakdown(BaseModel):

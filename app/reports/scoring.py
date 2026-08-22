@@ -104,6 +104,12 @@ CODE_NOT_RECOVERED_WEIGHT = 0.60
 # methods in its DEX.
 MIN_METHODS_PER_DECLARED_COMPONENT = 2.0
 UNRESOLVED_REFLECTION_WEIGHT = 0.10
+# Same magnitude as CODE_NOT_RECOVERED_WEIGHT — both represent the analyser
+# being structurally denied the evidence it needs, not a measured prevalence
+# like entropy/flattening. A corrupted manifest has no benign explanation (no
+# build tool produces one), so unlike those two this doesn't need corpus
+# measurement to justify scoring it — see obfuscation_component's docstring.
+MANIFEST_CORRUPTED_WEIGHT = 0.60
 
 # ioc_component (N6). The old tiers let three weak signals saturate the cap: a
 # YARA term of severity * 0.3 * min(n, 3) paid 0.765 to any app matching three
@@ -412,6 +418,18 @@ def obfuscation_component(
     On this corpus that leaves the component at 0.0 for every clean app and non-zero
     only where the code genuinely could not be reached. A component that is silent
     when it has nothing to say beats one that pays 6.00 to everybody.
+
+    Post-N7 addition: `manifest_parse_failed` (MANIFEST_CORRUPTED_WEIGHT) is scored
+    without the corpus measurement every other input here required, because it's a
+    different kind of signal — not a prevalence to check for benign confounds, but a
+    binary fact with no plausible innocent explanation (no build tool corrupts its
+    own manifest). Found in practice, not measured in advance: a MalwareBazaar/
+    VirusTotal-confirmed sample (Tanglebot, an mParivahan-spoofing SMS/banking
+    trojan) scored 22.47 "low" before this existed, because its corrupted manifest
+    starved permission_api_component, ttp_severity_component and
+    classifier_confidence_component of the feature vector all three depend on —
+    ~60 of 100 possible points structurally unreachable on one deterministically
+    malicious sample.
     """
     score = 0.0
 
@@ -432,6 +450,18 @@ def obfuscation_component(
     # taint pass turns it on rather than requiring a second change here.
     if obfuscation.unresolved_reflection_targets > 0:
         score += UNRESOLVED_REFLECTION_WEIGHT
+
+    # A structurally corrupted manifest (ingest.py's fallback path fired) means
+    # permission_api_component, ttp_severity_component and
+    # classifier_confidence_component all lose most or all of their evidence too
+    # — the same missing feature vector starves several components at once, not
+    # just this one. Scoring it here is the one place that actually captures
+    # "this sample is deliberately hiding its manifest," which the corpus found
+    # in practice: a MalwareBazaar/VirusTotal-confirmed sample with a corrupted
+    # manifest scored 22.47 ("low") before this weight existed, entirely because
+    # ~60 of the 100 possible points were structurally unreachable without it.
+    if obfuscation.manifest_parse_failed:
+        score += MANIFEST_CORRUPTED_WEIGHT
 
     return min(1.0, score)
 

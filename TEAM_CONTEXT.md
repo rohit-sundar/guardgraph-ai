@@ -6,6 +6,119 @@
 
 ## Change Log
 
+### Session 11 — 2026-08-20 (pm) | Author: Rohit — Recalibrate risk score components and verdict bands against the 353-APK corpus
+
+> **Overview:** `scripts/score_corpus.py` [NEW] measures every score component against 220 F-Droid
+> benign apps + 133 MalwareBazaar malware samples, and the numbers showed three of seven components
+> were dead weight or actively backwards. This is a breaking recalibration (`fix(scoring)!`), not a
+> tuning pass — component *definitions* changed, not just thresholds. Weights themselves (0.25/0.20/
+> 0.15/0.15/0.15/0.05/0.05) are unchanged; what changed is what feeds each one.
+
+**Files changed:** `app/analysis/apk_static.py`, `app/analysis/forensic.py`, `app/analysis/ingest.py`, `app/analysis/obfuscation.py`, `app/core/pipeline.py`, `app/core/schemas.py`, `app/reports/scoring.py`, `scripts/build_ttp_dataset.py`, `.gitignore`, `README.md`
+**Files added:** `scripts/score_corpus.py` [NEW], `tests/test_score_calibration.py` [NEW]
+
+- **`classifier_confidence_component`** — was `max(predicted_ttps.values())`. Now a threshold-normalized
+  evidence mass: each predicted technique's probability is rescaled to its margin past its own
+  per-technique decision boundary (boundaries range 0.10–0.90 by label prevalence, from
+  `ttp_metrics.json`), margins are summed across all predicted techniques, and the sum is squashed
+  through `1 - e^(-mass / 2.5)`. A single confident label no longer carries the full component —
+  breadth across corroborating techniques does. Malware predicts a median of 8 techniques; clean apps
+  mostly predict 0–2.
+- **`obfuscation_component`** — rewritten. Measured over the corpus, the four original inputs were
+  each dead: string-pool entropy never reaches the 7.2 threshold and runs backwards (benign 3.28 vs
+  malware 2.78 mean); `flattening_suspected` fired on 30/30 sampled clean apps; unresolved-reflection
+  is a permanent stub at 0; parse-failure rate was 0.0 across all 353 samples. The component read a
+  near-constant 6.00/15 for both populations. Replaced with **manifest-vs-code mismatch**
+  (`MIN_METHODS_PER_DECLARED_COMPONENT = 2.0` — a DEX with fewer methods than its manifest's declared
+  components could possibly implement is a loader stub; 12 corpus malware fail this, 0 of 220 clean
+  apps come within 28x of the floor) plus CFG parse-failure rate. Entropy and flattening are still
+  measured and reported in the coverage note — just no longer scored.
+- **`ioc_component`** — split evidence into *sample-identifying* (hash/cert signature hits, exact
+  extracted C2 IoCs, secondary DEX payloads — can reach the cap alone) vs. *circumstantial* (generic
+  YARA severity, cert anomalies, dropper signals, forensic C2 strings — jointly capped at 0.35). The
+  old flat tiering let three YARA hits at severity 0.85 pay 0.765 of the cap, and clean apps matched a
+  mean of 10.8 community rules at that severity — YARA rule-author severity is metadata, not
+  specificity, so breadth no longer multiplies.
+- **Accessibility detection** (`apk_static.py`, `forensic.py`) now gates on the declared
+  accessibility-service **intent-filter action**, not the `BIND_ACCESSIBILITY_SERVICE`
+  `<uses-permission>` — apps essentially never declare that permission (it's what the *system* holds
+  over the service). This is what [[Session 10]]'s forensic gating rests on.
+- **Certificate analysis** no longer flags self-signing as an anomaly — Android app signing is
+  self-signing by design; that was a 100%-false-positive rule.
+- **Verdict bands are now named constants** derived from measured score distributions, not an even
+  0/30/60/80/100 cut: `BAND_LOW_CEILING = 30.0` (clean corpus p95), `BAND_SUSPICIOUS_CEILING = 60.0`
+  (above the highest score any of the 220 clean apps reached — `high` is a band the clean corpus never
+  enters), `BAND_HIGH_CEILING = 65.0` (below the malware first-quartile in two separate corpus runs,
+  chosen to be insensitive to day-to-day VirusTotal/MalwareBazaar answer variance). Was 80.0 for the
+  `high`/`malicious` boundary, where only 12 of 133 malware ever reached `malicious`.
+- **Measured result:** 212 of 220 clean apps read `low`, none reaches `high`; 106 of 133 malware read
+  `high` or `malicious`. Reproduce with `python scripts/score_corpus.py` after any analysis-stage change
+  — every constant in `scoring.py`'s calibration block was picked from that script's tables, not intuition.
+- **Tests:** `tests/test_score_calibration.py` [NEW] pins the calibration constants and band boundaries.
+
+---
+
+### Session 10 — 2026-08-20 (am) | Author: Rohit — Gate forensic rules on manifest declarations
+
+> **Symptom:** `FORENSIC_DICTIONARY` ORed `apis` + `strings` per rule and never read the declared
+> `permissions` key, so **one bare substring anywhere in the app** was enough to fire a behavior.
+> `ACCESSIBILITY_ABUSE` hit 207/220 clean F-Droid apps because AndroidX references
+> `AccessibilityNodeInfo` in any app that bundles it; `"otp"` matched `"hotpink"` and `"notPlaced"`;
+> a bare `"password"` matched Jetpack Compose's `isPassword=false` semantics string. Measured on the
+> 220-benign / 133-malware corpus, clean apps fired **3.91** behaviors on average against malware's
+> **4.01** — the dictionary ran backwards. `forensic_anchor_component` is 15% of the deterministic
+> score and cannot learn its way out of a bad rule, so precision matters more here than recall.
+
+**Files changed:** `app/analysis/cfg.py`, `app/analysis/forensic.py` (rewritten), `app/api/routes.py`, `app/core/pipeline.py`, `scripts/build_ttp_dataset.py`, `README.md`
+**Files added:** `tests/test_forensic_gating.py` [NEW]
+
+- **Manifest `declares` gate** — a rule can require the app to have declared a specific capability
+  (permission, or an intent-filter action) before it is even eligible to fire. Measured on the corpus:
+  gating `SMS_*` behaviors on an SMS permission splits 5/220 clean from 81/133 malware; gating
+  accessibility abuse on the service's intent-filter action (not the `<uses-permission>`, which real
+  trojans almost never declare) splits 7/220 from 75/133. This one change does most of the precision
+  recovery.
+- **`clauses`** — each rule is now a list of alternatives, and every populated key (`apis`, `strings`,
+  `permissions`) within one alternative must match **inside the same method** before it counts. This is
+  how "a WebView call near a credential string, in the same method" is expressed without either half
+  firing alone — the old flat OR treated them as independent evidence.
+- **Rewritten string vocabularies** — OTP/credential substrings are now delimited forms only
+  (`"otp_code"`, `"one time password"`, `"verification code"`, …) instead of bare `"otp"` / `"password"`,
+  which is what let `hotpink`/`notPlaced`/`isPassword=false` match in the first place.
+- **C2 endpoint strings tightened** to things specific enough to stand alone as an anchor
+  (`api.telegram.org/bot`, `firebaseio.com`, `.onion`, `gate.php`, `/panel/`) — bare `http://` /
+  `HttpURLConnection;->connect` were removed; "this app makes an HTTP request" is a capability, not
+  evidence. Exact C2 IoCs are extracted separately by `apk_static.extract_c2_indicators` and scored via
+  `ioc_component`, not `forensic_anchor_component`.
+- **Tests:** `tests/test_forensic_gating.py` [NEW] — 209 lines covering the gate/clause logic and the
+  specific false-positive substrings this fix removes.
+
+---
+
+### Session 9 — 2026-08-18 | Author: Tarun — Web UI + basic implementation
+
+> **Overview:** Added a static single-page web UI served directly by FastAPI, so `/analyze` has a
+> human-facing frontend instead of curl/Swagger-only access. No new backend endpoints — the UI calls
+> the existing `/analyze` route.
+
+**Files changed:** `app/api/routes.py`, `app/core/schemas.py`, `app/graph/cache.py`, `app/graph/ontology.py`, `app/main.py`, `.gitignore`
+**Files added:** `app/static/index.html` [NEW], `app/static/app.js` [NEW, 595 lines], `app/static/styles.css` [NEW, 937 lines]
+
+- **`app/main.py`** [MOD]: mounts `app/static/` at `/static` and serves `index.html` at `/` when the
+  directory exists — the API is a no-op change for anyone hitting `/analyze` directly.
+- **`app/static/`** [NEW]: upload form + risk-score/verdict-band display + narrative report rendering
+  (via `marked.js`) + a Cytoscape.js graph view for behavioral subgraphs. Static assets only — no
+  build step, no framework, loaded via CDN `<script>` tags (`marked`, `cytoscape`) plus Google Fonts.
+- **`.gitignore`** [MOD]: `bin/ollama/` added — a portable Ollama build some contributors keep locally
+  for GPU-accelerated report generation is **not part of this repo**; see the README note under
+  Quickstart. It was committed once by accident (hundreds of MB of CUDA DLLs) and immediately reset
+  out before ever reaching the remote — purged from local `.git` via `git gc --prune=now` after
+  expiring the reflog. Never add binaries under `bin/` to git.
+- **`app/graph/cache.py`, `app/graph/ontology.py`** [MOD]: minor fixes surfaced while wiring the UI
+  end-to-end against a live Neo4j instance — not independently itemized here; see the diff.
+
+---
+
 ### Session 8 — 2026-07-27 | Author: Rohit — Make the TTP dataset builder actually produce a dataset (AES extraction, parallel downloads, crash-resumable phases)
 
 > **Overview:** `scripts/build_ttp_dataset.py` silently produced zero Stage A rows — every MalwareBazaar download was discarded before Androguard ever saw it. Fixed the download path, then made the whole builder survivable: downloads and analysis are now separate resumable phases, progress is logged to disk, and dataset rows are written as they are produced instead of once at the end.
@@ -313,8 +426,13 @@ guardgraph-ai/
 │   │   ├── neo4j_client.py       Thin driver wrapper (graceful connect failure)
 │   │   ├── cache.py              Hot-path signature lookup/store
 │   │   └── ontology.py           MITRE ATT&CK Mobile starter ontology loader
+│   ├── static/                   [NEW S9] Web UI served by FastAPI at `/` — upload form, verdict display,
+│   │   ├── index.html            narrative rendering (marked.js), behavioral-subgraph graph view
+│   │   ├── app.js                (Cytoscape.js). No build step — CDN script tags. Static only, not tracked
+│   │   └── styles.css            in this doc file-by-file below (see Session 9 change log entry).
 │   └── reports/
-│       ├── scoring.py            Risk score formula (7-component, 0-100)
+│       ├── scoring.py            [S11] Risk score formula (7-component, 0-100), calibration constants,
+│       │                         named verdict-band constants — see §5
 │       └── graphrag.py           Ollama-based report generation (anti-hallucination system prompt)
 ├── scripts/
 │   ├── train_model.py            family training + [S5] --target ttp (BR + CC/LP benchmark)
@@ -323,12 +441,17 @@ guardgraph-ai/
 │   │                             [S8] two resumable phases (--phase download|analyze), manifest, incremental CSV
 │   ├── load_ontology.py          Neo4j ontology seed ([S5] full Mobile ontology by default)
 │   ├── download_yara_rules.py    [NEW S4] Downloads + filters Yara-Rules/rules community repo
+│   ├── score_corpus.py           [NEW S11] Measures every scoring component against the 353-APK corpus
+│   │                             (220 F-Droid benign + 133 MalwareBazaar malware) — source of every
+│   │                             calibration constant and verdict-band boundary in scoring.py
 │   └── test_upload.py            [NEW S4] Local test script to POST an APK and pretty-print the report
 ├── tests/
 │   ├── test_features.py          Feature vector length invariant test (MUST always pass — currently 33)
 │   ├── test_pipeline_phases.py   Phase contract and integration tests
 │   ├── test_signatures_yara.py   [NEW S4] Signature matching + YARA scan unit tests
-│   └── test_apk_enhancements.py  [NEW S7] Static malware enrichments unit tests
+│   ├── test_apk_enhancements.py  [NEW S7] Static malware enrichments unit tests
+│   ├── test_forensic_gating.py   [NEW S10] Manifest-gate + same-method-clause forensic rule tests
+│   └── test_score_calibration.py [NEW S11] Pins calibration constants + verdict band boundaries
 ├── data/
 │   ├── samples/                  (gitignored) APK files for testing
 │   ├── models/                   (gitignored) trained XGBoost model goes here
@@ -355,11 +478,13 @@ guardgraph-ai/
 | CFG/ACFG construction | `cfg.py` | Per-method, NetworkX DiGraph |
 | Relevance pre-filter | `cfg.py` | `is_method_relevant()` — skips methods with no forensic-dict overlap |
 | Parse failure tracking | `cfg.py` | Returns `(graphs, failure_rate)` tuple |
-| Forensic dictionary + anchor detection | `forensic.py` | 6 behavior categories |
+| Forensic dictionary + anchor detection | `forensic.py` | 6 behavior categories. **[S10] Each rule now gates on a manifest declaration (permission or intent-filter action) and groups patterns into clauses that must corroborate within one method** — the old flat OR read backwards on the corpus (clean apps fired more behaviors than malware) |
 | 4-hop subgraph extraction | `forensic.py` | `extract_anchor_subgraph()` |
 | Topological feature mining | `topology.py` | Degree, closeness, clustering centrality |
-| Flattening outlier detection | `topology.py` | Z-score on degree distribution |
-| Shannon entropy scoring | `obfuscation.py` | Over full string pool |
+| Flattening outlier detection | `topology.py` | Z-score on degree distribution. **[S11] Measured but not scored** — no lift over the corpus (benign/malware p75 nearly identical) |
+| Shannon entropy scoring | `obfuscation.py` | Over full string pool. **[S11] Measured but not scored** — corpus mean runs backwards (benign > malware) and never reaches the threshold |
+| **[S9] Web UI** | `app/static/` | Upload form + verdict display + narrative rendering + Cytoscape.js subgraph view. Served by FastAPI at `/`, no build step |
+| **[S11] Corpus scoring/calibration tool** | `score_corpus.py` | Measures all 7 components + verdict bands against 220 benign + 133 malware; source of every constant in `scoring.py`'s calibration block |
 | Reflection call counting | `obfuscation.py` | Call sites counted; resolution is stubbed |
 | Coverage note generation | `obfuscation.py` | Includes parse failure rate >= 10% |
 | **[S4] Local signature matching** | `signatures.py` | SHA-256 + cert thumbprint against `data/signatures/known_hashes.json` |
@@ -431,20 +556,36 @@ upload → SHA-256 → Neo4j lookup → cache MISS
 
 ---
 
-## 5. Risk Scoring Formula (Current — Session 2)
+## 5. Risk Scoring Formula (Current — Session 11, recalibrated against the 353-APK corpus)
 
 ```
 Risk Score (0–100) =
-    0.25 × classifier_confidence       max family probability
-  + 0.20 × permission_api_risk         weighted dangerous permissions
-  + 0.15 × ttp_severity                MITRE T-number severities (via FAMILY_TO_TTPS bridge)
-  + 0.15 × forensic_anchor             NEW — deterministic API matches, behavior-severity weighted
-  + 0.15 × obfuscation / coverage      entropy + flattening + parse failure rate
+    0.25 × classifier_confidence       threshold-normalized evidence mass across ALL predicted
+                                        techniques (not max probability) — Session 11
+  + 0.20 × permission_api_risk         weighted dangerous permissions + permission matrix flags
+  + 0.15 × ttp_severity                MITRE T-number severities (direct multi-label TTP model, Session 5)
+  + 0.15 × forensic_anchor             manifest-gated + same-method-clause anchor matches — Session 10
+  + 0.15 × obfuscation / coverage      manifest-vs-code mismatch + CFG parse failure rate — Session 11
+                                        (string entropy & flattening measured/reported, NOT scored — both
+                                        measured dead/inverted over the corpus)
   + 0.05 × reputation                  Neo4j cache prior score
-  + 0.05 × ioc                         C2 indicator count
+  + 0.05 × ioc                         sample-identifying evidence (uncapped-ish) + circumstantial
+                                        evidence (jointly capped at 0.35) — Session 11
 ```
 
-**Verdict bands:** 0–30 Low | 31–60 Suspicious | 61–80 High | 81–100 Malicious
+**Verdict bands (Session 11, named constants in `scoring.py`, derived from measured score distributions —
+reproduce with `python scripts/score_corpus.py`):**
+`BAND_LOW_CEILING = 30.0` | `BAND_SUSPICIOUS_CEILING = 60.0` | `BAND_HIGH_CEILING = 65.0`
+
+```
+0–30    Low          (clean corpus p95 = 26.73; 212/220 clean apps land here)
+31–60   Suspicious   (highest score any of the 220 clean apps reached is 53.33 — `high` is a
+                       band the clean corpus never enters)
+61–65   High         (below the malware first-quartile in two corpus runs — chosen to tolerate
+                       day-to-day VirusTotal/MalwareBazaar answer variance)
+66–100  Malicious    (106/133 corpus malware read High or Malicious; was 80.0 before Session 11,
+                       where only 12/133 malware ever reached Malicious)
+```
 
 ### Forensic Anchor Behavior Severity Weights (BEHAVIOR_SEVERITY in scoring.py)
 
@@ -832,4 +973,4 @@ python scripts/train_model.py
 
 ---
 
-*Document generated: 2026-07-06 | Updated: 2026-07-16 | Maintained by: AI Assistant (Antigravity) on behalf of the GuardGraph AI team*
+*Document generated: 2026-07-06 | Updated: 2026-08-21 | Maintained by: AI Assistant (Claude Code) on behalf of the GuardGraph AI team*

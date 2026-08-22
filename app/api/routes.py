@@ -27,12 +27,31 @@ import uuid
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from loguru import logger
 
-from app.graph.cache import lookup_signature, store_signature
+from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape
+from app.graph.ontology import get_technique_context
 from app.reports.scoring import compute_risk_score, _band_for
 from app.core.config import settings
 from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown, SignatureYaraResult
 
 router = APIRouter()
+
+
+def _build_ttp_context(predicted_ttps: dict[str, float]) -> list[dict]:
+    """
+    Merges predicted_ttps (technique_id -> probability) with MITRE ATT&CK Mobile
+    ontology facts (name/tactic/description) via the same get_technique_context()
+    GraphRAG grounds its narrative in — so the UI can never show a technique name
+    the LLM wasn't also given. Sorted by probability descending.
+    """
+    if not predicted_ttps:
+        return []
+    context = get_technique_context(list(predicted_ttps.keys()))
+    rows = [
+        {**ctx, "probability": predicted_ttps.get(ctx["technique_id"], 0.0)}
+        for ctx in context
+    ]
+    rows.sort(key=lambda r: r["probability"], reverse=True)
+    return rows
 
 # Score assigned when the APK cannot be parsed at all. Deliberately mid-band
 # ("suspicious") rather than 0: a file that defeats Androguard's AXML parser or
@@ -45,6 +64,16 @@ router = APIRouter()
 # reading "suspicious", not "medium" — pinned by
 # test_unparseable_score_still_reads_suspicious.
 UNPARSEABLE_RISK_SCORE = 50.0
+
+
+@router.get("/graph/landscape")
+async def graph_landscape(limit: int = 30):
+    """
+    Cytoscape-ready snapshot of the whole correlation graph (Sample/
+    MalwareFamily/Technique/C2Indicator/Certificate) for the UI's "Threat
+    Landscape" tab — not tied to any single analysis run.
+    """
+    return get_threat_landscape(limit=limit)
 
 
 @router.post("/analyze", response_model=AnalysisReport)
@@ -92,13 +121,15 @@ def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
     the hot path after the underlying cause is fixed.
     """
     from app.analysis.ingest import compute_sha256
+    from app.analysis.failure_diagnostics import probable_cause
 
     try:
         sha256 = compute_sha256(filepath)
     except Exception:  # unreadable temp file — nothing left to report on
         sha256 = ""
 
-    reason = f"{type(exc).__name__}: {exc}"
+    label, explanation = probable_cause(exc)
+    raw_reason = f"{type(exc).__name__}: {exc}"
     obfuscation = ObfuscationSignal(
         string_entropy_score=0.0,
         flattening_suspected=False,
@@ -106,7 +137,10 @@ def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
         reflection_call_count=0,
         unresolved_reflection_targets=0,
         method_parse_failure_rate=1.0,  # nothing parsed — 100% of the app is a gap
-        coverage_note="static analysis aborted — the APK could not be parsed",
+        coverage_note=(
+            f"static analysis aborted — probable cause: {label}. {explanation} "
+            f"(raw error: {raw_reason})"
+        ),
     )
     manifest = AnalysisManifest(
         target_package=None,
@@ -136,23 +170,33 @@ def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
         verdict_band=_band_for(UNPARSEABLE_RISK_SCORE),
         zero_day_indicator=False,
     )
+
+    # coverage_note (above) already carries the probable-cause explanation and
+    # raw error, and generate_report's own limitations list leads with it —
+    # these two just add framing that isn't in the coverage note itself.
+    limitations = [
+        "ANALYSIS INCOMPLETE: the APK could not be parsed, so no permissions, "
+        "forensic anchors, IoCs or TTPs were extracted. Every field in this "
+        "manifest is empty because nothing was observed, not because nothing "
+        "is there.",
+        f"Score fixed at {UNPARSEABLE_RISK_SCORE} — not derived from evidence.",
+    ]
+
+    # Still run the LLM report instead of a hardcoded placeholder — the
+    # grounding prompt's "say not observed, don't invent evidence" rule
+    # applies just as well to an empty manifest as a full one, and an
+    # analyst gets a written explanation of what's known and why instead of
+    # a dead end. run_phase7_reporting already has its own fallback if
+    # Ollama itself is unreachable, so this never raises.
+    from app.core.pipeline import AnalysisPipeline
+    narrative, report_limitations = AnalysisPipeline.run_phase7_reporting(manifest, risk_score)
+    limitations = limitations + report_limitations
+
     return AnalysisReport(
         manifest=manifest,
         risk_score=risk_score,
-        narrative_report=(
-            "[No narrative generated — static analysis could not parse this APK.]"
-        ),
-        limitations=[
-            "ANALYSIS INCOMPLETE: the APK could not be parsed, so no permissions, "
-            "forensic anchors, IoCs or TTPs were extracted. Every field in this "
-            "manifest is empty because nothing was observed, not because nothing "
-            "is there.",
-            f"Parser failure: {reason}",
-            "A file that defeats the parser is frequently doing so deliberately "
-            "(malformed AXML, corrupted ZIP central directory). Treat the sample "
-            "as unverified and triage it manually.",
-            f"Score fixed at {UNPARSEABLE_RISK_SCORE} — not derived from evidence.",
-        ],
+        narrative_report=narrative,
+        limitations=limitations,
     )
 
 
@@ -227,6 +271,12 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             predicted_ttps=cached_ttps,
             predicted_family=cached.get("family"),
             family_confidence=None,
+            ttp_context=_build_ttp_context(cached_ttps),
+            related_samples=find_related_samples(
+                list(cached_ttps.keys()), ingestion.c2_indicators,
+                exclude_sha256=ingestion.sha256,
+                cert_thumbprint=ingestion.cert_thumbprint,
+            ),
             signature_yara=cached_sig_yara,
             permissions=cached_permissions,
             c2_indicators=ingestion.c2_indicators,
@@ -268,6 +318,11 @@ def _run_analysis(filepath: str) -> AnalysisReport:
     # Merge C2 IoCs found in DEX string literals into ingestion
     ingestion = AnalysisPipeline.merge_c2_from_strings(ingestion, all_strings)
 
+    # --- Phase 3.5: Reverse-Engineering Deep Dive (crypto/DCL/WebView/native) ---
+    resolved_crypto, resolved_dcl, resolved_webview, resolved_native = (
+        AnalysisPipeline.run_phase3b_re_deepdive(cfgs, ingestion, apk_obj=apk_obj, analysis_obj=analysis_obj)
+    )
+
     # --- Phase 4: Feature Engineering (family 35-vec + multi-label TTP 181-vec) ---
     obfuscation, feature_vector, ttp_feature_vector, mean_density, total_nodes = (
         AnalysisPipeline.run_phase4_feature_engineering(
@@ -303,6 +358,12 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         predicted_ttps=predicted_ttps,
         predicted_family=predicted_family,
         family_confidence=family_confidence,
+        ttp_context=_build_ttp_context(predicted_ttps),
+        related_samples=find_related_samples(
+            list(predicted_ttps.keys()), ingestion.c2_indicators,
+            exclude_sha256=ingestion.sha256,
+            cert_thumbprint=ingestion.cert_thumbprint,
+        ),
         signature_yara=sig_yara,
         permissions=ingestion.permissions,
         c2_indicators=ingestion.c2_indicators,
@@ -313,6 +374,10 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         exported_risks=ingestion.exported_risks,
         payload_assets=ingestion.payload_assets,
         dropper_signals=ingestion.dropper_signals,
+        resolved_crypto_configs=resolved_crypto,
+        resolved_dcl_targets=resolved_dcl,
+        resolved_webview_bridges=resolved_webview,
+        resolved_native_bridges=resolved_native,
     )
 
     # --- Phase 6: Risk Scoring (includes static malware anchors) ---
@@ -345,6 +410,9 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             permissions=ingestion.permissions,
             risk_components=risk_score.model_dump(),
             obfuscation_data=obfuscation.model_dump(),
+            package_name=ingestion.package_name,
+            c2_indicators=ingestion.c2_indicators,
+            cert_thumbprint=ingestion.cert_thumbprint,
         )
 
     return AnalysisReport(

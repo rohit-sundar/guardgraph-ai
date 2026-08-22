@@ -129,6 +129,10 @@ def enrich_acfg(g: nx.DiGraph, method_analysis) -> nx.DiGraph:
     string literals, and any permission-relevant constants found in that
     block's instruction stream.
 
+    Also stores the raw (mnemonic, output) instruction stream per node under
+    "instr_stream" — obfuscation.py's reflection-target resolver walks this
+    to do register-constant propagation without re-touching Androguard.
+
     Mutates and returns the same graph for convenience.
     """
     blocks_by_start = {
@@ -142,15 +146,17 @@ def enrich_acfg(g: nx.DiGraph, method_analysis) -> nx.DiGraph:
         opcode_freq: dict[str, int] = {}
         api_calls: list[str] = []
         string_literals: list[str] = []
+        instr_stream: list[tuple[str, str]] = []
 
         for instr in block.get_instructions():
             mnemonic = instr.get_name()
             opcode_freq[mnemonic] = opcode_freq.get(mnemonic, 0) + 1
 
-            output = instr.get_output()
+            output = instr.get_output().strip()
+            instr_stream.append((mnemonic, output))
             if mnemonic.startswith("invoke"):
-                api_calls.append(output.strip())
-            if mnemonic == "const-string":
+                api_calls.append(output)
+            if mnemonic == "const-string" or mnemonic == "const-string/jumbo":
                 literal = parse_const_string(output)
                 if literal is not None:
                     string_literals.append(literal)
@@ -158,6 +164,7 @@ def enrich_acfg(g: nx.DiGraph, method_analysis) -> nx.DiGraph:
         g.nodes[node_id]["opcode_frequency"] = opcode_freq
         g.nodes[node_id]["api_calls"] = api_calls
         g.nodes[node_id]["string_literals"] = string_literals
+        g.nodes[node_id]["instr_stream"] = instr_stream
 
     return g
 
