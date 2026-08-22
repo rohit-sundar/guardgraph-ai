@@ -160,16 +160,28 @@ function renderResults(data) {
   const risk = data.risk_score || {};
 
   // Verdict tag & score
-  const verdict = (risk.verdict_band || 'UNKNOWN').toUpperCase();
+  const bandRaw = (risk.verdict_band || 'unknown').toLowerCase();
+  const knownBands = ['low', 'medium', 'suspicious', 'high', 'malicious'];
+  const isUnparseable = (data.limitations || []).some(
+    l => l.startsWith('ANALYSIS INCOMPLETE')
+  );
+  const bandClass = isUnparseable
+    ? 'unknown'
+    : (knownBands.includes(bandRaw) ? bandRaw : 'unknown');
+
   const verdictTag = document.getElementById('verdictTag');
-  verdictTag.textContent = verdict;
+  verdictTag.textContent = bandRaw.toUpperCase();
+  verdictTag.className = `verdict-tag verdict-${bandClass}`;
+
+  const gaugeFill = document.getElementById('gaugeFill');
+  gaugeFill.setAttribute('class', `gauge-fill gauge-${bandClass}`);
 
   const score = risk.total_score || 0;
   document.getElementById('scoreNum').textContent = score.toFixed(1);
 
   // Update gauge stroke-dashoffset (max 264)
   const strokeOffset = 264 - (264 * (score / 100));
-  document.getElementById('gaugeFill').style.strokeDashoffset = strokeOffset;
+  gaugeFill.style.strokeDashoffset = strokeOffset;
 
   // Badges
   if (risk.zero_day_indicator) {
