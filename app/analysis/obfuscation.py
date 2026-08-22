@@ -14,11 +14,8 @@ from collections import Counter
 
 import networkx as nx
 
-<<<<<<< HEAD
 from app.analysis.cfg import method_key, split_method_signature
-=======
 from app.analysis.static_resolution import resolve_invocations
->>>>>>> c47d6df938ca58831f1efa56b8729a19d1141dbd
 from app.analysis.topology import detect_flattening_outlier
 from app.core.schemas import ObfuscationSignal, OutlierNode
 

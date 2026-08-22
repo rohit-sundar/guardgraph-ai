@@ -183,7 +183,12 @@ function renderResults(data) {
   const strokeOffset = 264 - (264 * (score / 100));
   gaugeFill.style.strokeDashoffset = strokeOffset;
 
-  // Badges
+  // Badges — explicitly reset both first. Without this, a badge shown for
+  // one sample stayed visible on the next report even when that sample's
+  // own zero_day_indicator/is_known_malware was false, since .remove('hidden')
+  // was only ever called on the truthy branch.
+  document.getElementById('zeroDayBadge').classList.add('hidden');
+  document.getElementById('knownMalwareBadge').classList.add('hidden');
   if (risk.zero_day_indicator) {
     document.getElementById('zeroDayBadge').classList.remove('hidden');
   }
@@ -194,9 +199,30 @@ function renderResults(data) {
   // Metadata
   document.getElementById('targetPackage').textContent = manifest.target_package || 'Unknown';
   document.getElementById('targetHash').textContent = manifest.sha256 || 'Unknown';
-  document.getElementById('familyBadge').textContent = manifest.predicted_family || 'trojan.btmob/spyagent';
+  document.getElementById('familyBadge').textContent = manifest.predicted_family || 'Unclassified';
   document.getElementById('secondaryDexCount').textContent = `${manifest.secondary_dex_count || 0} payload assets`;
-  document.getElementById('certAnomalies').textContent = (manifest.cert_anomalies || ['Self-Signed']).join(', ');
+  const certAnomalies = manifest.cert_anomalies || [];
+  const certEl = document.getElementById('certAnomalies');
+  certEl.textContent = certAnomalies.length > 0 ? certAnomalies.join(', ') : 'None detected';
+  certEl.className = certAnomalies.length > 0 ? 'spec-value warning' : 'spec-value';
+
+  // VirusTotal status — signature_yara is null entirely on a cache hit (Phase
+  // 1.5 is skipped, see AnalysisManifest.signature_yara's docstring), which is
+  // a different state from "queried and found nothing" and must read as such
+  // rather than silently reusing whatever the previous sample's element showed.
+  const vtEl = document.getElementById('vtStatus');
+  const vtSigMatches = (manifest.signature_yara && manifest.signature_yara.signature_matches) || [];
+  const vtMatch = vtSigMatches.find(s => s.source === 'VirusTotal' && s.detection_ratio);
+  if (!manifest.signature_yara) {
+    vtEl.textContent = 'Not queried (cached result)';
+    vtEl.className = 'spec-value';
+  } else if (vtMatch) {
+    vtEl.textContent = vtMatch.detection_ratio + ' Engines Flagged';
+    vtEl.className = 'spec-value highlight-red';
+  } else {
+    vtEl.textContent = 'No VirusTotal detections';
+    vtEl.className = 'spec-value';
+  }
 
   // 1. AI Report Markdown
   const markdownText = data.narrative_report || 'No report generated.';
@@ -235,11 +261,6 @@ function renderResults(data) {
       `;
       yaraContainer.appendChild(card);
     });
-
-    // Update VT status from actual data
-    if (sigMatches[0] && sigMatches[0].detection_ratio) {
-      document.getElementById('vtStatus').textContent = sigMatches[0].detection_ratio + ' Engines Flagged';
-    }
   }
 
   // Render YARA rule matches
@@ -523,6 +544,36 @@ function renderRelatedSamples(manifest) {
 let cyInstance = null;
 let cyLandscapeInstance = null;
 
+// Every graph node's id follows "type:value" (e.g. "technique:T1582",
+// "cert:ABCDEF..."), matching both get_threat_landscape's Python side and
+// renderGraphExplorer's client-built ids — so the raw MITRE ID / thumbprint
+// is always recoverable from the id even though the node's visible label
+// shows the human-readable name instead.
+function formatNodeDetails(node) {
+  const type = node.data('type') || '';
+  const label = node.data('label') || '';
+  const id = node.data('id') || '';
+  const rawValue = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id;
+
+  let idHtml = '';
+  if (type === 'Technique' || type === 'Certificate') {
+    idHtml = `<span class="node-detail-id">${rawValue}</span>`;
+  } else if (type === 'Sample' && rawValue !== 'current' && rawValue !== label) {
+    idHtml = `<span class="node-detail-id">${rawValue.length > 24 ? rawValue.slice(0, 20) + '…' : rawValue}</span>`;
+  }
+  return `<span class="node-detail-name">${type}: ${label}</span>${idHtml}`;
+}
+
+function showNodeDetails(targetElId, node) {
+  const el = document.getElementById(targetElId);
+  if (el) el.innerHTML = formatNodeDetails(node);
+}
+
+function clearNodeDetails(targetElId) {
+  const el = document.getElementById(targetElId);
+  if (el) el.innerHTML = '';
+}
+
 const LANDSCAPE_COLORS = {
   Sample: '#eab308',
   MalwareFamily: '#84cc16',
@@ -535,6 +586,7 @@ async function loadThreatLandscape() {
   const container = document.getElementById('landscapeGraphContainer');
   if (!container || typeof cytoscape === 'undefined') return;
   container.innerHTML = '<div class="graph-placeholder-text">Loading from Neo4j…</div>';
+  clearNodeDetails('landscapeNodeDetails');
 
   let elements;
   try {
@@ -614,7 +666,7 @@ async function loadThreatLandscape() {
 
   cyLandscapeInstance.on('tap', 'node', function (evt) {
     const node = evt.target;
-    console.log(`${node.data('type')}: ${node.data('label')}`);
+    showNodeDetails('landscapeNodeDetails', node);
 
     const neighborhood = node.closedNeighborhood();
     cyLandscapeInstance.elements().not(neighborhood).addClass('landscape-faded').removeClass('landscape-highlighted');
@@ -625,6 +677,7 @@ async function loadThreatLandscape() {
   cyLandscapeInstance.on('tap', function (evt) {
     if (evt.target === cyLandscapeInstance) {
       cyLandscapeInstance.elements().removeClass('landscape-faded landscape-highlighted');
+      clearNodeDetails('landscapeNodeDetails');
     }
   });
 }
@@ -653,24 +706,8 @@ function shortenMethodSig(o) {
 function renderGraphExplorer(manifest) {
   const container = document.getElementById('cyGraphContainer');
   if (!container || typeof cytoscape === 'undefined') return;
+  clearNodeDetails('cyGraphNodeDetails');
 
-<<<<<<< HEAD
-  const obf = manifest.obfuscation || {};
-  const outlierNodes = obf.flattening_outlier_nodes || [];
-  const subgraphs = manifest.behavioral_subgraphs || [];
-
-  const outlierDetails = obf.flattening_outlier_details || [];
-
-  const elements = [];
-  const nodeSet = new Set();
-
-  function addNode(id, label, type, tooltip, parent) {
-    if (!nodeSet.has(id)) {
-      nodeSet.add(id);
-      const data = { id, label, type, tooltip };
-      if (parent) data.parent = parent;
-      elements.push({ data });
-=======
   // This sample's own neighborhood in the same Neo4j graph the Threat
   // Landscape tab draws from — real predicted family/techniques/C2, not a
   // synthetic mock of CFG structure. Built entirely from fields already on
@@ -682,7 +719,6 @@ function renderGraphExplorer(manifest) {
     if (!nodeSet.has(id)) {
       nodeSet.add(id);
       elements.push({ data: { id, label, type } });
->>>>>>> c47d6df938ca58831f1efa56b8729a19d1141dbd
     }
   }
   function addEdge(source, target, label) {
@@ -691,127 +727,6 @@ function renderGraphExplorer(manifest) {
     });
   }
 
-<<<<<<< HEAD
-  // Every node drawn below is a real basic block from the backend's induced
-  // subgraph, and every edge is a real control transition. Behavior flag and
-  // matched API are properties *of* a block, not nodes of their own.
-  //
-  // Subgraphs are merged per method first. Several anchors in one method produce
-  // overlapping 4-hop windows over the SAME CFG, so their block ids are identical
-  // by construction. Drawing them as separate components made the later ones
-  // dedupe to nothing — an empty compound box — and stole the purple styling from
-  // their anchors, which the earlier window had already added as plain blocks.
-  const byMethod = new Map();
-
-  subgraphs.forEach(sg => {
-    const topo = sg.topology;
-    if (!topo || !(topo.nodes || []).length) return;
-
-    const key = sg.method_signature || shortenMethodSig(sg);
-    let m = byMethod.get(key);
-    if (!m) {
-      m = {
-        label: shortenMethodSig(sg),
-        signature: sg.method_signature || '',
-        nodes: new Map(),
-        edges: new Map(),
-        anchorFlags: new Map(),
-        matched: new Set()
-      };
-      byMethod.set(key, m);
-    }
-
-    (sg.matched_apis || []).forEach(a => m.matched.add(a));
-
-    (topo.nodes || []).forEach(n => {
-      const prev = m.nodes.get(n.id);
-      if (prev) {
-        // Same block seen through another window: keep whichever view found it
-        // interesting rather than letting the first arrival win.
-        prev.is_anchor = prev.is_anchor || n.is_anchor;
-        prev.is_outlier = prev.is_outlier || n.is_outlier;
-      } else {
-        m.nodes.set(n.id, Object.assign({}, n));
-      }
-      if (n.is_anchor) {
-        if (!m.anchorFlags.has(n.id)) m.anchorFlags.set(n.id, new Set());
-        m.anchorFlags.get(n.id).add(sg.primary_behavior_flag || 'ANCHOR');
-      }
-    });
-
-    (topo.edges || []).forEach(e => m.edges.set(`${e.source}->${e.target}`, e));
-  });
-
-  const drawnMethods = new Set();
-  let groupIdx = 0;
-
-  byMethod.forEach(m => {
-    const groupId = `grp_${groupIdx++}`;
-    addNode(groupId, m.label, 'group', m.signature || m.label);
-    if (m.signature) drawnMethods.add(m.signature);
-
-    m.nodes.forEach(n => {
-      const flags = m.anchorFlags.get(n.id);
-      let type = 'normal';
-      if (n.is_anchor && n.is_outlier) type = 'anchor_outlier';
-      else if (n.is_anchor) type = 'anchor';
-      else if (n.is_outlier) type = 'outlier';
-      else if ((n.api_calls || []).some(a => m.matched.has(a))) type = 'api_block';
-
-      const offsetHex = `0x${(n.block_offset || 0).toString(16)}`;
-      // The compound parent already names the method, so an anchor shows only what
-      // it anchors. Repeating the method here is what overflowed the labels.
-      const label = flags ? [...flags].join('\n') : (n.label || offsetHex);
-
-      const tipLines = [];
-      if (flags) tipLines.push(`Anchor block ${offsetHex} — ${[...flags].join(', ')}`);
-      else tipLines.push(`Basic block ${offsetHex}`);
-      if (m.signature) tipLines.push(m.signature);
-      if (n.is_outlier) tipLines.push('Flattening dispatcher (high-degree block)');
-      (n.api_calls || []).forEach(a => tipLines.push(`calls ${a}`));
-      (n.string_literals || []).forEach(s => tipLines.push(`"${s}"`));
-
-      addNode(n.id, label, type, tipLines.join(' | '), groupId);
-    });
-
-    m.edges.forEach(e => {
-      // Only draw transitions whose endpoints both survived the backend node cap.
-      if (nodeSet.has(e.source) && nodeSet.has(e.target)) {
-        addEdge(e.source, e.target, '');
-      }
-    });
-  });
-
-  // Flattening dispatchers in methods that produced no anchor subgraph. These have
-  // no topology to sit inside, so they are drawn standalone. `node_id` is
-  // method-qualified, so same-offset blocks in different classes stay distinct.
-  // A real APK yields hundreds of these; they are supporting context, not the
-  // subject of the panel, so take only the most dispatcher-like by degree.
-  outlierDetails
-    .filter(o => !drawnMethods.has(o.method_signature))
-    .sort((a, b) => (b.degree || 0) - (a.degree || 0))
-    .slice(0, MAX_STANDALONE_OUTLIERS)
-    .forEach(o => {
-      addNode(
-        o.node_id,
-        shortenMethodSig(o),
-        'outlier',
-        `Flattening dispatcher @0x${(o.block_offset || 0).toString(16)} (degree ${o.degree}) — ${o.method_signature}`
-      );
-    });
-
-  // Pre-`flattening_outlier_details` responses (cached records) only carry bare
-  // offsets. Nothing can be attributed from those, so label them as such.
-  if (!outlierDetails.length && outlierNodes.length && !drawnMethods.size) {
-    outlierNodes.forEach(nodeNum => {
-      addNode(
-        `outlier_${nodeNum}`,
-        `block 0x${Number(nodeNum).toString(16)}`,
-        'outlier',
-        `Flattening dispatcher at block offset ${nodeNum} (method not recorded)`
-      );
-    });
-=======
   const sampleId = 'sample:current';
   const sampleLabel = manifest.target_package || (manifest.sha256 || 'this sample').slice(0, 16);
   addNode(sampleId, sampleLabel, 'Sample');
@@ -820,7 +735,6 @@ function renderGraphExplorer(manifest) {
     const famId = `family:${manifest.predicted_family}`;
     addNode(famId, manifest.predicted_family, 'MalwareFamily');
     addEdge(sampleId, famId, 'CLASSIFIED_AS_FAMILY');
->>>>>>> c47d6df938ca58831f1efa56b8729a19d1141dbd
   }
 
   (manifest.ttp_context || []).forEach(t => {
@@ -879,89 +793,7 @@ function renderGraphExplorer(manifest) {
           'width': ele => ele.data('type') === 'Sample' ? 46 : 30,
           'height': ele => ele.data('type') === 'Sample' ? 46 : 30,
           'border-width': 2,
-<<<<<<< HEAD
-          'border-color': '#1e293b',
-          'transition-property': 'background-color, line-color, target-arrow-color',
-          'transition-duration': '0.3s'
-        }
-      },
-      {
-        selector: 'node[type="outlier"]',
-        style: {
-          'background-color': '#f43f5e',
-          'border-color': '#881337',
-          'border-width': 3,
-          'width': 34,
-          'height': 34,
-          'font-weight': 'bold',
-          'color': '#fda4af'
-        }
-      },
-      {
-        selector: 'node[type="anchor"]',
-        style: {
-          'background-color': '#a855f7',
-          'border-color': '#581c87',
-          'border-width': 2,
-          'width': 34,
-          'height': 34,
-          'color': '#d8b4fe',
-          'text-wrap': 'wrap',
-          'text-max-width': '140px',
-          'font-weight': 'bold'
-        }
-      },
-      {
-        // Anchor that is also a flattening dispatcher: suspicious behavior sitting
-        // inside obfuscated control flow. Purple fill keeps it readable as an
-        // anchor, red border marks the corroboration.
-        selector: 'node[type="anchor_outlier"]',
-        style: {
-          'background-color': '#a855f7',
-          'border-color': '#f43f5e',
-          'border-width': 5,
-          'width': 38,
-          'height': 38,
-          'color': '#d8b4fe',
-          'text-wrap': 'wrap',
-          'text-max-width': '140px',
-          'font-weight': 'bold'
-        }
-      },
-      {
-        selector: 'node[type="api_block"]',
-        style: {
-          'background-color': '#0ea5e9',
-          'border-color': '#0369a1',
-          'border-width': 2,
-          'width': 26,
-          'height': 26,
-          'color': '#7dd3fc'
-=======
           'border-color': 'rgba(255,255,255,0.15)',
->>>>>>> c47d6df938ca58831f1efa56b8729a19d1141dbd
-        }
-      },
-      {
-        selector: 'node[type="group"]',
-        style: {
-          'background-color': 'rgba(30, 41, 59, 0.45)',
-          'background-opacity': 0.45,
-          'border-color': 'rgba(148, 163, 184, 0.35)',
-          'border-width': 1,
-          'shape': 'round-rectangle',
-          'label': 'data(label)',
-          'text-valign': 'top',
-          'text-halign': 'center',
-          'text-margin-y': -6,
-          'font-size': '11px',
-          'font-weight': 'bold',
-          'color': '#94a3b8',
-          // Obfuscated class names run to 30+ characters. Wrap them instead of
-          // letting adjacent group titles overrun each other.
-          'text-wrap': 'wrap',
-          'text-max-width': '150px',
-          'padding': '22px'
         }
       },
       {
@@ -997,8 +829,10 @@ function renderGraphExplorer(manifest) {
   cyInstance.ready(() => cyInstance.fit(undefined, 30));
 
   cyInstance.on('tap', 'node', function(evt) {
-    const node = evt.target;
-    console.log(`${node.data('type')}: ${node.data('label')}`);
+    showNodeDetails('cyGraphNodeDetails', evt.target);
+  });
+  cyInstance.on('tap', function(evt) {
+    if (evt.target === cyInstance) clearNodeDetails('cyGraphNodeDetails');
   });
 }
 

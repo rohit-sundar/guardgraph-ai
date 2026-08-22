@@ -98,10 +98,12 @@ class TestStoreSigAlwaysCalledAfterColdPath(unittest.TestCase):
              patch("app.api.routes.store_signature") as mock_store, \
              patch("app.api.routes.compute_risk_score", return_value=mock_risk):
 
-            mp.run_phase1_ingestion.return_value = (ingestion, MagicMock(), MagicMock(), MagicMock())
+            mp.run_phase1_ingestion.return_value = (ingestion, MagicMock(), MagicMock(), MagicMock(), [])
             mp.run_phase1b_signature_yara.return_value = real_sig_yara
             mp.run_phase2_graph_construction.return_value = ({}, 0.0)
             mp.run_phase3_forensic_matching.return_value = ({}, [], [])
+            mp.merge_c2_from_strings.return_value = ingestion
+            mp.run_phase3b_re_deepdive.return_value = ([], [], [], [])
             mp.run_phase4_feature_engineering.return_value = (mock_obf, [0.0]*len(FEATURE_NAMES), [0.0]*len(TTP_FEATURE_NAMES), 0.0, 0)
             # predicted_family is None (classifier untrained / FileNotFoundError path)
             mp.run_phase5_ml_classification.return_value = ({}, None, None)

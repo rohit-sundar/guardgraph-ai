@@ -48,7 +48,10 @@ def test_extract_firebase_discord_onion_ip():
     strings = [
         "https://evil-c2.firebaseio.com/bots.json",
         "https://discord.com/api/webhooks/123456789012345678/abcdefghijklmnopqrstuvwxyzABCDEF",
-        "http://abcdefghijklmnopqrstuvwxyz123456.onion/gate",
+        # Real Tor v3 addresses use RFC 4648 base32: a-z and 2-7 only (0/1/8/9
+        # excluded as visually ambiguous with O/I/B/g) — this fixture must stay
+        # within that alphabet or it silently fails to exercise _RE_ONION.
+        "http://abcdefghijklmnopqrstuvwxyz234567.onion/gate",
         "http://185.220.101.45:8080/panel/",
         "https://legit.example.com/api",  # should NOT produce raw_ip
     ]

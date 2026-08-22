@@ -1052,6 +1052,37 @@ body {
   font-size: 0.9rem;
 }
 
+.graph-node-details {
+  min-height: 2.2rem;
+  margin-top: 0.75rem;
+  padding: 0.6rem 0.9rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  border-left: 3px solid var(--primary);
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.graph-node-details:empty::before {
+  content: "Click a node to see its details";
+  font-style: italic;
+  opacity: 0.6;
+}
+
+.graph-node-details .node-detail-id {
+  font-family: 'SF Mono', Consolas, monospace;
+  font-weight: 700;
+  color: var(--primary);
+}
+
+.graph-node-details .node-detail-name {
+  color: var(--text-main);
+  font-weight: 600;
+}
+
 .graph-legend {
   display: flex;
   flex-wrap: wrap;

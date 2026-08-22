@@ -170,19 +170,19 @@
             </div>
             <div class="spec-item">
               <span class="spec-label">VirusTotal Status</span>
-              <span class="spec-value highlight-red" id="vtStatus">15 / 75 Engines Flagged</span>
+              <span class="spec-value" id="vtStatus">—</span>
             </div>
             <div class="spec-item">
               <span class="spec-label">Malware Family</span>
-              <span class="spec-value badge-family" id="familyBadge">trojan.btmob/spyagent</span>
+              <span class="spec-value badge-family" id="familyBadge">—</span>
             </div>
             <div class="spec-item">
               <span class="spec-label">Secondary DEX Payloads</span>
-              <span class="spec-value" id="secondaryDexCount">3 payload assets</span>
+              <span class="spec-value" id="secondaryDexCount">—</span>
             </div>
             <div class="spec-item">
               <span class="spec-label">Cert Certificates</span>
-              <span class="spec-value warning" id="certAnomalies">Self-Signed Certificate</span>
+              <span class="spec-value" id="certAnomalies">—</span>
             </div>
           </div>
         </div>
@@ -280,15 +280,10 @@
             <div class="graph-explorer-wrapper">
               <div class="graph-explorer-header">
                 <div>
-<<<<<<< HEAD
-                  <h5>Interactive Behavioral Subgraph Explorer</h5>
-                  <p class="graph-subtitle">Real basic blocks and control transitions from each method's 4-hop anchor subgraph</p>
-=======
                   <h5>Sample Correlation Graph</h5>
                   <p class="graph-subtitle">This sample's own neighborhood in the live Neo4j graph — predicted family,
                     MITRE techniques and C2 infrastructure. Same graph as the Threat Landscape tab, scoped to just
                     this sample.</p>
->>>>>>> c47d6df938ca58831f1efa56b8729a19d1141dbd
                 </div>
                 <div class="graph-controls">
                   <button class="btn btn-sm btn-control" onclick="resetGraphView()">🎯 Fit View</button>
@@ -299,19 +294,12 @@
               <div class="graph-canvas-container" id="cyGraphContainer">
                 <div class="graph-placeholder-text">Run analysis to see this sample's correlation graph</div>
               </div>
+              <div class="graph-node-details" id="cyGraphNodeDetails"></div>
               <div class="graph-legend">
-<<<<<<< HEAD
-                <div class="legend-item"><span class="legend-dot dot-behavior"></span> Anchor Block</div>
-                <div class="legend-item"><span class="legend-dot dot-anchor-outlier"></span> Anchor inside Flattened Region</div>
-                <div class="legend-item"><span class="legend-dot dot-outlier"></span> Flattening Dispatcher</div>
-                <div class="legend-item"><span class="legend-dot dot-api"></span> Block with Sensitive API</div>
-                <div class="legend-item"><span class="legend-dot dot-normal"></span> Basic Block</div>
-=======
                 <div class="legend-item"><span class="legend-dot" style="background:#eab308;"></span> This Sample</div>
                 <div class="legend-item"><span class="legend-dot" style="background:#84cc16;"></span> Malware Family</div>
                 <div class="legend-item"><span class="legend-dot" style="background:#3b82f6;"></span> MITRE Technique</div>
                 <div class="legend-item"><span class="legend-dot" style="background:#ef4444;"></span> C2 Indicator</div>
->>>>>>> c47d6df938ca58831f1efa56b8729a19d1141dbd
               </div>
             </div>
 
@@ -399,6 +387,7 @@
             <div class="graph-canvas-container" id="landscapeGraphContainer" style="margin-top:1rem;">
               <div class="graph-placeholder-text">Click Refresh to load the live graph from Neo4j</div>
             </div>
+            <div class="graph-node-details" id="landscapeNodeDetails"></div>
             <div class="graph-legend">
               <div class="legend-item"><span class="legend-dot" style="background:#eab308;"></span> Sample</div>
               <div class="legend-item"><span class="legend-dot" style="background:#84cc16;"></span> Malware Family</div>

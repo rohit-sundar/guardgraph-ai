@@ -20,17 +20,12 @@ from loguru import logger
 from app.analysis.ingest import ingest_apk
 from app.analysis.cfg import build_all_method_cfgs, method_key, split_method_signature
 from app.analysis.forensic import ManifestContext, match_anchors, extract_anchor_subgraph
-<<<<<<< HEAD
 from app.analysis.topology import (
     compute_topological_invariants,
     aggregate_subgraph_invariants,
     detect_flattening_outlier,
 )
-from app.analysis.obfuscation import build_obfuscation_signal
-=======
-from app.analysis.topology import compute_topological_invariants, aggregate_subgraph_invariants
 from app.analysis.obfuscation import build_obfuscation_signal, count_reflection_calls
->>>>>>> c47d6df938ca58831f1efa56b8729a19d1141dbd
 from app.analysis.signatures import match_signatures
 from app.analysis.yara_engine import scan_apk_with_payloads
 from app.analysis.apk_static import extract_c2_indicators
