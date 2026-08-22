@@ -234,6 +234,13 @@
                 </div>
                 <button class="btn btn-sm" onclick="copyAiReport()">Copy Report</button>
               </div>
+              <div id="groundingPanel" class="grounding-panel hidden">
+                <div class="grounding-head">
+                  <span class="grounding-pill" id="groundingPill">&mdash;</span>
+                  <span class="grounding-caption">Post-generation checks run against the narrative &mdash; the model is only allowed to cite what it was given.</span>
+                </div>
+                <div class="grounding-checks" id="groundingChecks"></div>
+              </div>
               <div class="markdown-body" id="aiReportMarkdown">
                 <!-- Rendered markdown goes here -->
               </div>

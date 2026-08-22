@@ -9,7 +9,7 @@ labels, but ttp_severity_component expects MITRE technique IDs. Without this
 mapping that scoring component is silently dead (always returns DEFAULT). This is
 an honest proxy until per-technique binary classifiers are trained — see §9.2.
 """
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -64,8 +64,7 @@ class Settings(BaseSettings):
     # the OpenAI-compatible /v1 endpoint accepts and ignores it.
     graphrag_keep_alive: str = "30m"
 
-    class Config:
-        env_file = ".env"
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
 settings = Settings()

@@ -308,3 +308,8 @@ class AnalysisReport(BaseModel):
     risk_score: RiskScoreBreakdown
     narrative_report: str
     limitations: list[str]
+    # Which post-generation fabrication checks ran over the narrative, and whether
+    # each passed. None when no narrative was generated (LLM unreachable) — the
+    # checks did not run, which is not the same as passing, and the UI must not
+    # render an absent result as a green badge.
+    grounding: Optional[dict] = None

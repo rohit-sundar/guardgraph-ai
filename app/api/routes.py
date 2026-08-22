@@ -25,6 +25,7 @@ import tempfile
 import uuid
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from loguru import logger
 
 from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape
@@ -90,7 +91,11 @@ async def analyze(file: UploadFile = File(...)):
             f.write(content)
 
         try:
-            result = _run_analysis(tmp_path)
+            # _run_analysis is fully synchronous and takes minutes. Called directly
+            # inside `async def` it blocks the event loop for its whole duration —
+            # the server stops answering everything, /health included, so a second
+            # person uploading sees a dead application rather than a queue.
+            result = await run_in_threadpool(_run_analysis, tmp_path)
         except HTTPException:
             raise
         except Exception as exc:
@@ -107,7 +112,7 @@ async def analyze_sample():
     sample_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "guardgraph_test", "guardgraph_test.apk"))
     if not os.path.exists(sample_path):
         raise HTTPException(404, f"Sample file not found at {sample_path}")
-    return _run_analysis(sample_path)
+    return await run_in_threadpool(_run_analysis, sample_path)
 
 
 def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
@@ -189,7 +194,9 @@ def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
     # a dead end. run_phase7_reporting already has its own fallback if
     # Ollama itself is unreachable, so this never raises.
     from app.core.pipeline import AnalysisPipeline
-    narrative, report_limitations = AnalysisPipeline.run_phase7_reporting(manifest, risk_score)
+    narrative, report_limitations, grounding = AnalysisPipeline.run_phase7_reporting(
+        manifest, risk_score
+    )
     limitations = limitations + report_limitations
 
     return AnalysisReport(
@@ -197,6 +204,7 @@ def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
         risk_score=risk_score,
         narrative_report=narrative,
         limitations=limitations,
+        grounding=grounding,
     )
 
 
@@ -396,7 +404,9 @@ def _run_analysis(filepath: str) -> AnalysisReport:
     )
 
     # --- Phase 7: Explainable Reporting ---
-    narrative, limitations = AnalysisPipeline.run_phase7_reporting(manifest, risk_score)
+    narrative, limitations, grounding = AnalysisPipeline.run_phase7_reporting(
+        manifest, risk_score
+    )
 
     if not classifier_evidence:
         limitations = list(limitations) + [NO_CLASSIFIER_EVIDENCE_NOTE]
@@ -427,6 +437,7 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         risk_score=risk_score,
         narrative_report=narrative,
         limitations=limitations,
+        grounding=grounding,
     )
 
 

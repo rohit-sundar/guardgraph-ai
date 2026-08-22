@@ -22,15 +22,39 @@ logger.remove()
 logger.add(sys.stderr, filter=_log_filter, level="DEBUG")
 
 import os
+import threading
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from app.api.routes import router
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """
+    Pay the Ollama model load at boot rather than on somebody's first upload.
+
+    Measured: a cold /analyze took over 15 minutes with the load on the request
+    path, against 2m33s once the model was resident.
+
+    Started on a background thread rather than awaited, so the server answers
+    immediately — a 4.7 GB load can take minutes, and blocking startup on it would
+    move the wait from the first request to the process not coming up at all.
+    Failure is logged and ignored; the analysis path already handles a cold or
+    absent Ollama.
+    """
+    from app.reports.graphrag import preload_model
+
+    threading.Thread(target=preload_model, name="ollama-preload", daemon=True).start()
+    yield
+
+
 app = FastAPI(
     title="GuardGraph AI",
     description="Static-analysis Android malware risk-scoring engine (prototype)",
     version="0.1.0-prototype",
+    lifespan=lifespan,
 )
 
 app.include_router(router)

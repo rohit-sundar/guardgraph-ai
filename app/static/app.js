@@ -5,6 +5,26 @@ document.addEventListener('DOMContentLoaded', () => {
   setupUploadEvents();
 });
 
+// Everything an analysed APK contains is attacker-controlled: package and
+// permission names, YARA rule names, extracted C2 strings, certificate fields, and
+// the exception text embedded in a coverage note. Several of those are interpolated
+// into innerHTML below, so a crafted sample could declare
+//   <uses-permission android:name="<img src=x onerror=...>">
+// and run script in the analyst's browser, on the machine holding the malware
+// corpus. Every interpolated VALUE goes through esc(); only markup this file writes
+// itself is left raw. Where a block was simple enough to rebuild with textContent
+// instead (see renderImpersonation), that is preferred over escaping.
+function esc(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+
 function setupUploadEvents() {
   const dropZone = document.getElementById('dropZone');
   const fileInput = document.getElementById('fileInput');
@@ -226,6 +246,9 @@ function renderResults(data) {
     vtEl.className = 'spec-value';
   }
 
+  // 0. Grounding — did the narrative cite anything it wasn't given?
+  renderGrounding(data.grounding);
+
   // 1. AI Report Markdown
   const markdownText = data.narrative_report || 'No report generated.';
   document.getElementById('aiReportMarkdown').innerHTML = marked.parse(markdownText);
@@ -251,14 +274,14 @@ function renderResults(data) {
       const severityColor = sig.severity >= 0.8 ? '#ff4444' : sig.severity >= 0.5 ? '#ff8800' : '#ffcc00';
       card.innerHTML = `
         <div class="yara-card-header">
-          <span class="rule-name">${sig.source || sig.match_type} Match</span>
-          <span class="severity-pill" style="background: ${severityColor}22; color: ${severityColor}">Severity: ${sig.severity}</span>
+          <span class="rule-name">${esc(sig.source || sig.match_type)} Match</span>
+          <span class="severity-pill" style="background: ${severityColor}22; color: ${severityColor}">Severity: ${esc(sig.severity)}</span>
         </div>
-        <p class="rule-desc">${sig.description || `${sig.match_type} match via ${sig.source}`}</p>
+        <p class="rule-desc">${esc(sig.description || `${sig.match_type} match via ${sig.source}`)}</p>
         <div class="rule-target">
-          ${sig.detection_ratio ? `<span class="vt-ratio">VT: <strong>${sig.detection_ratio}</strong></span>` : ''}
-          ${sig.family ? ` &mdash; Family: <code>${sig.family}</code>` : ''}
-          &mdash; Matched: <code>${sig.matched_value ? sig.matched_value.substring(0, 16) + '...' : 'N/A'}</code>
+          ${sig.detection_ratio ? `<span class="vt-ratio">VT: <strong>${esc(sig.detection_ratio)}</strong></span>` : ''}
+          ${sig.family ? ` &mdash; Family: <code>${esc(sig.family)}</code>` : ''}
+          &mdash; Matched: <code>${esc(sig.matched_value ? sig.matched_value.substring(0, 16) + '...' : 'N/A')}</code>
         </div>
       `;
       yaraContainer.appendChild(card);
@@ -278,13 +301,13 @@ function renderResults(data) {
       const severityColor = rule.severity >= 0.8 ? '#ff4444' : rule.severity >= 0.5 ? '#ff8800' : '#ffcc00';
       card.innerHTML = `
         <div class="yara-card-header">
-          <span class="rule-name">${rule.rule_name}</span>
-          <span class="severity-pill" style="background: ${severityColor}22; color: ${severityColor}">Severity: ${rule.severity}</span>
+          <span class="rule-name">${esc(rule.rule_name)}</span>
+          <span class="severity-pill" style="background: ${severityColor}22; color: ${severityColor}">Severity: ${esc(rule.severity)}</span>
         </div>
-        <p class="rule-desc">${rule.description || 'Detects threat behavior pattern in DEX targets.'}</p>
+        <p class="rule-desc">${esc(rule.description || 'Detects threat behavior pattern in DEX targets.')}</p>
         <div class="rule-target">
-          Target: <code>${rule.scan_target || 'dex'}</code>
-          ${rule.category && rule.category !== 'unknown' ? ` &mdash; Category: <code>${rule.category}</code>` : ''}
+          Target: <code>${esc(rule.scan_target || 'dex')}</code>
+          ${rule.category && rule.category !== 'unknown' ? ` &mdash; Category: <code>${esc(rule.category)}</code>` : ''}
         </div>
       `;
       yaraContainer.appendChild(card);
@@ -342,7 +365,7 @@ function renderResults(data) {
   if (obf.coverage_note) {
     const noteEl = document.createElement('div');
     noteEl.className = 'coverage-note';
-    noteEl.innerHTML = `<span class="note-icon">📋</span> ${obf.coverage_note}`;
+    noteEl.innerHTML = `<span class="note-icon">📋</span> ${esc(obf.coverage_note)}`;
     outliersContainer.appendChild(noteEl);
   }
 
@@ -393,7 +416,7 @@ function renderResults(data) {
       pEl.className = `perm-item ${isDangerous ? 'perm-danger' : ''}`;
       // Show short permission name
       const shortPerm = perm.replace('android.permission.', '');
-      pEl.innerHTML = `<span class="perm-name">${shortPerm}</span>${isDangerous ? '<span class="perm-badge">⚠ DANGEROUS</span>' : ''}`;
+      pEl.innerHTML = `<span class="perm-name">${esc(shortPerm)}</span>${isDangerous ? '<span class="perm-badge">⚠ DANGEROUS</span>' : ''}`;
       permContainer.appendChild(pEl);
     });
   }
@@ -476,6 +499,59 @@ function renderReFindings(manifest) {
   const countEl = document.getElementById('reFindingsCount');
   if (countEl) countEl.textContent = total;
 }
+
+function renderGrounding(grounding) {
+  const panel = document.getElementById('groundingPanel');
+  const pill = document.getElementById('groundingPill');
+  const list = document.getElementById('groundingChecks');
+  if (!panel || !pill || !list) return;
+
+  list.innerHTML = '';
+  panel.classList.remove('hidden');
+
+  // No grounding object means no narrative was generated, so no check ran. That
+  // is NOT a pass, and must not render as one.
+  if (!grounding) {
+    pill.textContent = 'NOT CHECKED';
+    pill.className = 'grounding-pill grounding-none';
+    const row = document.createElement('div');
+    row.className = 'grounding-check';
+    row.textContent = 'No narrative was generated, so the fabrication checks did not run.';
+    list.appendChild(row);
+    return;
+  }
+
+  const passed = grounding.passed_count;
+  const total = grounding.total_count;
+  pill.textContent = grounding.passed
+    ? `GROUNDED — ${passed}/${total} CHECKS PASSED`
+    : `FABRICATION DETECTED — ${passed}/${total} PASSED`;
+  pill.className = 'grounding-pill ' + (grounding.passed ? 'grounding-pass' : 'grounding-fail');
+
+  (grounding.checks || []).forEach(check => {
+    const row = document.createElement('div');
+    row.className = 'grounding-check ' + (check.passed ? 'ok' : 'bad');
+
+    const mark = document.createElement('span');
+    mark.className = 'mark';
+    mark.textContent = check.passed ? '✓' : '✗';
+
+    const name = document.createElement('span');
+    name.textContent = check.name;
+
+    // check.detail can quote values the model emitted, which originate in an
+    // attacker-controlled sample. textContent, never innerHTML.
+    const detail = document.createElement('span');
+    detail.className = 'detail';
+    detail.textContent = '— ' + (check.detail || '');
+
+    row.appendChild(mark);
+    row.appendChild(name);
+    row.appendChild(detail);
+    list.appendChild(row);
+  });
+}
+
 
 function renderImpersonation(manifest, risk) {
   const list = document.getElementById('impersonationList');
@@ -605,16 +681,16 @@ function renderMitreMapping(manifest) {
     item.className = 'mitre-item';
     item.innerHTML = `
       <div class="mitre-item-header">
-        <span class="mitre-id">${t.technique_id}</span>
-        <span class="mitre-name">${t.name || 'Unknown Technique'}</span>
-        <span class="mitre-tactic">${t.tactic || 'Unknown Tactic'}</span>
+        <span class="mitre-id">${esc(t.technique_id)}</span>
+        <span class="mitre-name">${esc(t.name || 'Unknown Technique')}</span>
+        <span class="mitre-tactic">${esc(t.tactic || 'Unknown Tactic')}</span>
       </div>
       <div class="progress-bar-container" style="height:6px; margin: 0.4rem 0;">
         <div class="progress-bar-fill" style="width: ${pct}%; background: ${barColor};"></div>
       </div>
       <div class="mitre-item-footer">
         <span class="spec-value code">${pct}% confidence</span>
-        ${t.description ? `<p class="mitre-description">${t.description}</p>` : ''}
+        ${t.description ? `<p class="mitre-description">${esc(t.description)}</p>` : ''}
       </div>
     `;
     container.appendChild(item);
@@ -638,12 +714,12 @@ function renderRelatedSamples(manifest) {
   related.forEach(r => {
     const item = document.createElement('div');
     item.className = 'related-sample-item';
-    const sharedTech = (r.shared_techniques || []).map(t => `<span class="chip">${t}</span>`).join('');
-    const sharedC2 = (r.shared_c2 || []).map(c => `<span class="chip chip-danger">${c}</span>`).join('');
+    const sharedTech = (r.shared_techniques || []).map(t => `<span class="chip">${esc(t)}</span>`).join('');
+    const sharedC2 = (r.shared_c2 || []).map(c => `<span class="chip chip-danger">${esc(c)}</span>`).join('');
     item.innerHTML = `
       <div class="related-sample-header">
-        <span class="mitre-name">${r.app_name || r.sha256}</span>
-        ${r.family ? `<span class="mitre-tactic">${r.family}</span>` : ''}
+        <span class="mitre-name">${esc(r.app_name || r.sha256)}</span>
+        ${r.family ? `<span class="mitre-tactic">${esc(r.family)}</span>` : ''}
         ${r.risk_score !== null && r.risk_score !== undefined ? `<span class="spec-value code" style="margin-left:auto;">score ${Number(r.risk_score).toFixed(1)}</span>` : ''}
       </div>
       ${sharedTech ? `<div class="related-sample-row"><span class="spec-label">Shared techniques:</span> ${sharedTech}</div>` : ''}

@@ -108,7 +108,7 @@ class TestStoreSigAlwaysCalledAfterColdPath(unittest.TestCase):
             # predicted_family is None (classifier untrained / FileNotFoundError path)
             mp.run_phase5_ml_classification.return_value = ({}, None, None)
             mp.run_phase6_risk_scoring.return_value = mock_risk
-            mp.run_phase7_reporting.return_value = ("narrative", ["lim"])
+            mp.run_phase7_reporting.return_value = ("narrative", ["lim"], None)
             # Phase 5.5 returns a plain dict (AnalysisManifest.impersonation is a
             # dict field); a bare MagicMock fails schema validation.
             mp.run_phase5b_impersonation.return_value = {
@@ -153,11 +153,20 @@ class TestEnsureModelWarm(unittest.TestCase):
         self.assertEqual(mock_post.call_args[1]["num_predict"], 1,
                          "warm-up only needs the prefill, not a full generation")
 
-    def test_no_warmup_when_model_already_loaded(self):
-        """The effect is tied to the model load, so a resident model needs no
-        second prefill — paying one on every request would buy nothing."""
+    def test_no_warmup_when_model_is_loaded_and_already_warmed(self):
+        """
+        A resident model that has ALREADY had its same-prompt pass needs no second
+        prefill — paying one per request would buy nothing.
+
+        N13: residency alone used to be the whole condition, and was correct while
+        the only thing that ever loaded the model was this function. preload_model()
+        (called at startup to keep the multi-minute load off the request path) breaks
+        that: it makes the model resident WITHOUT a same-prompt pass. So the guard is
+        now residency AND _warmed_since_load, and the test says so.
+        """
         import app.reports.graphrag as g
         with patch.object(g, "_model_is_loaded", return_value=True), \
+             patch.object(g, "_warmed_since_load", True), \
              patch.object(g, "_post_native_chat") as mock_post:
             self.assertTrue(g.ensure_model_warm("prompt"))
 
@@ -449,7 +458,7 @@ class TestUnparseableApkReturnsVerdict(unittest.TestCase):
         # test doesn't depend on a running Ollama instance.
         with patch(
             "app.core.pipeline.AnalysisPipeline.run_phase7_reporting",
-            return_value=("mocked narrative", []),
+            return_value=("mocked narrative", [], None),
         ):
             report = _unparseable_report(path, ValueError("EOCD signature not found"))
 
@@ -502,3 +511,52 @@ class TestUnparseableApkReturnsVerdict(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestPreloadDoesNotFakeTheWarmup(unittest.TestCase):
+    """
+    N13: preload_model() exists to move the multi-minute Ollama model load off the
+    request path (a cold /analyze was measured at over 15 minutes against 2m33s
+    once resident). It must NOT be mistaken for the reproducibility warm-up, which
+    needs a pass over the same prompt that will actually be sent — a different
+    prompt of comparable size was measured not to substitute (0/2 trials).
+
+    So preloading has to leave the same-prompt warm still outstanding. If it did
+    not, the first real analysis would silently lose decode reproducibility in
+    exchange for the latency win.
+    """
+
+    def test_preload_leaves_the_same_prompt_warmup_outstanding(self):
+        import app.reports.graphrag as g
+
+        with patch.object(g, "_model_is_loaded", return_value=False), \
+             patch.object(g, "_post_native_chat") as mock_post:
+            self.assertTrue(g.preload_model())
+        self.assertFalse(
+            g._warmed_since_load,
+            "preload_model must not mark the same-prompt warm-up as done",
+        )
+
+        # ...and the next analysis therefore still performs it, over its own prompt.
+        prompt = "## JSON Manifest\n" + ("y" * 4000)
+        with patch.object(g, "_model_is_loaded", return_value=True), \
+             patch.object(g, "_post_native_chat") as mock_post:
+            g.ensure_model_warm(prompt)
+        mock_post.assert_called_once()
+        self.assertEqual(mock_post.call_args[0][0], prompt)
+
+    def test_preload_never_raises_when_ollama_is_down(self):
+        """Ollama being unreachable at boot must not stop the API from serving."""
+        import app.reports.graphrag as g
+
+        with patch.object(g, "_model_is_loaded", return_value=False), \
+             patch.object(g, "_post_native_chat", side_effect=OSError("connection refused")):
+            self.assertFalse(g.preload_model())
+
+    def test_preload_is_a_noop_when_already_resident(self):
+        import app.reports.graphrag as g
+
+        with patch.object(g, "_model_is_loaded", return_value=True), \
+             patch.object(g, "_post_native_chat") as mock_post:
+            self.assertTrue(g.preload_model())
+        mock_post.assert_not_called()

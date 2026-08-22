@@ -298,7 +298,7 @@ class TestSuppressionReachesTheReport(unittest.TestCase):
             )
             mp.run_phase5_ml_classification.return_value = ({}, None, None)
             mp.run_phase6_risk_scoring.return_value = risk
-            mp.run_phase7_reporting.return_value = ("narrative", [])
+            mp.run_phase7_reporting.return_value = ("narrative", [], None)
             # Phase 5.5 returns a plain dict (AnalysisManifest.impersonation is a
             # dict field); a bare MagicMock fails schema validation.
             mp.run_phase5b_impersonation.return_value = {

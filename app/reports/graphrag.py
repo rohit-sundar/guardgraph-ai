@@ -338,6 +338,51 @@ def _post_native_chat(user_content: str, num_predict: int, timeout: int) -> None
         r.read()
 
 
+# Has a same-prompt warm-up run since the model was last loaded BY US? Residency
+# alone used to answer this, and did so correctly while the only thing that ever
+# loaded the model was ensure_model_warm itself. preload_model() breaks that
+# assumption: it makes the model resident WITHOUT a same-prompt pass, so residency
+# would wrongly report the reproducibility work as already done. Tracked explicitly
+# instead.
+_warmed_since_load = False
+
+
+def preload_model(timeout: int = 900) -> bool:
+    """
+    Pulls the model into memory at process start so no request pays the disk load.
+
+    This is a LATENCY fix, not a reproducibility one, and the two are separate: a
+    cold `/analyze` was measured at over 15 minutes with the load on the request
+    path, against 2m33s once resident. What it deliberately does NOT do is claim
+    the warm-up ensure_model_warm performs — that needs a pass over the SAME prompt
+    that will be sent (measured: a different prompt of comparable size does not
+    substitute, 0/2 trials), which is not knowable at startup. So this marks the
+    same-prompt warm as still outstanding, and the first analysis still does it —
+    but over an already-resident model, which costs a prefill instead of a load.
+
+    Never raises: Ollama being down at boot must not stop the API from serving.
+    """
+    global _warmed_since_load
+    try:
+        if _model_is_loaded():
+            logger.info(f"[startup] Ollama model '{settings.ollama_model}' already resident.")
+            return True
+        logger.info(f"[startup] Preloading Ollama model '{settings.ollama_model}' — "
+                    "this is the multi-minute cost that used to land on the first upload.")
+        _post_native_chat("ok", num_predict=1, timeout=timeout)
+        logger.info("[startup] Model resident. First analysis still pays one prefill "
+                    "for decode reproducibility, not a load.")
+        return True
+    except Exception as e:
+        logger.warning(
+            f"[startup] Could not preload the Ollama model ({type(e).__name__}: {e}). "
+            "The first analysis will pay the load instead. Is `ollama serve` running?"
+        )
+        return False
+    finally:
+        _warmed_since_load = False
+
+
 def ensure_model_warm(user_prompt: str) -> bool:
     """
     Absorbs the first-inference-after-model-load effect so the first report of a
@@ -367,15 +412,17 @@ def ensure_model_warm(user_prompt: str) -> bool:
     Never raises — losing reproducibility must not cost the analysis, and
     generate_report() surfaces a genuine outage on its own call.
     """
-    if _model_is_loaded():
+    global _warmed_since_load
+    if _model_is_loaded() and _warmed_since_load:
         return True
 
     try:
         logger.info(
-            f"[Phase 7] Model '{settings.ollama_model}' is not resident — warming up "
-            "so this report matches subsequent ones."
+            f"[Phase 7] Warming '{settings.ollama_model}' over this exact prompt so "
+            "this report matches subsequent ones."
         )
         _post_native_chat(user_prompt, num_predict=1, timeout=600)
+        _warmed_since_load = True
         logger.info("[Phase 7] Warm-up complete; model resident.")
         return True
     except Exception as e:
@@ -386,30 +433,31 @@ def ensure_model_warm(user_prompt: str) -> bool:
         return False
 
 
-def _grounding_check(narrative: str, provided_technique_ids: set) -> None:
+def _grounding_check(narrative: str, provided_technique_ids: set) -> list[str]:
     """
     Post-generation sanity check. Scans the LLM output for MITRE technique ID
     references (pattern T\\d{4}(\\.\\d{3})?) and warns if any were cited that
     were NOT in the provided ontology context block.
     """
     cited_ids = set(re.findall(r"\bT\d{4}(?:\.\d{3})?\b", narrative))
-    hallucinated = cited_ids - provided_technique_ids
+    hallucinated = sorted(cited_ids - provided_technique_ids)
     if hallucinated:
         logger.warning(
             f"[Phase 7] Grounding check FAILED — LLM cited technique IDs not in "
-            f"provided ontology context: {sorted(hallucinated)}. "
+            f"provided ontology context: {hallucinated}. "
             "Spot-check this report for fabricated evidence."
         )
     else:
         logger.info("[Phase 7] Grounding check passed — all cited technique IDs are grounded.")
+    return hallucinated
 
 
 def generate_report(
     manifest: AnalysisManifest,
     risk_score: RiskScoreBreakdown,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], dict]:
     """
-    Returns (narrative_report_text, limitations_list).
+    Returns (narrative_report_text, limitations_list, grounding_result).
 
     Requires a running Ollama instance:
         ollama serve          # if not already running as a service
@@ -593,7 +641,13 @@ that is not explicitly present in the data blocks below.
     # Post-generation grounding check — warn if the LLM cited technique IDs
     # that were not in the provided ontology context block.
     provided_ids = {ctx["technique_id"] for ctx in ontology_context}
-    _grounding_check(narrative, provided_ids)
+    ungrounded_techniques = _grounding_check(narrative, provided_ids)
+    if ungrounded_techniques:
+        limitations.append(
+            "FABRICATION DETECTED: narrative cites MITRE technique IDs that were not "
+            f"in the ontology context it was given: {', '.join(ungrounded_techniques)}. "
+            "Treat those citations as unverified."
+        )
 
     # Anti-fabrication check — flag any cited permission the APK doesn't
     # actually declare, and surface it in limitations so it reaches the
@@ -633,4 +687,50 @@ that is not explicitly present in the data blocks below.
     header = f"**Sample:** `{manifest.target_package or 'unknown package'}` — **SHA-256:** `{manifest.sha256}`\n\n"
     narrative = header + narrative
 
-    return narrative, limitations
+    # Three post-generation fabrication checks already run above; until now only
+    # two of them reached the analyst (as `limitations` strings) and the technique
+    # one reached nothing but the log. Returned as structure so the UI can state
+    # the guarantee instead of the project only claiming it — "how do you know the
+    # model isn't making this up" is the first question anyone asks of GenAI in
+    # security, and the mechanism that answers it was living in a log file.
+    grounding = {
+        "passed": not (ungrounded_techniques or invented_permissions or invented_identifiers),
+        "checks": [
+            {
+                "name": "MITRE technique citations",
+                "passed": not ungrounded_techniques,
+                "checked": len(provided_ids),
+                "detail": (
+                    f"cited {len(ungrounded_techniques)} technique ID(s) absent from the "
+                    f"ontology context: {', '.join(ungrounded_techniques)}"
+                    if ungrounded_techniques
+                    else f"every technique cited was among the {len(provided_ids)} supplied"
+                ),
+            },
+            {
+                "name": "Permission citations",
+                "passed": not invented_permissions,
+                "checked": len(manifest.permissions or []),
+                "detail": (
+                    f"cited permissions this APK does not declare: {', '.join(invented_permissions)}"
+                    if invented_permissions
+                    else f"every permission cited is declared by the APK "
+                         f"({len(manifest.permissions or [])} declared)"
+                ),
+            },
+            {
+                "name": "Hash / identifier citations",
+                "passed": not invented_identifiers,
+                "checked": 1,
+                "detail": (
+                    f"cited identifiers absent from the manifest: {', '.join(invented_identifiers)}"
+                    if invented_identifiers
+                    else "no fabricated hashes or package identifiers"
+                ),
+            },
+        ],
+    }
+    grounding["passed_count"] = sum(1 for c in grounding["checks"] if c["passed"])
+    grounding["total_count"] = len(grounding["checks"])
+
+    return narrative, limitations, grounding
