@@ -43,6 +43,27 @@ DEFAULT_TTP_THRESHOLD = 0.5
 MIN_VAL_POSITIVES_TO_CALIBRATE = 2
 THRESHOLD_GRID = [round(0.05 * i, 2) for i in range(2, 19)]   # 0.10 … 0.90
 
+# ── Family-held-out evaluation (N10) ──
+# Stage A labels every malware row from its FAMILY's ATT&CK software entry, so all 15
+# Cerberus samples carry one identical label vector, all 15 FluBot another. A split
+# stratified on labels — which is what MultilabelStratifiedShuffleSplit does — then
+# places identical vectors on BOTH sides by construction, and the resulting micro-F1
+# measures family re-recognition rather than technique inference.
+#
+# So the shipped metrics now carry two numbers per model. The stratified one is kept
+# because it is comparable to what DroidTTP-style papers report; the family-held-out
+# one is the number to quote. Every fold holds out whole families, so a technique can
+# only be predicted from structure the model saw on OTHER families.
+#
+# Benign rows are NOT grouped: each clean app is an independent package that shares no
+# label vector with any other (they are all-zero by construction, not by family), so
+# grouping them would hold out 220 samples at once and starve the negative class.
+FAMILY_CV_SPLITS = 5
+# Average precision computed over one or two positives is not a measurement — it is a
+# property of where those points landed. Below this it is reported as null with its
+# support, rather than as a number that looks like a result.
+MIN_TEST_POSITIVES_FOR_PR_AUC = 5
+
 
 def main():
     if not os.path.exists(DATA_PATH):
@@ -130,6 +151,102 @@ def _multilabel_split(X, Y, test_size: float = 0.3):
         return train_test_split(X, Y, test_size=test_size, random_state=42)
 
 
+def _group_key(df) -> "pd.Series":
+    """
+    Group label per row for family-held-out CV.
+
+    Malware rows group by `source_family`, so a family is never split across the
+    train/test boundary. Benign rows each get their own group — see FAMILY_CV_SPLITS
+    for why they must stay independent. Rows with no recorded family fall back to a
+    unique group rather than silently merging into one bucket named "nan".
+    """
+    families = df.get("source_family")
+    keys = []
+    for i in range(len(df)):
+        source = df["label_source"].iloc[i]
+        fam = None if families is None else families.iloc[i]
+        if source == "benign" or not isinstance(fam, str) or not fam or fam == "benign":
+            keys.append(f"__row_{i}")
+        else:
+            keys.append(f"fam:{fam}")
+    return pd.Series(keys, index=df.index)
+
+
+def _family_held_out_metrics(X, Y, groups, labels: list[str], xgb_params: dict) -> dict:
+    """
+    GroupKFold CV in which every fold holds out whole malware families.
+
+    Thresholds are recalibrated inside each fold (on a further group-aware split of
+    that fold's training data), so no fold's thresholds are chosen on rows it is
+    scored against. Predictions are pooled across folds and scored once, which means
+    every sample is predicted exactly once by a model that never saw its family.
+
+    Returns the pooled metrics plus the fold layout, or an explanation of why the
+    evaluation could not run.
+    """
+    import numpy as np
+    from sklearn.model_selection import GroupKFold
+
+    from app.ml.classifier import BinaryRelevanceXGB
+
+    n_families = len({g for g in groups if g.startswith("fam:")})
+    if n_families < 2:
+        return {"error": f"only {n_families} malware family group(s) — "
+                         "family-held-out evaluation needs at least 2."}
+
+    n_splits = min(FAMILY_CV_SPLITS, n_families)
+    groups = np.asarray(groups)
+    Y_pooled = np.zeros_like(Y)
+    fold_layout = []
+
+    for fold, (tr_idx, te_idx) in enumerate(GroupKFold(n_splits=n_splits).split(X, Y, groups)):
+        X_tr_all, Y_tr_all, g_tr = X[tr_idx], Y[tr_idx], groups[tr_idx]
+
+        # Inner group-aware split for threshold calibration. If the fold's training
+        # portion cannot be split by group (too few families left), calibrate on the
+        # whole of it — biased toward the training data, but never toward the rows
+        # this fold is scored on, which is the leak that matters here.
+        inner = _group_split(X_tr_all, Y_tr_all, g_tr, test_size=0.25)
+        if inner is None:
+            X_fit, Y_fit, X_val, Y_val = X_tr_all, Y_tr_all, X_tr_all, Y_tr_all
+        else:
+            X_fit, Y_fit, X_val, Y_val = inner
+
+        model = BinaryRelevanceXGB(labels, **xgb_params).fit(X_fit, Y_fit)
+        thresholds = _calibrate_thresholds(model, X_val, Y_val, labels)
+        thr_vec = np.array([thresholds[t] for t in labels])
+        Y_pooled[te_idx] = (model.predict_proba_matrix(X[te_idx]) >= thr_vec).astype(int)
+
+        held_out = sorted({g[4:] for g in groups[te_idx] if g.startswith("fam:")})
+        fold_layout.append({"fold": fold, "n_test": int(len(te_idx)),
+                            "families_held_out": held_out})
+        print(f"  fold {fold}: {len(tr_idx):>3} train / {len(te_idx):>3} test — "
+              f"held out {', '.join(held_out) or '(benign only)'}")
+
+    out = _ml_metrics(Y, Y_pooled)
+    out["n_splits"] = n_splits
+    out["n_family_groups"] = n_families
+    out["folds"] = fold_layout
+    return out
+
+
+def _group_split(X, Y, groups, test_size: float = 0.25):
+    """One group-aware split, or None when the groups cannot support one."""
+    import numpy as np
+    from sklearn.model_selection import GroupShuffleSplit
+
+    if len(set(groups)) < 2:
+        return None
+    try:
+        gss = GroupShuffleSplit(n_splits=1, test_size=test_size, random_state=42)
+        a_idx, b_idx = next(gss.split(X, Y, groups))
+    except ValueError:
+        return None
+    if len(a_idx) == 0 or len(b_idx) == 0:
+        return None
+    return X[a_idx], Y[a_idx], X[b_idx], Y[b_idx]
+
+
 def _ml_metrics(Y_true, Y_pred) -> dict:
     """DroidTTP's multi-label metrics: micro/macro F1, sample Jaccard, Hamming loss."""
     from sklearn.metrics import f1_score, jaccard_score, hamming_loss
@@ -176,17 +293,41 @@ def _pr_auc(model, X_te, Y_te, labels: list[str]) -> dict:
     actually doing, and every headline metric this project has quoted so far was
     measured inside an all-malware distribution. Labels with no positives in the test
     split are omitted — average precision is undefined there, not zero.
+
+    N10: labels below MIN_TEST_POSITIVES_FOR_PR_AUC are now reported as null WITH their
+    support instead of as a number. The previous output printed 0.4909 for T1417, T1624
+    and T1629 alike and 0.4419 for T1575 and T1630 — identical values because each had
+    a single positive in the test split, so average precision degenerated to a function
+    of where that one point ranked. Three identical "measurements" are the signature of
+    that, and the macro mean was averaging them in as if they were real. The macro is
+    now taken over the supported labels only, and reports how many it covered.
     """
     from sklearn.metrics import average_precision_score
 
     proba = model.predict_proba_matrix(X_te)
-    per_label: dict[str, float] = {}
+    per_label: dict[str, float | None] = {}
+    support: dict[str, int] = {}
+    supported: list[float] = []
     for i, label in enumerate(labels):
-        if int(Y_te[:, i].sum()) == 0:
+        pos = int(Y_te[:, i].sum())
+        if pos == 0:
             continue
-        per_label[label] = round(float(average_precision_score(Y_te[:, i], proba[:, i])), 4)
-    macro = round(sum(per_label.values()) / len(per_label), 4) if per_label else None
-    return {"macro_pr_auc": macro, "per_label": per_label}
+        support[label] = pos
+        if pos < MIN_TEST_POSITIVES_FOR_PR_AUC:
+            per_label[label] = None
+            continue
+        value = round(float(average_precision_score(Y_te[:, i], proba[:, i])), 4)
+        per_label[label] = value
+        supported.append(value)
+
+    return {
+        "macro_pr_auc": round(sum(supported) / len(supported), 4) if supported else None,
+        "macro_over_n_labels": len(supported),
+        "min_test_positives": MIN_TEST_POSITIVES_FOR_PR_AUC,
+        "underpowered_labels": sorted(l for l, v in per_label.items() if v is None),
+        "test_positives": support,
+        "per_label": per_label,
+    }
 
 
 def _zero_vector_sanity_check(model, n_features: int, labels: list[str],
@@ -311,6 +452,13 @@ def train_ttp(allow_prior_only: bool = False):
     X_tr, X_val, Y_tr, Y_val = _multilabel_split(X_fit_val, Y_fit_val, test_size=0.25)
     print(f"Split: {len(X_tr)} fit / {len(X_val)} validation (thresholds) / {len(X_te)} test")
 
+    groups = _group_key(df).to_numpy()
+    family_sizes = df[df["label_source"] != "benign"]["source_family"].value_counts()
+    print(f"\nFamily groups: {len(family_sizes)} malware families "
+          f"(largest {int(family_sizes.max()) if len(family_sizes) else 0}, "
+          f"smallest {int(family_sizes.min()) if len(family_sizes) else 0}), "
+          f"{int((df['label_source'] == 'benign').sum())} independent benign rows")
+
     xgb_params = dict(
         n_estimators=200, max_depth=4, learning_rate=0.1,
         subsample=0.9, colsample_bytree=0.9, tree_method="hist",
@@ -339,6 +487,15 @@ def train_ttp(allow_prior_only: bool = False):
     metrics["binary_relevance"] = _ml_metrics(Y_te, Y_pred)
     metrics["binary_relevance_at_0.5"] = _ml_metrics(Y_te, br.predict(X_te))
     metrics["pr_auc"] = _pr_auc(br, X_te, Y_te, trained_labels)
+
+    # The honest number. See FAMILY_CV_SPLITS — the stratified split above shares
+    # identical family label vectors across the boundary by construction, so it
+    # cannot distinguish inference from memorisation. This one holds out whole
+    # families and is what the model is worth on a family it has never seen.
+    print("\nFamily-held-out cross-validation (no family appears in both sides):")
+    metrics["family_held_out"] = _family_held_out_metrics(
+        X, Y, groups, trained_labels, xgb_params
+    )
 
     # The model must not have an opinion about an empty sample.
     zero_preds = _zero_vector_sanity_check(
@@ -393,6 +550,42 @@ def train_ttp(allow_prior_only: bool = False):
     print(f"\nTTP model (Binary Relevance) saved to {TTP_MODEL_PATH}")
     print(f"Metrics written to {TTP_METRICS_OUT}:")
     print(json.dumps(metrics, indent=2))
+    _print_headline(metrics)
+
+
+def _print_headline(metrics: dict) -> None:
+    """
+    The two evaluations side by side, last, so the gap between them is the thing left
+    on screen. The stratified column is comparable to published DroidTTP-style
+    numbers; the family-held-out column is the one to quote about this model.
+    """
+    strat = metrics.get("binary_relevance") or {}
+    group = metrics.get("family_held_out") or {}
+    print("\n" + "=" * 72)
+    print("HEADLINE — quote the right-hand column")
+    print("=" * 72)
+    if "error" in group:
+        print(f"  family-held-out evaluation did not run: {group['error']}")
+        return
+
+    print(f"  {'metric':<20} {'stratified (leaky)':<20} {'family-held-out':<18} delta")
+    for key in ("micro_f1", "macro_f1", "jaccard_samples", "hamming_loss"):
+        a, b = strat.get(key), group.get(key)
+        if a is None or b is None:
+            continue
+        print(f"  {key:<20} {a:<20.4f} {b:<18.4f} {b - a:+.4f}")
+
+    pr = metrics.get("pr_auc") or {}
+    under = pr.get("underpowered_labels") or []
+    print(f"\n  PR-AUC macro is over {pr.get('macro_over_n_labels', 0)} labels with "
+          f">= {pr.get('min_test_positives')} test positives.")
+    if under:
+        print(f"  {len(under)} label(s) reported as null for lack of support: "
+              f"{', '.join(under)}")
+    print(
+        "\n  jaccard_samples is the per-sample number; micro_f1 and hamming_loss are\n"
+        "  both flattered by the all-zero benign rows, so neither belongs in a headline."
+    )
 
 
 if __name__ == "__main__":
