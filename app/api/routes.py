@@ -65,6 +65,17 @@ def _build_ttp_context(predicted_ttps: dict[str, float]) -> list[dict]:
 # test_unparseable_score_still_reads_suspicious.
 UNPARSEABLE_RISK_SCORE = 50.0
 
+# Upload ceiling for /analyze. Google Play's own limit for a base APK is 100 MB
+# (larger apps ship as split bundles), so 150 MB accepts anything this analyzer
+# is meant to see while bounding what a single unauthenticated request can make
+# the server hold.
+MAX_UPLOAD_BYTES = 150 * 1024 * 1024
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+# Filename /analyze_sample looks for inside settings.samples_dir. Matches the
+# path the README's curl example uses.
+DEMO_SAMPLE_NAME = "test.apk"
+
 
 @router.get("/graph/landscape")
 async def graph_landscape(limit: int = 30):
@@ -85,9 +96,21 @@ async def analyze(file: UploadFile = File(...)):
     tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}.apk")
 
     try:
-        content = await file.read()
+        # Streamed with a hard ceiling rather than `await file.read()`: /analyze is
+        # unauthenticated and its input is hostile by definition, so reading a
+        # whole attacker-chosen body into memory is a free memory-exhaustion DoS.
+        # Writing in chunks also means an oversized upload is rejected partway
+        # instead of after it has already been buffered.
+        size = 0
         with open(tmp_path, "wb") as f:
-            f.write(content)
+            while chunk := await file.read(_UPLOAD_CHUNK_BYTES):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        413,
+                        f"APK exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.",
+                    )
+                f.write(chunk)
 
         try:
             result = _run_analysis(tmp_path)
@@ -104,10 +127,30 @@ async def analyze(file: UploadFile = File(...)):
 
 @router.post("/analyze_sample", response_model=AnalysisReport)
 async def analyze_sample():
-    sample_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "guardgraph_test", "guardgraph_test.apk"))
+    """
+    Analyzes the operator's local demo APK — the UI's "Test Sample" button.
+
+    The file lives at settings.samples_dir/DEMO_SAMPLE_NAME, the directory the
+    README already tells operators to put test APKs in. The 404 names that
+    relative location, not the resolved absolute path, which would disclose the
+    server's filesystem layout to any caller.
+    """
+    sample_path = os.path.join(settings.samples_dir, DEMO_SAMPLE_NAME)
     if not os.path.exists(sample_path):
-        raise HTTPException(404, f"Sample file not found at {sample_path}")
-    return _run_analysis(sample_path)
+        raise HTTPException(
+            404,
+            f"No demo sample found. Place an APK at "
+            f"{settings.samples_dir}/{DEMO_SAMPLE_NAME} and retry.",
+        )
+
+    # Same fallback as /analyze: a hostile sample that defeats the parser must
+    # produce a verdict, not a 500. Without this the two entry points disagree
+    # on what an unparseable APK means.
+    try:
+        return _run_analysis(sample_path)
+    except Exception as exc:
+        logger.error(f"Unparseable APK fallback triggered: {exc}")
+        return _unparseable_report(sample_path, exc)
 
 
 def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:

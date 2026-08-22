@@ -1,12 +1,14 @@
 # GuardGraph AI — Processing Phases
 
-This document describes the 7 sequential static analysis execution phases that construct the processing pipeline in the cold path.
+This document describes the 9 sequential static analysis execution phases that construct the processing pipeline in the cold path.
 
 ```mermaid
 graph TD
-    A[Phase 1: Ingestion & Metadata] --> B[Phase 2: Graph Representation]
+    A[Phase 1: Ingestion & Metadata] --> A2[Phase 1.5: Signature & YARA Triage]
+    A2 --> B[Phase 2: Graph Representation]
     B --> C[Phase 3: Forensic Anchor Extraction]
-    C --> D[Phase 4: Feature Engineering]
+    C --> C2[Phase 3.5: Reverse-Engineering Deep Dive]
+    C2 --> D[Phase 4: Feature Engineering]
     D --> E[Phase 5: ML Classification]
     E --> F[Phase 6: Risk Scoring]
     F --> G[Phase 7: GraphRAG Reporting]
@@ -19,6 +21,10 @@ graph TD
 - **Actions**: Computes SHA-256 hash of the APK file, extracts certificate thumbprints, and parses the Android Manifest file to read permissions, activities, services, and receivers.
 - **Trigger**: Called in both hot and cold paths.
 
+### Phase 1.5: Signature & YARA Triage
+- **Modules**: `app/analysis/signatures.py`, `app/analysis/yara_engine.py`
+- **Actions**: Matches the SHA-256 and signing-certificate thumbprint against the local known-malware DB, optionally queries VirusTotal and MalwareBazaar (gated on `ONLINE_LOOKUPS_ENABLED` and an API key), and runs YARA over the APK plus the uncompressed inner DEX/asset byte streams so ZIP compression cannot hide a match.
+
 ### Phase 2: Graph Representation
 - **Module**: `app/analysis/cfg.py`
 - **Actions**: Builds Control Flow Graphs (CFGs) for each class method using Androguard and represents them in memory as NetworkX directed graphs, enriching nodes with Attributed CFG (ACFG) features.
@@ -26,6 +32,10 @@ graph TD
 ### Phase 3: Forensic Anchor Extraction
 - **Module**: `app/analysis/forensic.py`
 - **Actions**: Scans the method CFGs against the forensic dictionary to identify sensitive "anchor" APIs (e.g. BroadcastReceivers, SMS interception calls) and extracts 4-hop subgraphs around these anchor nodes.
+
+### Phase 3.5: Reverse-Engineering Deep Dive
+- **Modules**: `app/analysis/static_resolution.py`, `crypto_recovery.py`, `dcl_tracing.py`, `webview_bridge.py`, `native_bridge.py`
+- **Actions**: Propagates register constants within each method to resolve what obfuscated call sites actually reach — reflection targets, cipher transformations (flagging weak modes), `DexClassLoader` payload paths cross-referenced against the flagged asset inventory, `addJavascriptInterface` bridge names, and `System.loadLibrary` targets correlated with the `.so`'s ELF dynamic symbol table. Anything that does not trace back to a literal is reported unresolved rather than guessed.
 
 ### Phase 4: Feature Engineering
 - **Module**: `app/analysis/topology.py` and `app/analysis/obfuscation.py`

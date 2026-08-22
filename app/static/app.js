@@ -1,6 +1,37 @@
 let selectedFile = null;
 let currentReportData = null;
 
+// Almost everything this page displays was authored by the malware it is
+// reporting on — package names, permissions, C2 strings, asset paths, and the
+// LLM narrative written from all of those. Any of it reaching innerHTML unescaped
+// is script execution in the analyst's browser, from the sample under analysis.
+// Interpolate untrusted values through esc(); use textContent where there is no
+// markup to build.
+function esc(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// The narrative is Markdown, and Markdown permits raw HTML — which marked passes
+// through verbatim. Sanitize the rendered output with DOMPurify rather than
+// escaping the Markdown source, which would also break its formatting. If
+// DOMPurify did not load, fall back to plain text: losing the formatting is the
+// safe failure, rendering unsanitized HTML is not.
+function renderMarkdown(el, markdownText) {
+  const html = marked.parse(markdownText);
+  if (typeof DOMPurify !== 'undefined') {
+    el.innerHTML = DOMPurify.sanitize(html);
+  } else {
+    console.warn('DOMPurify unavailable — rendering the report as plain text.');
+    el.textContent = markdownText;
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   setupUploadEvents();
 });
@@ -226,7 +257,7 @@ function renderResults(data) {
 
   // 1. AI Report Markdown
   const markdownText = data.narrative_report || 'No report generated.';
-  document.getElementById('aiReportMarkdown').innerHTML = marked.parse(markdownText);
+  renderMarkdown(document.getElementById('aiReportMarkdown'), markdownText);
 
   // 2. YARA + Signature Matches
   const yaraContainer = document.getElementById('yaraMatchesList');
@@ -249,14 +280,14 @@ function renderResults(data) {
       const severityColor = sig.severity >= 0.8 ? '#ff4444' : sig.severity >= 0.5 ? '#ff8800' : '#ffcc00';
       card.innerHTML = `
         <div class="yara-card-header">
-          <span class="rule-name">${sig.source || sig.match_type} Match</span>
+          <span class="rule-name">${esc(sig.source || sig.match_type)} Match</span>
           <span class="severity-pill" style="background: ${severityColor}22; color: ${severityColor}">Severity: ${sig.severity}</span>
         </div>
-        <p class="rule-desc">${sig.description || `${sig.match_type} match via ${sig.source}`}</p>
+        <p class="rule-desc">${esc(sig.description || `${sig.match_type} match via ${sig.source}`)}</p>
         <div class="rule-target">
-          ${sig.detection_ratio ? `<span class="vt-ratio">VT: <strong>${sig.detection_ratio}</strong></span>` : ''}
-          ${sig.family ? ` &mdash; Family: <code>${sig.family}</code>` : ''}
-          &mdash; Matched: <code>${sig.matched_value ? sig.matched_value.substring(0, 16) + '...' : 'N/A'}</code>
+          ${sig.detection_ratio ? `<span class="vt-ratio">VT: <strong>${esc(sig.detection_ratio)}</strong></span>` : ''}
+          ${sig.family ? ` &mdash; Family: <code>${esc(sig.family)}</code>` : ''}
+          &mdash; Matched: <code>${esc(sig.matched_value ? sig.matched_value.substring(0, 16) + '...' : 'N/A')}</code>
         </div>
       `;
       yaraContainer.appendChild(card);
@@ -276,13 +307,13 @@ function renderResults(data) {
       const severityColor = rule.severity >= 0.8 ? '#ff4444' : rule.severity >= 0.5 ? '#ff8800' : '#ffcc00';
       card.innerHTML = `
         <div class="yara-card-header">
-          <span class="rule-name">${rule.rule_name}</span>
+          <span class="rule-name">${esc(rule.rule_name)}</span>
           <span class="severity-pill" style="background: ${severityColor}22; color: ${severityColor}">Severity: ${rule.severity}</span>
         </div>
-        <p class="rule-desc">${rule.description || 'Detects threat behavior pattern in DEX targets.'}</p>
+        <p class="rule-desc">${esc(rule.description || 'Detects threat behavior pattern in DEX targets.')}</p>
         <div class="rule-target">
-          Target: <code>${rule.scan_target || 'dex'}</code>
-          ${rule.category && rule.category !== 'unknown' ? ` &mdash; Category: <code>${rule.category}</code>` : ''}
+          Target: <code>${esc(rule.scan_target || 'dex')}</code>
+          ${rule.category && rule.category !== 'unknown' ? ` &mdash; Category: <code>${esc(rule.category)}</code>` : ''}
         </div>
       `;
       yaraContainer.appendChild(card);
@@ -340,7 +371,7 @@ function renderResults(data) {
   if (obf.coverage_note) {
     const noteEl = document.createElement('div');
     noteEl.className = 'coverage-note';
-    noteEl.innerHTML = `<span class="note-icon">📋</span> ${obf.coverage_note}`;
+    noteEl.innerHTML = `<span class="note-icon">📋</span> ${esc(obf.coverage_note)}`;
     outliersContainer.appendChild(noteEl);
   }
 
@@ -388,7 +419,7 @@ function renderResults(data) {
       pEl.className = `perm-item ${isDangerous ? 'perm-danger' : ''}`;
       // Show short permission name
       const shortPerm = perm.replace('android.permission.', '');
-      pEl.innerHTML = `<span class="perm-name">${shortPerm}</span>${isDangerous ? '<span class="perm-badge">⚠ DANGEROUS</span>' : ''}`;
+      pEl.innerHTML = `<span class="perm-name">${esc(shortPerm)}</span>${isDangerous ? '<span class="perm-badge">⚠ DANGEROUS</span>' : ''}`;
       permContainer.appendChild(pEl);
     });
   }
@@ -493,16 +524,16 @@ function renderMitreMapping(manifest) {
     item.className = 'mitre-item';
     item.innerHTML = `
       <div class="mitre-item-header">
-        <span class="mitre-id">${t.technique_id}</span>
-        <span class="mitre-name">${t.name || 'Unknown Technique'}</span>
-        <span class="mitre-tactic">${t.tactic || 'Unknown Tactic'}</span>
+        <span class="mitre-id">${esc(t.technique_id)}</span>
+        <span class="mitre-name">${esc(t.name || 'Unknown Technique')}</span>
+        <span class="mitre-tactic">${esc(t.tactic || 'Unknown Tactic')}</span>
       </div>
       <div class="progress-bar-container" style="height:6px; margin: 0.4rem 0;">
         <div class="progress-bar-fill" style="width: ${pct}%; background: ${barColor};"></div>
       </div>
       <div class="mitre-item-footer">
         <span class="spec-value code">${pct}% confidence</span>
-        ${t.description ? `<p class="mitre-description">${t.description}</p>` : ''}
+        ${t.description ? `<p class="mitre-description">${esc(t.description)}</p>` : ''}
       </div>
     `;
     container.appendChild(item);
@@ -526,12 +557,12 @@ function renderRelatedSamples(manifest) {
   related.forEach(r => {
     const item = document.createElement('div');
     item.className = 'related-sample-item';
-    const sharedTech = (r.shared_techniques || []).map(t => `<span class="chip">${t}</span>`).join('');
-    const sharedC2 = (r.shared_c2 || []).map(c => `<span class="chip chip-danger">${c}</span>`).join('');
+    const sharedTech = (r.shared_techniques || []).map(t => `<span class="chip">${esc(t)}</span>`).join('');
+    const sharedC2 = (r.shared_c2 || []).map(c => `<span class="chip chip-danger">${esc(c)}</span>`).join('');
     item.innerHTML = `
       <div class="related-sample-header">
-        <span class="mitre-name">${r.app_name || r.sha256}</span>
-        ${r.family ? `<span class="mitre-tactic">${r.family}</span>` : ''}
+        <span class="mitre-name">${esc(r.app_name || r.sha256)}</span>
+        ${r.family ? `<span class="mitre-tactic">${esc(r.family)}</span>` : ''}
         ${r.risk_score !== null && r.risk_score !== undefined ? `<span class="spec-value code" style="margin-left:auto;">score ${Number(r.risk_score).toFixed(1)}</span>` : ''}
       </div>
       ${sharedTech ? `<div class="related-sample-row"><span class="spec-label">Shared techniques:</span> ${sharedTech}</div>` : ''}
@@ -557,11 +588,11 @@ function formatNodeDetails(node) {
 
   let idHtml = '';
   if (type === 'Technique' || type === 'Certificate') {
-    idHtml = `<span class="node-detail-id">${rawValue}</span>`;
+    idHtml = `<span class="node-detail-id">${esc(rawValue)}</span>`;
   } else if (type === 'Sample' && rawValue !== 'current' && rawValue !== label) {
-    idHtml = `<span class="node-detail-id">${rawValue.length > 24 ? rawValue.slice(0, 20) + '…' : rawValue}</span>`;
+    idHtml = `<span class="node-detail-id">${esc(rawValue.length > 24 ? rawValue.slice(0, 20) + '…' : rawValue)}</span>`;
   }
-  return `<span class="node-detail-name">${type}: ${label}</span>${idHtml}`;
+  return `<span class="node-detail-name">${esc(type)}: ${esc(label)}</span>${idHtml}`;
 }
 
 function showNodeDetails(targetElId, node) {

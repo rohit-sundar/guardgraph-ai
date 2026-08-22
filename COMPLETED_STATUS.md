@@ -50,7 +50,7 @@ graph TD
 
 ### Session 5: Multi-label MITRE ATT&CK TTP Classifier + Zero-Day Engine (July 16, 2026)
 - **Ontology Loading**: Built a full STIX-derived MITRE ATT&CK Mobile ontology with 57 parent techniques (loaded via `scripts/load_ontology.py` into Neo4j).
-- **Features & intent action vocabulary**: Added `TTP_FEATURE_NAMES` (**179 features**) in `features.py` containing a binary presence vocabulary of 92 permissions, 25 intent actions, 32 sensitive APIs, 3 component counts, behavior flags, topology metrics, and triage stats.
+- **Features & intent action vocabulary**: Added `TTP_FEATURE_NAMES` (**181 features** as of the reverse-engineering merge) in `features.py` containing a binary presence vocabulary of 92 permissions, 25 intent actions, 32 sensitive APIs, 3 component counts, behavior flags, topology metrics, and triage stats.
 - **Dataset builder**: Created `scripts/build_ttp_dataset.py` implementing a hybrid staged dataset (Stage A: MalwareBazaar downloads + Stage B: local weak-labelling of CICMalDroid2020 via behaviors).
 - **Binary Relevance model**: Implemented `BinaryRelevanceXGB` (one model per technique) in `app/ml/classifier.py`, trained via `scripts/train_model.py --target ttp`.
 - **Zero-Day Indicator**: Configured `RiskScoreBreakdown.zero_day_indicator` which flags samples having strong forensic/structural evidence but low classifier confidence.
@@ -69,7 +69,7 @@ graph TD
 | **Multi-label TTP model** | ⚠️ Stubbed | Code, inference, and training script are implemented; needs a retrained `.joblib` model file at `data/models/guardgraph_ttp_br_v1.joblib` |
 | **Auxiliary Family model** | ⚠️ Stubbed | Pipeline degrades gracefully without predictions until a model is placed at `data/models/guardgraph_xgb_v1.json` |
 | **GraphRAG Reporting** | ✅ Real | Swapped to local Ollama (`qwen2.5:7b-instruct-q4_K_M` GGUF) via OpenAI-compat API |
-| **Reflection / Native Code** | ❌ Stubbed / Out | Out of scope for the prototype phase |
+| **Reflection / crypto / DCL / WebView / native bridge resolution** | ✅ Real | Phase 3.5. Register-constant propagation in `app/analysis/static_resolution.py` resolves reflection targets, cipher transformations, `DexClassLoader` payload paths, `addJavascriptInterface` bridges, and `System.loadLibrary` ↔ JNI symbol correlation. Native `.so` disassembly is still out of scope — only the JNI symbol table is read. |
 
 ---
 

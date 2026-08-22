@@ -5,10 +5,15 @@ services:
     image: neo4j:5.24-community
     container_name: guardgraph-neo4j
     ports:
-      - "7474:7474"   # browser UI
-      - "7687:7687"   # bolt
+      # Bound to loopback on purpose. This host also handles live malware
+      # samples, and the container ships with a well-known default password —
+      # a 0.0.0.0 bind would put the intelligence graph on the local network.
+      - "127.0.0.1:7474:7474"   # browser UI
+      - "127.0.0.1:7687:7687"   # bolt
     environment:
-      - NEO4J_AUTH=neo4j/changeme
+      # Same value the app reads from .env, so changing the password in one
+      # place cannot leave the API unable to authenticate to its own database.
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-changeme}
       - NEO4J_PLUGINS=["apoc"]
     volumes:
       - neo4j_data:/data

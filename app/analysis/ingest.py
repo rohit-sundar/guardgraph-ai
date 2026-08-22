@@ -34,6 +34,12 @@ from app.analysis.apk_static import (
 
 _ZIP_LOCAL_HEADER_SIG = b"PK\x03\x04"
 
+# Ceiling on a single DEX recovered by the raw-header scan below. A DEX indexes
+# methods and fields with 16-bit ids, which keeps real ones far under this; the
+# cap is here because the bytes come from a deliberately malformed archive, where
+# the declared sizes cannot be trusted to bound the inflated output.
+MAX_RECOVERED_DEX_BYTES = 128 * 1024 * 1024
+
 
 def _raw_scan_dex_from_corrupted_zip(data: bytes) -> dict[str, bytes]:
     """
@@ -95,8 +101,19 @@ def _raw_scan_dex_from_corrupted_zip(data: bytes) -> dict[str, bytes]:
             decompressor = zlib.decompressobj(-15)
             try:
                 remainder = data[data_start:]
-                payload = decompressor.decompress(remainder)
-                if decompressor.eof:
+                # Bounded: this inflates an attacker-authored deflate stream, and
+                # the sample is presumed hostile. Past the cap `eof` stays False
+                # and the entry is skipped, exactly like a stream that fails to
+                # inflate — the remainder is left compressed in unconsumed_tail,
+                # so a zip bomb costs MAX_RECOVERED_DEX_BYTES, not the whole
+                # expansion.
+                payload = decompressor.decompress(remainder, MAX_RECOVERED_DEX_BYTES)
+                if decompressor.unconsumed_tail:
+                    logger.warning(
+                        f"Raw-scan recovery of {name} stopped at the "
+                        f"{MAX_RECOVERED_DEX_BYTES} byte limit — entry skipped."
+                    )
+                elif decompressor.eof:
                     consumed = len(remainder) - len(decompressor.unused_data)
                     if is_dex_candidate:
                         results[name] = payload
