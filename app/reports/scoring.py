@@ -75,6 +75,40 @@ DEFAULT_TTP_THRESHOLD = 0.5
 # The separation this constant assumes is intact, so it is unchanged.
 CONFIDENCE_SATURATION_MASS = 2.5
 
+# ttp_severity_component / forensic_anchor_component (N9). Both used to return the
+# *mean* severity of what was found, which made every component non-monotonic in
+# evidence: each additional corroborating technique or behavior pulled the average
+# down. Measured over the 364-row dataset (220 benign / 144 malware) by running the
+# trained BR bundle over the stored feature vectors — reproduce with
+# `python scripts/measure_saturation.py`:
+#
+#   ttp_severity (mean)      benign p95 0.006  max 0.941 | malware p50 0.727 max 0.810
+#                            ^ the highest-scoring sample in the corpus was BENIGN,
+#                              because one severe technique averages to its own
+#                              severity while eight techniques average to the middle.
+#   forensic_anchor (mean)   benign p50 0.600  p95 0.800 | malware p25 0.550 p50 0.767
+#                            ^ separation (malware p50 - benign p95) = -0.033. The
+#                              component discriminated BACKWARDS: a clean app matching
+#                              one DYNAMIC_REFLECTION anchor scored 0.600, while
+#                              malware matching {CRYPTOGRAPHY, REFLECTION, C2} averaged
+#                              0.583 — the mean penalised malware for also doing the
+#                              benign things.
+#
+# Both now sum severity into an evidence mass and squash it, the same shape
+# classifier_confidence_component uses. The two constants are NOT shared, because
+# the two masses live on different scales (malware median mass 5.905 for techniques
+# against 1.700 for anchors).
+#
+# TTP: chosen so the malware median is unchanged (0.727 -> 0.731), which keeps the
+# existing verdict bands valid, while the benign outlier collapses 0.941 -> 0.381.
+TTP_SEVERITY_SATURATION_MASS = 4.5
+# Anchors: chosen for maximum separation across the candidates measured (1.5-4.0);
+# at 1.5 the sign flips positive (+0.046) and benign p50 halves (0.600 -> 0.330)
+# while malware p50 moves only 0.767 -> 0.678. Both corpora move DOWN, benign
+# roughly three times as far as malware — the conservative direction for bands that
+# were derived as "above where clean apps top out".
+ANCHOR_SATURATION_MASS = 1.5
+
 # obfuscation_component (N7). Measured over the corpus, all four original inputs
 # were useless: string-pool entropy tops out at 3.47 against a 7.2 threshold and runs
 # the wrong way (benign 3.28 vs malware 2.78); `flattening_suspected` is an
@@ -205,6 +239,56 @@ BAND_SUSPICIOUS_CEILING = 60.0
 # `malicious` verdict on a legitimate app is judged worse than a real trojan reading
 # `high` instead of `malicious`.
 BAND_HIGH_CEILING = 70.0
+
+# ── Brand impersonation (N11) ─────────────────────────────────────────────────
+# Impersonation enters the score as a FLOOR, not as an eighth weighted component.
+# Two reasons, and the second is the one that matters:
+#
+#   1. An eighth slot would mean redistributing the 100 points across all seven
+#      existing components and re-deriving all four band boundaries — a large change
+#      to a calibration that was measured, in order to accommodate a signal that
+#      averages badly.
+#   2. It averages badly because it is categorically different evidence. Every other
+#      component estimates how malicious the CODE looks. This one asserts a fact about
+#      the app's IDENTITY: "this APK carries PhonePe's package name and is signed by a
+#      key PhonePe does not use." A weighted sum lets a clone with a deliberately
+#      modest payload read `low` — which is exactly the app a fraud team most needs to
+#      see, since the payload is not the attack. The brand is.
+#
+# So the weighted total still says what the code looks like, and the floor says what
+# the verdict cannot fall below given who the app is pretending to be. Each floor is a
+# band boundary rather than an invented number, so the floor states a VERDICT and lets
+# the arithmetic supply the score above it.
+
+# _band_for uses `total <= ceiling`, so a floor placed exactly ON a boundary lands in
+# the band BELOW it. Each floor is therefore the boundary plus this epsilon — small
+# enough that the floor still reads as the boundary it was derived from, large enough
+# to survive the round(total, 2) applied to the final score.
+_JUST_ABOVE = 0.01
+
+IMPERSONATION_SCORE_FLOOR = {
+    # Definitive: Android identifies publishers by signing key. Either the real
+    # publisher signed this or somebody else did, and there is no third case.
+    "certificate_mismatch": BAND_HIGH_CEILING + _JUST_ABOVE,         # -> `malicious`
+    # Strong but not definitive: an icon can be coincidentally similar, and the
+    # reference hash could have been captured from a bad source APK.
+    "icon_reuse": BAND_SUSPICIOUS_CEILING + _JUST_ABOVE,             # -> `high`
+    "package_typosquat": BAND_SUSPICIOUS_CEILING + _JUST_ABOVE,      # -> `high`
+    # Weakest of the four: display names are not unique, and a genuine third-party
+    # companion app may legitimately carry a brand's name.
+    "label_impersonation": BAND_MEDIUM_CEILING + _JUST_ABOVE,        # -> `suspicious`
+}
+
+# The band each floor is meant to guarantee. Pinned by
+# test_impersonation_floor_lands_in_its_intended_band so that moving a band boundary
+# cannot silently demote an impersonation verdict — the floors are expressed in terms
+# of the boundaries, and this is what proves the arithmetic still agrees.
+IMPERSONATION_FLOOR_BAND = {
+    "certificate_mismatch": "malicious",
+    "icon_reuse": "high",
+    "package_typosquat": "high",
+    "label_impersonation": "suspicious",
+}
 
 RISKY_PERMISSIONS = {
     "android.permission.BIND_ACCESSIBILITY_SERVICE": 1.0,
@@ -338,13 +422,26 @@ def _technique_severity(ttp: str) -> float:
 def ttp_severity_component(predicted_ttps: dict[str, float]) -> float:
     """
     Fed by MITRE technique IDs predicted DIRECTLY by the multi-label TTP classifier
-    (cold path) or the FAMILY_TO_TTPS bridge (legacy/hot path). Severity now covers
-    the full Mobile technique space via _technique_severity, not just 5 hardcoded IDs.
+    (cold path) or the FAMILY_TO_TTPS bridge (legacy/hot path). Severity covers the
+    full Mobile technique space via _technique_severity, not just 5 hardcoded IDs.
+
+    N9: this used to return the MEAN of the severity-weighted probabilities, which
+    made the component fall as the model found more. T1471 at 0.9 alone scored 0.855;
+    the same T1471 surrounded by five corroborating Discovery techniques scored 0.510
+    — a 5.2-point swing on a 15-point component, in the wrong direction. Over the
+    corpus it was worse than non-monotonic: the single highest value belonged to a
+    *benign* app (0.941, one severe technique) against a malware maximum of 0.810,
+    because averaging eight techniques always lands near the middle of the severity
+    scale while averaging one lands on that technique's own severity.
+
+    Severity-weighted probabilities are now summed into an evidence mass and squashed
+    (see TTP_SEVERITY_SATURATION_MASS), so the component is monotone in evidence and
+    still bounded at 1.0 — the same shape classifier_confidence_component uses.
     """
     if not predicted_ttps:
         return 0.0
-    weighted = [prob * _technique_severity(ttp) for ttp, prob in predicted_ttps.items()]
-    return min(1.0, sum(weighted) / len(weighted))
+    mass = sum(prob * _technique_severity(ttp) for ttp, prob in predicted_ttps.items())
+    return 1.0 - math.exp(-mass / TTP_SEVERITY_SATURATION_MASS)
 
 
 def forensic_anchor_component(matched_anchor_behaviors: set[str]) -> float:
@@ -355,16 +452,23 @@ def forensic_anchor_component(matched_anchor_behaviors: set[str]) -> float:
     presence in the binary — the strongest static predictor per GUARD SHAP.
     Scaled by per-behavior severity weights so a confirmed SMS interception
     anchor counts more than a generic crypto usage hit.
+
+    N9: this used to return the mean severity plus a small breadth bonus
+    (`0.05 * (n - 1)`, capped at 0.2). The bonus was far too small to offset what
+    averaging did. Measured over the corpus the component discriminated *backwards*:
+    benign p95 0.800 against malware p50 0.767, separation -0.033. Clean apps match
+    a median of one anchor, and the mean of one anchor is that anchor's own severity
+    — so a benign app matching DYNAMIC_REFLECTION (0.6) scored 0.600, while malware
+    matching CRYPTOGRAPHY_USAGE + DYNAMIC_REFLECTION + C2_BEHAVIOR averaged 0.583.
+    The component was charging malware for also doing the ordinary things.
+
+    Summing into a saturating mass fixes the sign (separation +0.046) and is monotone:
+    an additional proven behavior can never lower the score.
     """
     if not matched_anchor_behaviors:
         return 0.0
-    weights = [
-        BEHAVIOR_SEVERITY.get(b, 0.5) for b in matched_anchor_behaviors
-    ]
-    # Mean severity of matched behaviors, with a bonus for breadth
-    # (multiple distinct behaviors signal more sophisticated malware).
-    breadth_bonus = min(0.2, 0.05 * (len(weights) - 1))
-    return min(1.0, (sum(weights) / len(weights)) + breadth_bonus)
+    mass = sum(BEHAVIOR_SEVERITY.get(b, 0.5) for b in matched_anchor_behaviors)
+    return 1.0 - math.exp(-mass / ANCHOR_SATURATION_MASS)
 
 
 def obfuscation_component(
@@ -588,6 +692,10 @@ def compute_risk_score(
     # See classifier_confidence_component.
     classifier_evidence_present: bool = True,
     ttp_thresholds: dict[str, float] | None = None,
+    # Brand-impersonation findings (app/analysis/impersonation.py) as dicts carrying
+    # at least a "kind". Applied as a floor, not a weighted term — see
+    # IMPERSONATION_SCORE_FLOOR for why.
+    impersonation_findings: list[dict] | None = None,
 ) -> RiskScoreBreakdown:
     if matched_anchor_behaviors is None:
         matched_anchor_behaviors = set()
@@ -624,6 +732,21 @@ def compute_risk_score(
         0.25 * c1 + 0.20 * c2 + 0.15 * c3 + 0.15 * c4 + 0.15 * c5 + 0.05 * c6 + 0.05 * c7
     ) * 100
 
+    # Brand impersonation raises a floor under the weighted total. It never lowers a
+    # score and never caps one: a clone that is ALSO obvious malware keeps the higher
+    # arithmetic verdict. `impersonation_floor_applied` records whether the floor
+    # actually moved the number, so the report can distinguish "this scored 82 on its
+    # own behaviour" from "this scored 11 and is a signed clone of a bank app".
+    weighted_total = total
+    impersonation_floor = 0.0
+    for finding in impersonation_findings or []:
+        impersonation_floor = max(
+            impersonation_floor,
+            IMPERSONATION_SCORE_FLOOR.get(finding.get("kind", ""), 0.0),
+        )
+    if impersonation_floor > total:
+        total = impersonation_floor
+
     band = _band_for(total)
 
     # Zero-day / novel-variant signal: the model-free components (deterministic
@@ -649,4 +772,6 @@ def compute_risk_score(
         total_score=round(total, 2),
         verdict_band=band,
         zero_day_indicator=zero_day_indicator,
+        impersonation_floor_applied=impersonation_floor > weighted_total,
+        weighted_score=round(weighted_total, 2),
     )
