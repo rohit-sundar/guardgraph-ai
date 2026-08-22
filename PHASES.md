@@ -1,10 +1,11 @@
 # GuardGraph AI — Processing Phases
 
-This document describes the 7 sequential static analysis execution phases that construct the processing pipeline in the cold path.
+This document describes the 9 sequential static analysis execution phases that construct the processing pipeline in the cold path.
 
 ```mermaid
 graph TD
-    A[Phase 1: Ingestion & Metadata] --> B[Phase 2: Graph Representation]
+    A[Phase 1: Ingestion & Metadata] --> A2[Phase 1.5: Signature & YARA Triage]
+    A2 --> B[Phase 2: Graph Representation]
     B --> C[Phase 3: Forensic Anchor Extraction]
     C --> C5[Phase 3.5: RE Deep Dive]
     C5 --> D[Phase 4: Feature Engineering]
@@ -19,6 +20,10 @@ graph TD
 - **Module**: `app/analysis/ingest.py`
 - **Actions**: Computes SHA-256 hash of the APK file, extracts certificate thumbprints, and parses the Android Manifest file to read permissions, activities, services, and receivers.
 - **Trigger**: Called in both hot and cold paths.
+
+### Phase 1.5: Signature & YARA Triage
+- **Modules**: `app/analysis/signatures.py`, `app/analysis/yara_engine.py`
+- **Actions**: Matches the SHA-256 and signing-certificate thumbprint against the local known-malware DB, optionally queries VirusTotal and MalwareBazaar (gated on `ONLINE_LOOKUPS_ENABLED` and an API key), and runs YARA over the APK plus the uncompressed inner DEX/asset byte streams so ZIP compression cannot hide a match.
 
 ### Phase 2: Graph Representation
 - **Module**: `app/analysis/cfg.py`

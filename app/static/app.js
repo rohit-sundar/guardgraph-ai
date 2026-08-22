@@ -24,11 +24,25 @@ function esc(value) {
     .replace(/'/g, '&#39;');
 }
 
+// The narrative is Markdown, and Markdown permits raw HTML — which marked passes
+// through verbatim. Sanitize the rendered output with DOMPurify rather than
+// escaping the Markdown source, which would also break its formatting. If
+// DOMPurify did not load, fall back to plain text: losing the formatting is the
+// safe failure, rendering unsanitized HTML is not.
+function renderMarkdown(el, markdownText) {
+  const html = marked.parse(markdownText);
+  if (typeof DOMPurify !== 'undefined') {
+    el.innerHTML = DOMPurify.sanitize(html);
+  } else {
+    console.warn('DOMPurify unavailable — rendering the report as plain text.');
+    el.textContent = markdownText;
+  }
+}
+
 
 function setupUploadEvents() {
   const dropZone = document.getElementById('dropZone');
   const fileInput = document.getElementById('fileInput');
-  const btnTestSample = document.getElementById('btnTestSample');
   const btnStartAnalyze = document.getElementById('btnStartAnalyze');
 
   // Drag & drop handlers
@@ -61,11 +75,6 @@ function setupUploadEvents() {
     }
   });
 
-  btnTestSample.addEventListener('click', (e) => {
-    e.stopPropagation();
-    runSampleAnalysis();
-  });
-
   btnStartAnalyze.addEventListener('click', () => {
     if (selectedFile) {
       uploadAndAnalyze(selectedFile);
@@ -91,24 +100,6 @@ function handleFileSelected(file) {
 // Only used as a fallback when an event omits total_phases; every event from a
 // current server carries its own, so this rarely matters in practice.
 const PIPELINE_PHASE_COUNT = 10;
-
-async function runSampleAnalysis() {
-  document.getElementById('uploadSection').classList.add('hidden');
-  document.getElementById('progressSection').classList.remove('hidden');
-  document.getElementById('resultsSection').classList.add('hidden');
-  resetPipelineSteps();
-
-  try {
-    const startResp = await fetch('/analyze_sample/start', { method: 'POST' });
-    if (!startResp.ok) {
-      throw new Error(`Server returned HTTP ${startResp.status}`);
-    }
-    const { job_id } = await startResp.json();
-    await streamAnalysis(job_id);
-  } catch (err) {
-    handleAnalysisFailure("Error running sample analysis: " + err.message);
-  }
-}
 
 async function uploadAndAnalyze(file) {
   document.getElementById('uploadSection').classList.add('hidden');
@@ -349,7 +340,7 @@ function renderResults(data) {
 
   // 1. AI Report Markdown
   const markdownText = data.narrative_report || 'No report generated.';
-  document.getElementById('aiReportMarkdown').innerHTML = marked.parse(markdownText);
+  renderMarkdown(document.getElementById('aiReportMarkdown'), markdownText);
 
   // 2. YARA + Signature Matches
   const yaraContainer = document.getElementById('yaraMatchesList');
@@ -843,11 +834,11 @@ function formatNodeDetails(node) {
 
   let idHtml = '';
   if (type === 'Technique' || type === 'Certificate') {
-    idHtml = `<span class="node-detail-id">${rawValue}</span>`;
+    idHtml = `<span class="node-detail-id">${esc(rawValue)}</span>`;
   } else if (type === 'Sample' && rawValue !== 'current' && rawValue !== label) {
-    idHtml = `<span class="node-detail-id">${rawValue.length > 24 ? rawValue.slice(0, 20) + '…' : rawValue}</span>`;
+    idHtml = `<span class="node-detail-id">${esc(rawValue.length > 24 ? rawValue.slice(0, 20) + '…' : rawValue)}</span>`;
   }
-  return `<span class="node-detail-name">${type}: ${label}</span>${idHtml}`;
+  return `<span class="node-detail-name">${esc(type)}: ${esc(label)}</span>${idHtml}`;
 }
 
 function showNodeDetails(targetElId, node) {

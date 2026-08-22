@@ -71,6 +71,34 @@ def _build_ttp_context(predicted_ttps: dict[str, float]) -> list[dict]:
 # test_unparseable_score_still_reads_suspicious.
 UNPARSEABLE_RISK_SCORE = 50.0
 
+# Upload ceiling shared by /analyze and /analyze/start. Google Play's own limit
+# for a base APK is 100 MB (larger apps ship as split bundles), so 150 MB accepts
+# anything this analyzer is meant to see while bounding what a single
+# unauthenticated request can make the server hold.
+MAX_UPLOAD_BYTES = 150 * 1024 * 1024
+_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+async def _save_upload_bounded(file: UploadFile, tmp_path: str) -> None:
+    """
+    Streams an upload to disk under MAX_UPLOAD_BYTES rather than `await file.read()`
+    — /analyze and /analyze/start are both unauthenticated and their input is
+    hostile by definition, so reading a whole attacker-chosen body into memory
+    first is a free memory-exhaustion DoS. Writing in chunks also means an
+    oversized upload is rejected partway through instead of after it has already
+    been buffered in full.
+    """
+    size = 0
+    with open(tmp_path, "wb") as f:
+        while chunk := await file.read(_UPLOAD_CHUNK_BYTES):
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    413,
+                    f"APK exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB upload limit.",
+                )
+            f.write(chunk)
+
 
 @router.get("/graph/landscape")
 async def graph_landscape(limit: int = 30):
@@ -112,9 +140,7 @@ async def analyze(file: UploadFile = File(...)):
     tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}.apk")
 
     try:
-        content = await file.read()
-        with open(tmp_path, "wb") as f:
-            f.write(content)
+        await _save_upload_bounded(file, tmp_path)
 
         # _analyze_with_fallback is fully synchronous and takes minutes. Called
         # directly inside `async def` it blocks the event loop for its whole
@@ -125,14 +151,6 @@ async def analyze(file: UploadFile = File(...)):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
     return result
-
-
-@router.post("/analyze_sample", response_model=AnalysisReport)
-async def analyze_sample():
-    sample_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "guardgraph_test", "guardgraph_test.apk"))
-    if not os.path.exists(sample_path):
-        raise HTTPException(404, f"Sample file not found at {sample_path}")
-    return await run_in_threadpool(_analyze_with_fallback, sample_path)
 
 
 # ── Streamed progress (SSE) ─────────────────────────────────────────────────
@@ -194,9 +212,7 @@ async def analyze_start(file: UploadFile = File(...)):
     tmp_dir = tempfile.mkdtemp()
     tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}.apk")
     try:
-        content = await file.read()
-        with open(tmp_path, "wb") as f:
-            f.write(content)
+        await _save_upload_bounded(file, tmp_path)
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
@@ -209,29 +225,6 @@ async def analyze_start(file: UploadFile = File(...)):
     threading.Thread(
         target=_run_background_job, args=(tmp_dir, tmp_path, job_id),
         name=f"analyze-{job_id[:8]}", daemon=True,
-    ).start()
-
-    return {"job_id": job_id}
-
-
-@router.post("/analyze_sample/start")
-async def analyze_sample_start():
-    """Same as /analyze/start but against the bundled demo sample — the 'Quick
-    Test' button gets real progress too, not just uploaded files."""
-    sample_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "guardgraph_test", "guardgraph_test.apk"))
-    if not os.path.exists(sample_path):
-        raise HTTPException(404, f"Sample file not found at {sample_path}")
-
-    job_id = uuid.uuid4().hex
-    progress.broker.create(job_id)
-    with _JOBS_LOCK:
-        _JOBS[job_id] = {"status": "running", "result": None}
-
-    # No tmp_dir to clean up — the sample file is a permanent fixture, not an
-    # upload — so the cleanup path is a no-op directory that doesn't exist.
-    threading.Thread(
-        target=_run_background_job, args=(tempfile.mkdtemp(), sample_path, job_id),
-        name=f"analyze-sample-{job_id[:8]}", daemon=True,
     ).start()
 
     return {"job_id": job_id}
@@ -403,9 +396,9 @@ def _run_analysis(filepath: str, job_id: str | None = None) -> AnalysisReport:
     """
     job_id is optional and purely additive: when given, each phase boundary is
     published via app.core.progress for /analyze/stream/{job_id} to relay over SSE.
-    None (the default) makes every progress.emit() call a no-op, so /analyze,
-    /analyze_sample, and every test or script calling this directly are
-    byte-for-byte unaffected — see progress.py's module docstring for why.
+    None (the default) makes every progress.emit() call a no-op, so /analyze and
+    every test or script calling this directly are byte-for-byte unaffected — see
+    progress.py's module docstring for why.
     """
     # --- Phase 1: Ingestion & Metadata (+ Android malware static enrichments) ---
     progress.emit(job_id, 1, "APK Ingestion", "start")
