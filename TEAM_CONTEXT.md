@@ -6,6 +6,187 @@
 
 ## Change Log
 
+### Session 12 — 2026-08-22 | Author: Tarun (with Claude) — Reverse-engineering deep dive, manifest/ZIP anti-analysis resilience, Neo4j graph correlation, GraphRAG hardening; fixed a broken merge already on `main`
+
+> **Overview:** Large multi-part session on `feature/reflection-resolution` (merged to `main` at the
+> end). Four themes: (1) real static reverse-engineering — reflection/crypto/DCL/WebView/native
+> resolution via a shared register-constant propagation engine, no execution; (2) resilience against
+> two real anti-analysis techniques found on live corpus samples (AXML chunk-header corruption, ZIP
+> EOCD/local-header corruption); (3) Neo4j stopped being just a cache — it now backs a MITRE mapping
+> tab, a cross-sample correlation feature (shared techniques / C2 / reused certificate), and a live
+> in-app "Threat Landscape" graph view; (4) GraphRAG anti-fabrication hardening after live-testing
+> caught the model inventing a fake sample name and hash. Also: `main`'s prior merge commit
+> (`3fcc890`) had **literal unresolved git conflict markers committed into `app.js`, `index.html`,
+> `obfuscation.py`, `pipeline.py`** — invalid syntax, would not have imported. Found and fixed as part
+> of resolving this session's own merge.
+
+**Files added:** `app/analysis/static_resolution.py`, `app/analysis/crypto_recovery.py`,
+`app/analysis/dcl_tracing.py`, `app/analysis/webview_bridge.py`, `app/analysis/native_bridge.py`,
+`app/analysis/failure_diagnostics.py`, `tests/test_reflection_resolution.py`,
+`tests/test_micro_emulation.py`, `tests/test_re_findings.py`, `tests/test_manifest_resilience.py`,
+`tests/test_failure_diagnostics.py`
+
+**Files changed (major):** `app/analysis/obfuscation.py`, `app/analysis/ingest.py`,
+`app/core/pipeline.py`, `app/core/schemas.py`, `app/api/routes.py`, `app/graph/cache.py`,
+`app/reports/scoring.py`, `app/reports/graphrag.py`, `app/main.py`, `app/static/app.js`,
+`app/static/index.html`, `app/static/styles.css`, `tests/test_fixes_regression.py`,
+`tests/test_apk_static.py`, `requirements.txt` (+`pyelftools`)
+
+**1. Reverse-engineering deep dive (closes the `obfuscation.py` reflection-resolution TODO, then extends it)**
+- `static_resolution.py` [NEW]: shared engine — per-block register-constant tracking, propagated across
+  CFG edges only when the destination has exactly one predecessor (ambiguous joins stay unresolved
+  rather than guessed — "absence of evidence, not evidence of absence", matching the codebase's
+  existing discipline). Resolves `Class.forName`/`getMethod`/`getDeclaredMethod`/`ClassLoader.loadClass`
+  + `Method.invoke` call sites back to literal strings where a local dataflow chain makes that
+  possible. Also folds simple Base64/`String([B)` decode transforms and does two-pass inter-procedural
+  constant-return summarization for local helper methods (string-decrypt micro-emulation).
+- `crypto_recovery.py`, `dcl_tracing.py`, `webview_bridge.py`, `native_bridge.py` [NEW]: same engine
+  applied to `Cipher.getInstance`/`SecretKeySpec`/`IvParameterSpec` (flags weak modes/static IVs),
+  `DexClassLoader`/`InMemoryDexClassLoader`/`PathClassLoader` targets, `addJavascriptInterface` bridge
+  exposure, and `System.loadLibrary` + JNI symbol correlation via `pyelftools` (native `.so` `.dynsym`).
+- `AnalysisManifest` gained `resolved_crypto_configs` / `resolved_dcl_targets` /
+  `resolved_webview_bridges` / `resolved_native_bridges` (human-readable strings). New "🔬 Reverse
+  Engineering" UI tab. `pipeline.py` gained `run_phase3b_re_deepdive` (Phase 3.5, after forensic
+  matching, before feature engineering — needs `cfgs` + `ingestion`).
+- `obfuscation.py`'s `count_reflection_calls()` now delegates to `static_resolution.resolve_invocations`
+  instead of hardcoding `unresolved = 0`; `scoring.py`'s `obfuscation_component` was **already wired**
+  to react to nonzero `unresolved_reflection_targets` (comment there said as much), so this closes a
+  loop that was half-built.
+
+**2. Anti-analysis resilience (found on real corpus samples, not hypothetical)**
+- `ingest.py` gained `_fallback_dex_analysis()` (manifest parse fails → extract DEX straight off the
+  ZIP via `zipfile`) and `_raw_scan_dex_from_corrupted_zip()` (`zipfile.ZipFile` itself fails to open →
+  walk raw bytes for `PK\x03\x04` signatures, decompress each candidate to zlib's own EOF marker rather
+  than trusting size fields, which correctly handles the streaming/data-descriptor DEX entries a real
+  sample used). `IngestionResult.manifest_parse_failed: bool` threads through to
+  `ObfuscationSignal.manifest_parse_failed` and scoring: `MANIFEST_CORRUPTED_WEIGHT = 0.60` — the one
+  obfuscation signal scored without corpus measurement first, since a corrupted manifest has no
+  plausible benign explanation (see that constant's docstring in `scoring.py` for why every *other*
+  signal here required measurement first).
+- `failure_diagnostics.py` [NEW]: `probable_cause(exc)` matches a still-unrecognized parser failure's
+  full traceback against known signatures (axml/badzipfile/struct.error/etc.) and returns a plain-
+  English explanation instead of a raw exception — wired into `routes.py`'s `_unparseable_report`,
+  which now also always calls `run_phase7_reporting` for a real LLM narrative (previously a hardcoded
+  empty-report string) with its own fallback only if Ollama itself is unreachable.
+- **Investigated but NOT fixed** (documented, not silently dropped): a third-layer evasion on one
+  corpus sample where the ZIP local-header and central-directory compression-method fields disagree
+  and the underlying payload isn't standard deflate either way — assessed as needing real reverse
+  engineering or dynamic analysis, not a quick static win.
+
+**3. Neo4j: cache → correlation graph** (`app/graph/cache.py`, `app/graph/ontology.py`, `app/api/routes.py`)
+- `store_signature()` now also writes `app_name` (so Neo4j Browser's node-caption guess picks a real
+  package name instead of a random line out of `limitations`), and MERGEs `C2Indicator`
+  (`CONTACTS` edge) and `Certificate` (`SIGNED_WITH` edge) nodes when present. **Three separate Cypher
+  statements**, not one chained query — `UNWIND` over an empty list (predicted_ttps legitimately `{}`
+  when the classifier evidence gate withholds a verdict) drops every row after it in that query, which
+  would silently skip a later C2/cert MERGE too if chained after the ttps UNWIND.
+- `find_related_samples(technique_ids, c2_indicators, exclude_sha256, cert_thumbprint)` [NEW]:
+  correlates the CURRENT analysis's signals against previously-cached samples via shared MITRE
+  technique, shared C2 infrastructure, or a reused signing certificate (weighted higher than the
+  others — strongest signal of common authorship). Works before the current sample is even stored, so
+  it surfaces matches on a fresh cold-path run too. Feeds the new "Correlated Samples" UI tab and
+  `AnalysisManifest.related_samples`.
+- `get_threat_landscape(limit)` [NEW] + `GET /graph/landscape` [NEW endpoint]: whole-graph Cytoscape
+  snapshot (Sample/MalwareFamily/Technique/C2Indicator/Certificate + edges), rendered live in a new
+  "🌐 Threat Landscape" UI tab — no separate Neo4j Desktop window needed to show graph correlation in a
+  demo. Click-to-isolate (tap a node → fade everything outside its neighborhood).
+- `AnalysisManifest.ttp_context` [NEW]: merges `predicted_ttps` with real ontology facts
+  (`get_technique_context` — same call GraphRAG already used for narrative grounding) so the new
+  "MITRE ATT&CK Mapping" UI tab shows real technique names/tactics/descriptions, not bare IDs.
+- **The CFG Topology tab's graph explorer was rewritten twice this session** — once (by Claude) into a
+  Sample→Family→Technique→C2 Neo4j-correlation view replacing a former **synthetic mock** (the old
+  code fabricated `BB_entry_N`/`BB_exit_N` wrapper nodes around raw outlier offsets, and had a
+  hardcoded fake fallback example — `"SMS Broadcast Receiver"`/`"sendTextMessage()"` — shown when there
+  was no real data). Independently, a real CFG-topology serialization landed on `main` (real basic
+  blocks/edges from the backend, its own `test_cfg_topology_serialization.py`). **Conflict resolved in
+  favor of the Neo4j correlation view per explicit team decision** — the real-CFG-topology backend
+  code (`CFGNode`/`CFGEdge`/`SubgraphTopology`/`OutlierNode` in `schemas.py`, serialization in
+  `cfg.py`/`pipeline.py`) was kept intact (not reverted — still tested, still populated in the API
+  response) since dropping it would have thrown away real, tested work; only which UI tab *renders*
+  with it changed. The "Extracted Behavioral Subgraphs & Outlier Nodes" chip list below the graph
+  keeps the real-CFG version's method-attributed labels (`shortenMethodSig`/`flattening_outlier_details`)
+  since that part didn't conflict with anything.
+
+**4. GraphRAG hardening** (`app/reports/graphrag.py`) — live-tested repeatedly against real malware
+manifests, not assumed:
+- **Live-caught fabrication:** testing a structured-report prompt rewrite, the model invented a fake
+  sample name (`"AndroidMalware_Example"`) and a fake MD5 hash (`"1234abcd5678efgh"` — not even valid
+  hex) for a real Cerberus sample. Neither existing check (`_grounding_check` for MITRE IDs,
+  `_permission_check` for undeclared permissions) covers this failure class.
+- `_identifier_check()` [NEW]: flags any MD5/SHA-1/SHA-256/SHA-512-labelled value or "Sample
+  Name"/"File Name"-labelled value that doesn't match the real `sha256`/`target_package`.
+- **The model does not reliably stop generating a fake "Sample Information" section even when
+  explicitly told not to** (SYSTEM_PROMPT rule 6b), confirmed across repeated live tests — so
+  `_strip_fabricated_identification()` [NEW] actively deletes any line `_identifier_check` would flag
+  from the displayed narrative, rather than trusting the instruction. The real sha256/package name are
+  now stamped as a **deterministic header** (Python-generated, never LLM output) at the top of every
+  narrative — this is what actually guarantees correctness, and it means the "Copy Report" button
+  (which copies only the narrative string) still carries the sample's real identity.
+- **Structured OUTPUT FORMAT section (added, then reverted):** attempted an explicit mandatory
+  section-header contract (Verdict / Executive Summary / MITRE table / IOCs / Campaign Correlation /
+  etc.) to make the report read more like a professional analyst report. Live-tested repeatedly: the
+  model ignored it every time, always falling back to its own header style, and dropping the section
+  contract did not change the (byte-identical) output — confirming this specific 7B model does not
+  reliably follow structural instructions regardless of phrasing. **Reverted to free-form prose** per
+  team decision; kept every *content*-level rule that demonstrably works (fabrication checks, the
+  expanded citation list, the deterministic header).
+- `manifest_summary` now also includes `correlated_samples` (from `related_samples`, capped at 5, sha256
+  dropped to save tokens) with a citation rule asking the model to mention campaign/infrastructure
+  correlation when present — **wired correctly (verified: real correlation data reaches the prompt),
+  but the model does not reliably cite it** in practice, same instruction-following ceiling as above.
+  Left in — the data being present costs little and the model does use *some* mid-prompt content
+  reliably (permissions, techniques), just not this specific field yet.
+- **YARA scanning confirmed comprehensive, not filtered:** `rules_dir` is always the full downloaded
+  `data/yara_rules/` corpus (currently 517 community rules from `Yara-Rules/rules` + 8 built-in) —
+  every scan tests every sample against the entire compiled ruleset, no per-sample subset.
+
+**5. Frontend bug sweep** — `app.js`/`index.html` had several hardcoded UI-mockup placeholders that
+displayed identically to real findings, undetected until now because the backend's anti-fabrication
+discipline was never carried through to the frontend's fallback values:
+- `vtStatus` defaulted to the literal string `"15 / 75 Engines Flagged"`, only conditionally
+  overwritten — and even when real VT data existed, the code read `signature_matches[0]` blindly;
+  MalwareBazaar entries (always `detection_ratio: null`) sort before VirusTotal entries, so the fake
+  placeholder stayed visible even on a **confirmed-malware sample with a real 32/74 VT hit** one index
+  over. Now explicitly searches for the VT-sourced match and distinguishes "not queried (cache hit)" /
+  "queried, no hit" / a real ratio.
+- `familyBadge` fell back to `'trojan.btmob/spyagent'`, `certAnomalies` fell back to `['Self-Signed']`
+  — both fabricated-looking defaults, now `'Unclassified'` / `'None detected'`.
+- `zeroDayBadge`/`knownMalwareBadge` were never explicitly hidden between renders — a badge shown for
+  one sample could stay visible on the next report. Both now reset at the start of every render.
+- Node-click details: clicking a node in the Sample Correlation Graph or Threat Landscape only
+  `console.log`'d before — now shows a visible detail bar with the node type, name, and (for
+  Technique/Certificate nodes) the raw MITRE ID / thumbprint, since node ids everywhere follow a
+  `"type:value"` convention that made this cheap to add generically.
+
+**6. Two pre-existing test failures fixed (root-caused, not skipped)** — both confirmed present on
+`main` before this session's changes:
+- `test_extract_firebase_discord_onion_ip`: the test's own `.onion` fixture contained a `1`, outside
+  Tor's real base32 address alphabet (`a-z, 2-7` only). `_RE_ONION` was correctly rejecting a
+  fake-looking address; fixed the fixture, not the regex.
+- `test_store_called_when_family_is_none`: stale mock predating this session's pipeline changes —
+  mocked `run_phase1_ingestion`'s old 4-value return and never mocked `run_phase3b_re_deepdive` or
+  `merge_c2_from_strings` at all.
+
+**7. Neo4j population, if your teammate reads this before doing it:** `scripts/load_ontology.py` (full
+MITRE ontology — do this once, unrelated to sample analysis) and then **every real sample must go
+through the actual `POST /analyze` endpoint** — `store_signature()` (which is what writes `Sample`/
+`MalwareFamily`/`Technique`/`C2Indicator`/`Certificate` nodes) is only ever called from `routes.py`'s
+real request handler. `scripts/score_corpus.py` does **not** populate Neo4j — it calls pipeline phases
+1-6 directly for calibration measurement and skips storage entirely. Each `/analyze` call on a fresh
+(non-cached) sample also runs a real GraphRAG LLM call, so budget **minutes per sample, not seconds**
+— 40 samples took ~3.5 hours end-to-end in this session's own test run. `shared_cert` correlation
+(Certificate nodes) only exists in the merged code from this session — a sample analyzed under
+pre-Session-12 code will not have cert data, and **a cache hit skips `store_signature()` entirely**, so
+re-uploading an already-cached sample under the new code will NOT backfill its cert node either. Pull
+the latest `main` before populating.
+
+**Verified:** 196/196 tests passing (full suite, zero pre-existing failures remaining) — up from 164
+passed / 2 failed at session start. Every claim above was checked against live process behavior
+(direct Neo4j queries, live `/analyze` calls, live Ollama report generation), not assumed from reading
+code.
+
+---
+
 ### Session 11 — 2026-08-20 (pm) | Author: Rohit — Recalibrate risk score components and verdict bands against the 353-APK corpus
 
 > **Overview:** `scripts/score_corpus.py` [NEW] measures every score component against 220 F-Droid
@@ -498,6 +679,10 @@ guardgraph-ai/
 | MITRE ontology retrieval | `ontology.py` | Used by GraphRAG for grounded context |
 | GraphRAG report generation | `graphrag.py` | Ollama, strict anti-hallucination prompt |
 | Full pipeline orchestration | `routes.py` | Hot-path truly short-circuits; cold-path complete |
+| **[S12] RE deep dive** | `static_resolution.py`, `crypto_recovery.py`, `dcl_tracing.py`, `webview_bridge.py`, `native_bridge.py` | Reflection/crypto/DCL/WebView/native resolution via shared register-constant propagation, no execution |
+| **[S12] Manifest/ZIP anti-analysis resilience** | `ingest.py`, `failure_diagnostics.py` | AXML chunk-corruption + ZIP EOCD-corruption fallback DEX extraction; probable-cause explanations for unrecognized parser failures |
+| **[S12] Neo4j graph correlation** | `graph/cache.py`, `graph/ontology.py`, `routes.py` | `find_related_samples` (shared technique/C2/reused cert), `get_threat_landscape` + `/graph/landscape`, `ttp_context` — backs 3 new UI tabs |
+| **[S12] GraphRAG anti-fabrication** | `graphrag.py` | `_identifier_check` + `_strip_fabricated_identification` + deterministic sha256/package header — see Session 12 log for what does and doesn't actually work |
 
 ### What Is Stubbed (Intentionally — Fails Loudly)
 

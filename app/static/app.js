@@ -217,7 +217,7 @@ function renderResults(data) {
     vtEl.textContent = 'Not queried (cached result)';
     vtEl.className = 'spec-value';
   } else if (vtMatch) {
-    vtEl.textContent = vtMatch.detection_ratio + ' Engines Flagged';
+    vtEl.textContent = vtMatch.detection_ratio + ' flagged';
     vtEl.className = 'spec-value highlight-red';
   } else {
     vtEl.textContent = 'No VirusTotal detections';

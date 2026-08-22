@@ -327,6 +327,93 @@ class TestGroundingCheckLogic(unittest.TestCase):
         _grounding_check("No techniques predicted.", set())  # must not raise
 
 
+# ─── Bug 3: _identifier_check — fabricated hash/sample-name detection ───────
+# Added 2026-08-22 after observing live: the model invented "MD5: 1234abcd..."
+# (not even valid hex) and "Sample Name: AndroidMalware_Example" for a real
+# Cerberus sample — neither _grounding_check nor _permission_check catch this
+# failure mode, since it's neither a MITRE ID nor a permission.
+
+class TestIdentifierCheckLogic(unittest.TestCase):
+
+    def test_no_flag_when_real_sha256_cited(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "abc123def456" * 5 + "abcd"  # 64 chars
+        narrative = f"SHA-256: {real_sha}"
+        self.assertEqual(_identifier_check(narrative, real_sha, None), [])
+
+    def test_no_flag_for_truncated_real_sha256_preview(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "abc123def456" * 5 + "abcd"
+        narrative = f"Hash: {real_sha[:12]}..."
+        self.assertEqual(_identifier_check(narrative, real_sha, None), [])
+
+    def test_flags_fabricated_md5(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "90abcdef1234567890fedcba1234567890fedcba1234567890fedcba1234567890"
+        narrative = "MD5 Hash: 1234abcd5678efgh"
+        result = _identifier_check(narrative, real_sha, None)
+        self.assertTrue(any("1234abcd5678efgh" in r for r in result))
+
+    def test_flags_fabricated_sample_name(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "90abcdef1234567890fedcba1234567890fedcba1234567890fedcba1234567890"
+        narrative = "Sample Name: AndroidMalware_Example"
+        result = _identifier_check(narrative, real_sha, "com.real.package")
+        self.assertTrue(any("AndroidMalware_Example" in r for r in result))
+
+    def test_no_flag_when_sample_name_matches_real_package(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "90abcdef1234567890fedcba1234567890fedcba1234567890fedcba1234567890"
+        narrative = "Sample Name: com.real.package"
+        result = _identifier_check(narrative, real_sha, "com.real.package")
+        self.assertEqual(result, [])
+
+    def test_no_crash_with_no_labels(self):
+        from app.reports.graphrag import _identifier_check
+        result = _identifier_check("A clean narrative with no hash labels.", "aa" * 32, "com.x")
+        self.assertEqual(result, [])
+
+
+class TestStripFabricatedIdentification(unittest.TestCase):
+    """
+    SYSTEM_PROMPT rule 6b alone does not reliably stop the model from writing
+    a fake "Sample Information" section (observed live, repeatedly, even with
+    the rule in place) — this strips what _identifier_check flags rather than
+    trusting the instruction to work.
+    """
+
+    def test_removes_fabricated_section(self):
+        from app.reports.graphrag import _strip_fabricated_identification
+        real_sha = "047e3ecdb04d695b7e8a3c2789c29ec57da19f58bdcdb1d97fa926205ce718eb"
+        narrative = (
+            "#### Sample Information\n"
+            "- **Sample Name:** `malicious_sample.apk`\n"
+            "- **SHA256 Hash:** `1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef`\n"
+            "\n"
+            "#### Malware Analysis Summary\n"
+            "Real content here.\n"
+        )
+        cleaned = _strip_fabricated_identification(narrative, real_sha, "com.real.package")
+        self.assertNotIn("malicious_sample.apk", cleaned)
+        self.assertNotIn("1234567890abcdef", cleaned)
+        self.assertNotIn("Sample Information", cleaned)
+        self.assertIn("Malware Analysis Summary", cleaned)
+        self.assertIn("Real content here.", cleaned)
+
+    def test_keeps_real_sha256_if_correctly_cited(self):
+        from app.reports.graphrag import _strip_fabricated_identification
+        real_sha = "047e3ecdb04d695b7e8a3c2789c29ec57da19f58bdcdb1d97fa926205ce718eb"
+        narrative = f"The sample's SHA256 Hash: `{real_sha}` matches a known family.\n"
+        cleaned = _strip_fabricated_identification(narrative, real_sha, "com.real.package")
+        self.assertIn(real_sha, cleaned)
+
+    def test_no_change_on_clean_narrative(self):
+        from app.reports.graphrag import _strip_fabricated_identification
+        narrative = "### Verdict\nMalicious, score 73.7/100.\n"
+        cleaned = _strip_fabricated_identification(narrative, "aa" * 32, "com.x")
+        self.assertEqual(cleaned, narrative)
+
+
 # ─── T2: unparseable APKs return a verdict, not a bare 500 ───────────────────
 
 class TestUnparseableApkReturnsVerdict(unittest.TestCase):

@@ -2,6 +2,12 @@
 
 This document provides a comprehensive summary of the current architecture, implementation status, and recent changes in **GuardGraph AI** for LLMs (like Claude) picking up work on this codebase.
 
+> **This file predates 2026-08-22.** For the reverse-engineering deep dive (reflection/crypto/DCL/
+> WebView/native resolution), manifest/ZIP anti-analysis resilience, Neo4j graph correlation (MITRE
+> mapping / correlated samples / certificate reuse / live Threat Landscape view), and GraphRAG
+> anti-fabrication hardening added since — including what does and doesn't actually work, verified
+> live — see **`TEAM_CONTEXT.md`'s "Session 12"** entry, the current source of truth.
+
 ---
 
 ## 1. What is GuardGraph AI?
