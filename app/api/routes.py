@@ -347,6 +347,9 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         ttp_feature_vector, feature_vector, evidence_present=classifier_evidence
     )
 
+    # --- Phase 5.5: Brand impersonation (identity, not payload) ---
+    impersonation = AnalysisPipeline.run_phase5b_impersonation(ingestion)
+
     manifest = AnalysisManifest(
         target_package=ingestion.package_name,
         sha256=ingestion.sha256,
@@ -378,6 +381,9 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         resolved_dcl_targets=resolved_dcl,
         resolved_webview_bridges=resolved_webview,
         resolved_native_bridges=resolved_native,
+        app_label=ingestion.app_label,
+        icon_phash=ingestion.icon_phash,
+        impersonation=impersonation,
     )
 
     # --- Phase 6: Risk Scoring (includes static malware anchors) ---
@@ -386,6 +392,7 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         sig_yara=sig_yara,
         ingestion=ingestion,
         classifier_evidence_present=classifier_evidence,
+        impersonation=impersonation,
     )
 
     # --- Phase 7: Explainable Reporting ---

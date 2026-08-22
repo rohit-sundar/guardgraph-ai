@@ -150,6 +150,7 @@
           </div>
           <div class="risk-badges">
             <span class="badge badge-zero-day hidden" id="zeroDayBadge">Zero-Day Anomaly Detected</span>
+            <span class="badge badge-malware hidden" id="impersonationBadge"></span>
             <span class="badge badge-malware hidden" id="knownMalwareBadge">Known VirusTotal Signature Match</span>
           </div>
         </div>
@@ -208,6 +209,9 @@
           </button>
           <button class="tab-btn" onclick="switchTab('reFindings')">
             Rev-Engg Indicators (<span id="reFindingsCount">0</span>)
+          </button>
+          <button class="tab-btn" onclick="switchTab('appIdentity')">
+            App Identity (<span id="impersonationCount">0</span>)
           </button>
           <button class="tab-btn" onclick="switchTab('mitreMapping')">
             MITRE ATT&CK Mapping (<span id="mitreCount">0</span>)
@@ -326,6 +330,41 @@
           </div>
 
           <!-- Tab 6: Reverse Engineering Findings -->
+          <div class="tab-content" id="tabAppIdentity">
+            <p class="graph-subtitle" style="margin-bottom:1rem;">
+              Is this app pretending to be a different, legitimate one? Every other tab asks how
+              malicious the code is; this one asks who the app claims to be. A cloned banking or
+              UPI app is fraud whether or not its payload trips a single behavioural anchor, so
+              these findings raise a floor under the verdict rather than adding to the weighted score.
+            </p>
+            <div class="spec-grid" style="margin-bottom:1rem;">
+              <div class="spec-item">
+                <span class="spec-label">Display Name</span>
+                <span class="spec-value" id="identityLabel">&mdash;</span>
+              </div>
+              <div class="spec-item">
+                <span class="spec-label">Launcher Icon Hash</span>
+                <span class="spec-value code" id="identityIconHash">&mdash;</span>
+              </div>
+              <div class="spec-item">
+                <span class="spec-label">Brands Compared</span>
+                <span class="spec-value" id="identityBrandCount">&mdash;</span>
+              </div>
+            </div>
+            <div class="re-findings-section">
+              <h5>Impersonation Findings</h5>
+              <div class="re-findings-list" id="impersonationList">
+                <span class="re-empty">Not assessed</span>
+              </div>
+            </div>
+            <div class="re-findings-section">
+              <h5>Coverage &mdash; what could not be checked</h5>
+              <div class="re-findings-list" id="impersonationCoverage">
+                <span class="re-empty">&mdash;</span>
+              </div>
+            </div>
+          </div>
+
           <div class="tab-content" id="tabReFindings">
             <p class="graph-subtitle" style="margin-bottom:1rem;">
               Statically resolved reflection/crypto/dynamic-loading/WebView/native targets —

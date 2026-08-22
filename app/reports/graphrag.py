@@ -64,6 +64,16 @@ STRICT RULES — violating ANY of these makes the report unusable:
    - resolved_dcl_targets (traced DexClassLoader/PathClassLoader payload paths)
    - resolved_webview_bridges (addJavascriptInterface bridge name + exposed methods)
    - resolved_native_bridges (System.loadLibrary target + JNI symbol correlation)
+   - impersonation (brand-impersonation findings: certificate_mismatch,
+     icon_reuse, package_typosquat, label_impersonation). These are the highest-
+     priority findings in the manifest when present, because they are about the
+     app's IDENTITY rather than its payload: a clone of a banking app is fraud
+     whether or not its code looks malicious. Lead the report with one when it is
+     present, name the brand being impersonated, and say plainly that the score
+     rests on identity evidence rather than behaviour if
+     risk_score.impersonation_floor_applied is true. Do NOT describe an
+     impersonation finding as merely "suspicious naming" — a certificate mismatch
+     means Android itself would refuse this as an update to the real app.
    - correlated_samples (other previously-analyzed samples in the Neo4j graph
      sharing MITRE techniques, C2 infrastructure, or a reused signing
      certificate with THIS sample — cite as campaign/infrastructure
@@ -470,6 +480,11 @@ def generate_report(
         "resolved_dcl_targets": manifest.resolved_dcl_targets[:_ANCHOR_LIST_CAP],
         "resolved_webview_bridges": manifest.resolved_webview_bridges[:_ANCHOR_LIST_CAP],
         "resolved_native_bridges": manifest.resolved_native_bridges[:_ANCHOR_LIST_CAP],
+        # Identity, not payload. `impersonation.coverage` matters as much as the
+        # findings: an empty findings list beside a full coverage list means the
+        # checks could not run, which is not the same as the app being genuine.
+        "app_label": manifest.app_label,
+        "impersonation": manifest.impersonation,
         # Neo4j graph correlation (app/graph/cache.find_related_samples) — other
         # previously-analyzed samples sharing techniques/C2/a signing certificate
         # with this one. sha256 is dropped (redundant token cost; app_name/family

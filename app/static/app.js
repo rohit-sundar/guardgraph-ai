@@ -189,6 +189,8 @@ function renderResults(data) {
   // was only ever called on the truthy branch.
   document.getElementById('zeroDayBadge').classList.add('hidden');
   document.getElementById('knownMalwareBadge').classList.add('hidden');
+  const impBadge = document.getElementById('impersonationBadge');
+  if (impBadge) impBadge.classList.add('hidden');
   if (risk.zero_day_indicator) {
     document.getElementById('zeroDayBadge').classList.remove('hidden');
   }
@@ -350,6 +352,9 @@ function renderResults(data) {
   // Reverse Engineering Findings (crypto / DCL / WebView / native)
   renderReFindings(manifest);
 
+  // Brand impersonation / app identity
+  renderImpersonation(manifest, risk);
+
   // MITRE ATT&CK Mobile Technique Mapping
   renderMitreMapping(manifest);
 
@@ -471,6 +476,113 @@ function renderReFindings(manifest) {
   const countEl = document.getElementById('reFindingsCount');
   if (countEl) countEl.textContent = total;
 }
+
+function renderImpersonation(manifest, risk) {
+  const list = document.getElementById('impersonationList');
+  const coverageEl = document.getElementById('impersonationCoverage');
+  const countEl = document.getElementById('impersonationCount');
+  if (!list || !coverageEl) return;
+
+  const imp = manifest.impersonation || null;
+  const findings = (imp && imp.findings) || [];
+  const coverage = (imp && imp.coverage) || [];
+
+  if (countEl) countEl.textContent = findings.length;
+
+  setText('identityLabel', manifest.app_label || 'Not recovered');
+  setText('identityIconHash', manifest.icon_phash || 'No raster icon (adaptive/XML)');
+  setText('identityBrandCount', imp ? `${imp.brands_checked} protected brands` : 'Not assessed');
+
+  list.innerHTML = '';
+  if (!imp) {
+    list.appendChild(emptyNote('Impersonation checks did not run for this analysis.'));
+  } else if (findings.length === 0) {
+    // "No findings" and "could not check" are different answers. Say which.
+    list.appendChild(emptyNote(
+      coverage.length > 0
+        ? 'No impersonation of the brands that could be checked — see coverage below for what could not be.'
+        : 'No impersonation detected against any protected brand.'
+    ));
+  } else {
+    findings.forEach(f => {
+      // Every value below originates in the uploaded APK (package name, label,
+      // certificate) or in the reference table. Built with textContent, never
+      // innerHTML — a crafted sample must not be able to run script here.
+      const item = document.createElement('div');
+      item.className = 're-finding-item re-finding-weak';
+
+      const head = document.createElement('div');
+      head.className = 'mitre-item-header';
+      const kind = document.createElement('span');
+      kind.className = 'mitre-id';
+      kind.textContent = (f.kind || '').replace(/_/g, ' ').toUpperCase();
+      const brandEl = document.createElement('span');
+      brandEl.className = 'mitre-name';
+      brandEl.textContent = `impersonates ${f.brand || 'unknown brand'}`;
+      head.appendChild(kind);
+      head.appendChild(brandEl);
+
+      const detail = document.createElement('p');
+      detail.className = 'mitre-description';
+      detail.textContent = f.detail || '';
+
+      const compare = document.createElement('div');
+      compare.className = 'rule-target';
+      const observed = document.createElement('code');
+      observed.textContent = f.observed || '';
+      const expected = document.createElement('code');
+      expected.textContent = f.expected || '';
+      compare.appendChild(document.createTextNode('this APK: '));
+      compare.appendChild(observed);
+      compare.appendChild(document.createTextNode('  —  genuine: '));
+      compare.appendChild(expected);
+
+      item.appendChild(head);
+      item.appendChild(detail);
+      item.appendChild(compare);
+      list.appendChild(item);
+    });
+  }
+
+  coverageEl.innerHTML = '';
+  if (coverage.length === 0) {
+    coverageEl.appendChild(emptyNote('All four checks ran against every protected brand.'));
+  } else {
+    coverage.forEach(note => {
+      const row = document.createElement('div');
+      row.className = 're-finding-item';
+      row.textContent = note;
+      coverageEl.appendChild(row);
+    });
+  }
+
+  // The verdict card needs to say when the score came from identity rather than
+  // behaviour — otherwise a near-inert clone reads as though its code earned the band.
+  const badge = document.getElementById('impersonationBadge');
+  if (badge) {
+    const applied = risk && risk.impersonation_floor_applied;
+    badge.classList.toggle('hidden', !applied);
+    if (applied) {
+      const brand = findings.length ? findings[0].brand : 'a protected brand';
+      badge.textContent = `Verdict raised by brand impersonation — clone of ${brand}`;
+    }
+  }
+}
+
+
+function setText(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = value;
+}
+
+
+function emptyNote(text) {
+  const span = document.createElement('span');
+  span.className = 're-empty';
+  span.textContent = text;
+  return span;
+}
+
 
 function renderMitreMapping(manifest) {
   const container = document.getElementById('mitreMappingList');
