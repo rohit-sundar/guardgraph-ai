@@ -87,6 +87,13 @@ class ObfuscationSignal(BaseModel):
     # declares is a loader stub, and that is the one anti-analysis signal that
     # measurably separates the corpus. `None` = not measured.
     declared_component_count: int | None = None
+    # AndroidManifest.xml failed to parse (apk.APK() raised) — see ingest.py's
+    # fallback path. Unlike entropy/flattening, this has no plausible benign
+    # explanation: no legitimate build tool produces a structurally corrupted
+    # manifest, so scoring.obfuscation_component weights it directly rather
+    # than requiring corpus measurement first (see that function's docstring
+    # for why every other signal here does require it).
+    manifest_parse_failed: bool = False
     coverage_note: str  # e.g. "3 native libraries not analyzed"
 
 

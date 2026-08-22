@@ -396,6 +396,22 @@ class TestObfuscationComponent(unittest.TestCase):
                 f"parse-failure rate {rate} must not contribute to the score",
             )
 
+    def test_manifest_parse_failure_is_scored_unlike_entropy_and_flattening(self):
+        """
+        Unlike every other input here, manifest_parse_failed doesn't need corpus
+        measurement to justify a weight: a corrupted manifest has no plausible
+        benign explanation, so it's scored directly (MANIFEST_CORRUPTED_WEIGHT).
+        Found in practice: a MalwareBazaar/VirusTotal-confirmed sample scored
+        22.47 "low" before this existed, because the same missing manifest data
+        also starved permission/ttp/classifier components of their feature vector.
+        """
+        clean_score = obfuscation_component(_obfuscation())
+        corrupted_score = obfuscation_component(_obfuscation(manifest_parse_failed=True))
+
+        self.assertEqual(clean_score, 0.0)
+        self.assertGreater(corrupted_score, clean_score)
+        self.assertAlmostEqual(corrupted_score, 0.60, places=4)
+
 
 # ─── N8 + bands ──────────────────────────────────────────────────────────────
 

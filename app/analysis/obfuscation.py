@@ -198,5 +198,6 @@ def build_obfuscation_signal(
         declared_component_count=(
             None if declared_component_count is None else int(declared_component_count)
         ),
+        manifest_parse_failed=manifest_parse_failed,
         coverage_note=coverage_note,
     )
