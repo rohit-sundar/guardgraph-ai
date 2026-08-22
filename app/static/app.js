@@ -504,6 +504,36 @@ function renderRelatedSamples(manifest) {
 let cyInstance = null;
 let cyLandscapeInstance = null;
 
+// Every graph node's id follows "type:value" (e.g. "technique:T1582",
+// "cert:ABCDEF..."), matching both get_threat_landscape's Python side and
+// renderGraphExplorer's client-built ids — so the raw MITRE ID / thumbprint
+// is always recoverable from the id even though the node's visible label
+// shows the human-readable name instead.
+function formatNodeDetails(node) {
+  const type = node.data('type') || '';
+  const label = node.data('label') || '';
+  const id = node.data('id') || '';
+  const rawValue = id.includes(':') ? id.slice(id.indexOf(':') + 1) : id;
+
+  let idHtml = '';
+  if (type === 'Technique' || type === 'Certificate') {
+    idHtml = `<span class="node-detail-id">${rawValue}</span>`;
+  } else if (type === 'Sample' && rawValue !== 'current' && rawValue !== label) {
+    idHtml = `<span class="node-detail-id">${rawValue.length > 24 ? rawValue.slice(0, 20) + '…' : rawValue}</span>`;
+  }
+  return `<span class="node-detail-name">${type}: ${label}</span>${idHtml}`;
+}
+
+function showNodeDetails(targetElId, node) {
+  const el = document.getElementById(targetElId);
+  if (el) el.innerHTML = formatNodeDetails(node);
+}
+
+function clearNodeDetails(targetElId) {
+  const el = document.getElementById(targetElId);
+  if (el) el.innerHTML = '';
+}
+
 const LANDSCAPE_COLORS = {
   Sample: '#eab308',
   MalwareFamily: '#84cc16',
@@ -516,6 +546,7 @@ async function loadThreatLandscape() {
   const container = document.getElementById('landscapeGraphContainer');
   if (!container || typeof cytoscape === 'undefined') return;
   container.innerHTML = '<div class="graph-placeholder-text">Loading from Neo4j…</div>';
+  clearNodeDetails('landscapeNodeDetails');
 
   let elements;
   try {
@@ -595,7 +626,7 @@ async function loadThreatLandscape() {
 
   cyLandscapeInstance.on('tap', 'node', function (evt) {
     const node = evt.target;
-    console.log(`${node.data('type')}: ${node.data('label')}`);
+    showNodeDetails('landscapeNodeDetails', node);
 
     const neighborhood = node.closedNeighborhood();
     cyLandscapeInstance.elements().not(neighborhood).addClass('landscape-faded').removeClass('landscape-highlighted');
@@ -606,6 +637,7 @@ async function loadThreatLandscape() {
   cyLandscapeInstance.on('tap', function (evt) {
     if (evt.target === cyLandscapeInstance) {
       cyLandscapeInstance.elements().removeClass('landscape-faded landscape-highlighted');
+      clearNodeDetails('landscapeNodeDetails');
     }
   });
 }
@@ -619,6 +651,7 @@ function relayoutLandscape(layoutName) {
 function renderGraphExplorer(manifest) {
   const container = document.getElementById('cyGraphContainer');
   if (!container || typeof cytoscape === 'undefined') return;
+  clearNodeDetails('cyGraphNodeDetails');
 
   // This sample's own neighborhood in the same Neo4j graph the Threat
   // Landscape tab draws from — real predicted family/techniques/C2, not a
@@ -725,8 +758,10 @@ function renderGraphExplorer(manifest) {
   cyInstance.ready(() => cyInstance.fit(undefined, 30));
 
   cyInstance.on('tap', 'node', function(evt) {
-    const node = evt.target;
-    console.log(`${node.data('type')}: ${node.data('label')}`);
+    showNodeDetails('cyGraphNodeDetails', evt.target);
+  });
+  cyInstance.on('tap', function(evt) {
+    if (evt.target === cyInstance) clearNodeDetails('cyGraphNodeDetails');
   });
 }
 
