@@ -10,12 +10,11 @@ explicitly NOT implemented — flag them as unanalyzed coverage per the
 report's "not observed" guardrail rather than pretending to cover them.
 """
 import math
-import re
 from collections import Counter
 
 import networkx as nx
 
-from app.analysis.cfg import parse_const_string
+from app.analysis.static_resolution import resolve_invocations
 from app.analysis.topology import detect_flattening_outlier
 from app.core.schemas import ObfuscationSignal
 
@@ -32,14 +31,6 @@ _REFLECTION_NAME_APIS = {
 # its own — the Method object it invokes was already named upstream via one of
 # the APIs above.
 _REFLECTION_INVOKE_SITE = "Ljava/lang/reflect/Method;->invoke"
-
-_CONST_STRING_MNEMONICS = frozenset({"const-string", "const-string/jumbo"})
-_MOVE_MNEMONICS = frozenset({"move-object", "move-object/16", "move-object/from16"})
-
-# An invoke instruction's output is "regA, regB, ..., Lclass;->method(args)ret" —
-# the target signature always starts at the first `L...;->` and runs to the end,
-# so anything before that match, comma-split, is the register list.
-_INVOKE_TARGET_RE = re.compile(r"(L[\w/$]+;->[\w$<>]+\(.*)$")
 
 
 def shannon_entropy(s: str) -> float:
@@ -62,96 +53,12 @@ def compute_string_pool_entropy(all_strings: list[str]) -> float:
     return sum(entropies) / len(entropies) if entropies else 0.0
 
 
-def _parse_invoke_registers_and_target(output: str) -> tuple[list[str], str | None]:
-    """Splits an invoke instruction's output into (argument registers, target signature)."""
-    match = _INVOKE_TARGET_RE.search(output)
-    if not match:
-        return [], None
-    target = match.group(1)
-    prefix = output[: match.start()].rstrip(", ")
-    registers = [r.strip() for r in prefix.split(",") if r.strip()]
-    return registers, target
-
-
-def _resolve_method_reflection(g: nx.DiGraph, order: list[str]) -> tuple[int, int, list[dict]]:
-    """
-    Per-method register-constant resolution for reflection call targets.
-
-    Walks each basic block's instruction stream (stashed by cfg.enrich_acfg)
-    tracking a `register -> literal` map, seeded from the block's single
-    predecessor when unambiguous (in-degree 1, predecessor already visited
-    in `order`). Multi-predecessor joins and not-yet-visited predecessors
-    (loop back-edges) start with an empty map instead of guessing — matches
-    ObfuscationSignal's "absence of evidence, not evidence of absence" rule.
-
-    No bytecode execution: this is dataflow over already-decoded operands,
-    not string-decrypt emulation (that's explicitly separate future work).
-    """
-    total = 0
-    unresolved = 0
-    resolved: list[dict] = []
-    exit_maps: dict[str, dict[str, str]] = {}
-    visited: set[str] = set()
-
-    for node_id in order:
-        preds = list(g.predecessors(node_id))
-        regs: dict[str, str] = (
-            dict(exit_maps.get(preds[0], {})) if len(preds) == 1 and preds[0] in visited else {}
-        )
-
-        for mnemonic, output in g.nodes[node_id].get("instr_stream", []):
-            if mnemonic in _CONST_STRING_MNEMONICS:
-                literal = parse_const_string(output)
-                if literal is not None:
-                    reg = output.split(",", 1)[0].strip()
-                    regs[reg] = literal
-            elif mnemonic in _MOVE_MNEMONICS:
-                parts = [p.strip() for p in output.split(",")]
-                if len(parts) == 2:
-                    dst, src = parts
-                    if src in regs:
-                        regs[dst] = regs[src]
-                    else:
-                        regs.pop(dst, None)
-            elif mnemonic == "move-result-object":
-                # Result of whatever was just invoked — not a literal we tracked.
-                regs.pop(output.strip(), None)
-            elif mnemonic.startswith("invoke"):
-                registers, target = _parse_invoke_registers_and_target(output)
-                if target is None:
-                    continue
-                if _REFLECTION_INVOKE_SITE in target:
-                    total += 1
-                    continue
-                for api, arg_index in _REFLECTION_NAME_APIS.items():
-                    if api not in target:
-                        continue
-                    total += 1
-                    name_reg = registers[arg_index] if len(registers) > arg_index else None
-                    value = regs.get(name_reg) if name_reg else None
-                    if value is not None:
-                        resolved.append({
-                            "node_id": node_id,
-                            "target_api": api,
-                            "resolved_value": value,
-                        })
-                    else:
-                        unresolved += 1
-                    break
-
-        exit_maps[node_id] = regs
-        visited.add(node_id)
-
-    return total, unresolved, resolved
-
-
 def count_reflection_calls(cfgs: dict[str, nx.DiGraph]) -> tuple[int, int, list[dict]]:
     """
     Resolves reflection call targets (Class.forName / getMethod /
     getDeclaredMethod / ClassLoader.loadClass, plus Method.invoke call sites)
-    back to literal strings via bounded, per-method register-constant
-    propagation over the CFGs cfg.py already built — no execution, no
-    cross-method taint.
+    back to literal strings via the shared register-constant resolver in
+    static_resolution.py — no execution, no cross-method taint.
 
     Returns (total reflection call sites, unresolved name-bearing sites,
     resolved call records). A name-bearing call whose argument doesn't trace
@@ -162,17 +69,26 @@ def count_reflection_calls(cfgs: dict[str, nx.DiGraph]) -> tuple[int, int, list[
     unresolved = 0
     resolved: list[dict] = []
 
-    for method_sig, g in cfgs.items():
-        if nx.is_directed_acyclic_graph(g):
-            order = list(nx.topological_sort(g))
-        else:
-            order = list(g.nodes())
-        m_total, m_unresolved, m_resolved = _resolve_method_reflection(g, order)
-        total += m_total
-        unresolved += m_unresolved
-        for r in m_resolved:
-            r["method_sig"] = method_sig
-        resolved.extend(m_resolved)
+    for event in resolve_invocations(cfgs):
+        target = event.target_api
+        if _REFLECTION_INVOKE_SITE in target:
+            total += 1
+            continue
+        for api, arg_index in _REFLECTION_NAME_APIS.items():
+            if api not in target:
+                continue
+            total += 1
+            arg = event.arg(arg_index)
+            if arg is not None and arg[0] == "literal":
+                resolved.append({
+                    "node_id": event.node_id,
+                    "method_sig": event.method_sig,
+                    "target_api": api,
+                    "resolved_value": arg[1],
+                })
+            else:
+                unresolved += 1
+            break
 
     return total, unresolved, resolved
 
