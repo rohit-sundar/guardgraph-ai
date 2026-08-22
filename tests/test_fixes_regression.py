@@ -350,7 +350,14 @@ class TestUnparseableApkReturnsVerdict(unittest.TestCase):
         from app.analysis.ingest import compute_sha256
 
         path = self._corrupt_apk()
-        report = _unparseable_report(path, ValueError("EOCD signature not found"))
+        # _unparseable_report now calls the real GraphRAG phase (so the AI
+        # narrative isn't just a hardcoded placeholder) — mock it here so this
+        # test doesn't depend on a running Ollama instance.
+        with patch(
+            "app.core.pipeline.AnalysisPipeline.run_phase7_reporting",
+            return_value=("mocked narrative", []),
+        ):
+            report = _unparseable_report(path, ValueError("EOCD signature not found"))
 
         # The hash needs no parsing, so it must survive — it is the one pivot the
         # analyst still has into threat intel.
@@ -364,9 +371,14 @@ class TestUnparseableApkReturnsVerdict(unittest.TestCase):
         self.assertIsNone(report.risk_score.obfuscation_component)
 
         # The failure must be legible in the report itself, not just the log.
+        # Checked against the manifest's coverage note directly (not
+        # report.limitations) because that note is what routes.py guarantees
+        # regardless of what the — here mocked — GraphRAG phase returns; the
+        # real run_phase7_reporting always forwards it into limitations too,
+        # but this test's mock intentionally returns an empty list for that.
         joined = " ".join(report.limitations)
         self.assertIn("ANALYSIS INCOMPLETE", joined)
-        self.assertIn("EOCD signature not found", joined)
+        self.assertIn("EOCD signature not found", report.manifest.obfuscation.coverage_note)
 
     def test_endpoint_returns_200_not_500(self):
         from fastapi.testclient import TestClient

@@ -92,13 +92,15 @@ def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
     the hot path after the underlying cause is fixed.
     """
     from app.analysis.ingest import compute_sha256
+    from app.analysis.failure_diagnostics import probable_cause
 
     try:
         sha256 = compute_sha256(filepath)
     except Exception:  # unreadable temp file — nothing left to report on
         sha256 = ""
 
-    reason = f"{type(exc).__name__}: {exc}"
+    label, explanation = probable_cause(exc)
+    raw_reason = f"{type(exc).__name__}: {exc}"
     obfuscation = ObfuscationSignal(
         string_entropy_score=0.0,
         flattening_suspected=False,
@@ -106,7 +108,10 @@ def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
         reflection_call_count=0,
         unresolved_reflection_targets=0,
         method_parse_failure_rate=1.0,  # nothing parsed — 100% of the app is a gap
-        coverage_note="static analysis aborted — the APK could not be parsed",
+        coverage_note=(
+            f"static analysis aborted — probable cause: {label}. {explanation} "
+            f"(raw error: {raw_reason})"
+        ),
     )
     manifest = AnalysisManifest(
         target_package=None,
@@ -136,23 +141,33 @@ def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
         verdict_band=_band_for(UNPARSEABLE_RISK_SCORE),
         zero_day_indicator=False,
     )
+
+    # coverage_note (above) already carries the probable-cause explanation and
+    # raw error, and generate_report's own limitations list leads with it —
+    # these two just add framing that isn't in the coverage note itself.
+    limitations = [
+        "ANALYSIS INCOMPLETE: the APK could not be parsed, so no permissions, "
+        "forensic anchors, IoCs or TTPs were extracted. Every field in this "
+        "manifest is empty because nothing was observed, not because nothing "
+        "is there.",
+        f"Score fixed at {UNPARSEABLE_RISK_SCORE} — not derived from evidence.",
+    ]
+
+    # Still run the LLM report instead of a hardcoded placeholder — the
+    # grounding prompt's "say not observed, don't invent evidence" rule
+    # applies just as well to an empty manifest as a full one, and an
+    # analyst gets a written explanation of what's known and why instead of
+    # a dead end. run_phase7_reporting already has its own fallback if
+    # Ollama itself is unreachable, so this never raises.
+    from app.core.pipeline import AnalysisPipeline
+    narrative, report_limitations = AnalysisPipeline.run_phase7_reporting(manifest, risk_score)
+    limitations = limitations + report_limitations
+
     return AnalysisReport(
         manifest=manifest,
         risk_score=risk_score,
-        narrative_report=(
-            "[No narrative generated — static analysis could not parse this APK.]"
-        ),
-        limitations=[
-            "ANALYSIS INCOMPLETE: the APK could not be parsed, so no permissions, "
-            "forensic anchors, IoCs or TTPs were extracted. Every field in this "
-            "manifest is empty because nothing was observed, not because nothing "
-            "is there.",
-            f"Parser failure: {reason}",
-            "A file that defeats the parser is frequently doing so deliberately "
-            "(malformed AXML, corrupted ZIP central directory). Treat the sample "
-            "as unverified and triage it manually.",
-            f"Score fixed at {UNPARSEABLE_RISK_SCORE} — not derived from evidence.",
-        ],
+        narrative_report=narrative,
+        limitations=limitations,
     )
 
 
