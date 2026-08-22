@@ -9,6 +9,7 @@ intelligence), the sample is flagged immediately. Results feed into the risk
 score's IOC component and are surfaced in the GraphRAG report.
 """
 import json
+import urllib.error
 import urllib.request
 import urllib.parse
 from pathlib import Path
@@ -65,8 +66,13 @@ def reset_signature_db() -> None:
 
 
 def _lookup_virustotal(sha256: str, api_key: str) -> Optional[dict]:
-    """Queries the VirusTotal API v3 for a file hash."""
-    if not api_key:
+    """Queries the VirusTotal API v3 for a file hash.
+
+    The public tier allows 4 requests/min and 500/day. Nothing here paces
+    against that — see settings.online_lookups_enabled for why the only caller
+    that could breach it does its own pacing.
+    """
+    if not api_key or not settings.online_lookups_enabled:
         return None
 
     url = f"https://www.virustotal.com/api/v3/files/{sha256}"
@@ -102,6 +108,19 @@ def _lookup_virustotal(sha256: str, api_key: str) -> Optional[dict]:
                         "report_url": report_url,
                         "detection_ratio": ratio,
                     }
+    except urllib.error.HTTPError as e:
+        # 404 is the normal "VirusTotal has never seen this file" answer. 429 is
+        # the daily/per-minute quota, and it must NOT be read as "clean" — a
+        # rate-limited lookup carries no verdict either way.
+        if e.code == 429:
+            logger.error(
+                f"VirusTotal rate limit hit (HTTP 429) for {sha256} — "
+                "quota exhausted, this is NOT a clean verdict"
+            )
+        elif e.code == 401:
+            logger.error("VirusTotal rejected the API key (HTTP 401)")
+        elif e.code != 404:
+            logger.error(f"VirusTotal API query failed: HTTP {e.code}")
     except Exception as e:
         logger.error(f"VirusTotal API query failed: {e}")
 
@@ -110,10 +129,17 @@ def _lookup_virustotal(sha256: str, api_key: str) -> Optional[dict]:
 
 def _lookup_malwarebazaar(sha256: str, api_key: str) -> Optional[dict]:
     """Queries the MalwareBazaar API for a file hash.
-    
-    The get_info endpoint is fully public — no API key required.
-    The api_key parameter is accepted but unused (kept for interface consistency).
+
+    abuse.ch made authentication mandatory on every endpoint, get_info included:
+    a request without an Auth-Key header now returns HTTP 401, not results.
+    Verified 2026-08-21 — the same query answers 200 with the key and 401
+    without it. This function previously documented the endpoint as public and
+    never sent the key, so every lookup 401'd into the blanket except below and
+    was indistinguishable from "no match".
     """
+    if not api_key or not settings.online_lookups_enabled:
+        return None
+
     url = "https://mb-api.abuse.ch/api/v1/"
     post_data = urllib.parse.urlencode({
         "query": "get_info",
@@ -123,6 +149,7 @@ def _lookup_malwarebazaar(sha256: str, api_key: str) -> Optional[dict]:
     headers = {
         "Content-Type": "application/x-www-form-urlencoded",
         "User-Agent": "GuardGraph-AI-Triage",
+        "Auth-Key": api_key,
     }
 
     req = urllib.request.Request(url, data=post_data, headers=headers, method="POST")
@@ -153,6 +180,20 @@ def _lookup_malwarebazaar(sha256: str, api_key: str) -> Optional[dict]:
                             "report_url": report_url,
                             "detection_ratio": None,
                         }
+    except urllib.error.HTTPError as e:
+        # As with VirusTotal, an auth or quota failure is not a clean verdict.
+        if e.code == 401:
+            logger.error(
+                "MalwareBazaar rejected the API key (HTTP 401) — set "
+                "MALWAREBAZAAR_API_KEY; every endpoint requires auth"
+            )
+        elif e.code == 429:
+            logger.error(
+                f"MalwareBazaar rate limit hit (HTTP 429) for {sha256} — "
+                "this is NOT a clean verdict"
+            )
+        else:
+            logger.error(f"MalwareBazaar API query failed: HTTP {e.code}")
     except Exception as e:
         logger.error(f"MalwareBazaar API query failed: {e}")
 
@@ -167,7 +208,10 @@ def match_signatures(
     """
     Checks an APK's SHA-256 hash and signing certificate against:
     1. Local known-malware signature database.
-    2. Online triage lookup (VirusTotal and MalwareBazaar APIs) if keys are provided.
+    2. Online triage lookup (VirusTotal and MalwareBazaar APIs) if keys are
+       provided AND settings.online_lookups_enabled is set. Batch callers turn
+       that off: both APIs are metered, and a rate-limited lookup returns
+       nothing, which is silently indistinguishable from a clean verdict.
 
     Returns a list of match dicts, each with:
         match_type: "sha256" | "certificate"
@@ -212,7 +256,7 @@ def match_signatures(
             logger.warning(f"Local certificate signature match: {cert_lower} → {entry.get('family', 'unknown')}")
 
     # 3. Online triage fallbacks (only run on hash mismatch locally so we don't spam APIs)
-    if not matches:
+    if not matches and settings.online_lookups_enabled:
         # Check MalwareBazaar first (free, no strict rate limit on queries, highly specific for family)
         mb_match = _lookup_malwarebazaar(sha256_lower, settings.malwarebazaar_api_key)
         if mb_match:

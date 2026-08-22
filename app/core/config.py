@@ -30,6 +30,17 @@ class Settings(BaseSettings):
     virustotal_api_key: str = ""
     malwarebazaar_api_key: str = ""
 
+    # Master switch for the two third-party reputation lookups in
+    # app/analysis/signatures.py. Both public tiers are metered — VirusTotal
+    # allows 4 requests/min and 500/day, and MalwareBazaar now rejects every
+    # unauthenticated request with HTTP 401. Nothing on the /analyze path can
+    # breach either limit: _run_analysis() is synchronous inside async def, so
+    # requests serialise at one analysis per 60-200 s, and lookup_signature()
+    # answers repeat uploads from Neo4j before Phase 1.5 ever runs.
+    # scripts/score_corpus.py is the only caller that can, which is why it
+    # turns this OFF by default and paces itself behind --online.
+    online_lookups_enabled: bool = True
+
     entropy_high_threshold: float = 7.2
     flattening_degree_outlier_zscore: float = 3.0
 

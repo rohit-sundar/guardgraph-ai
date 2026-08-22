@@ -80,12 +80,14 @@ class TestCacheHitPreservesVerdict(unittest.TestCase):
         not that any particular number is a boundary.
         """
         from app.reports.scoring import (
-            BAND_HIGH_CEILING, BAND_LOW_CEILING, BAND_SUSPICIOUS_CEILING,
+            BAND_HIGH_CEILING, BAND_LOW_CEILING, BAND_MEDIUM_CEILING,
+            BAND_SUSPICIOUS_CEILING,
         )
 
         for score, expected_band in [
             (BAND_LOW_CEILING / 2, "low"),
-            ((BAND_LOW_CEILING + BAND_SUSPICIOUS_CEILING) / 2, "suspicious"),
+            ((BAND_LOW_CEILING + BAND_MEDIUM_CEILING) / 2, "medium"),
+            ((BAND_MEDIUM_CEILING + BAND_SUSPICIOUS_CEILING) / 2, "suspicious"),
             ((BAND_SUSPICIOUS_CEILING + BAND_HIGH_CEILING) / 2, "high"),
             ((BAND_HIGH_CEILING + 100.0) / 2, "malicious"),
         ]:

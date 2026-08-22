@@ -17,11 +17,21 @@ Androguard can abort the interpreter outright on a malformed DEX, and a corpus r
 that dies at sample 200 of 365 is worthless; isolation costs an interpreter start per
 sample and buys a result for every sample that survives.
 
+Online reputation lookups are OFF here by default. This script is the only
+caller in the repo that can breach VirusTotal's public quota (4 requests/min,
+500/day): one lookup per APK across 8 concurrent children is 600 requests and
+120% of a day's allowance for a single corpus run. Calibrating with lookups off
+is also the conservative choice -- VirusTotal only ever returns a verdict when
+malicious > 0, so reputation can raise malware scores and never benign ones.
+Pass --online to opt in; it pins one worker and paces at 4/min.
+
 Usage:
     python scripts/score_corpus.py                        # whole corpus, 8 workers
     python scripts/score_corpus.py --sample 30            # 30 per class, quick look
     python scripts/score_corpus.py --workers 4 --out out.json
-    python scripts/score_corpus.py --bands 35,50,75       # try candidate boundaries
+    python scripts/score_corpus.py --bands 30,40,60,75    # try candidate boundaries
+    python scripts/score_corpus.py --resume               # skip APKs already in --out
+    python scripts/score_corpus.py --sample 6 --online    # metered, 1 worker, 15s/APK
 """
 import argparse
 import glob
@@ -39,6 +49,12 @@ warnings.filterwarnings("ignore")
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, PROJECT_ROOT)
+
+# --online pacing. One worker at 15 s/sample is exactly VirusTotal's 4/min, with
+# no shared state to coordinate; the daily stop is 450 rather than 500 so an
+# interactive /analyze during the run still has headroom.
+ONLINE_SECONDS_PER_SAMPLE = 15.0
+ONLINE_DAILY_STOP = 450
 
 DEFAULT_BENIGN_DIR = "data/benign_apks"
 DEFAULT_MALWARE_DIR = "data/ttp_apks"
@@ -154,7 +170,9 @@ def _run_child(label: str, path: str, index: int, total: int, started: float) ->
     return record
 
 
-def score_corpus(targets: list[tuple[str, str]], workers: int) -> list[dict]:
+def score_corpus(
+    targets: list[tuple[str, str]], workers: int, online: bool = False
+) -> list[dict]:
     started = time.time()
     counter = {"n": 0}
 
@@ -163,8 +181,26 @@ def score_corpus(targets: list[tuple[str, str]], workers: int) -> list[dict]:
         counter["n"] += 1
         return _run_child(label, path, counter["n"], len(targets), started)
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(one, targets))
+    if not online:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(one, targets))
+
+    # Serial and paced. Each child performs at most one VirusTotal lookup, so
+    # counting samples counts lookups; stop at the daily budget rather than
+    # collecting a run's worth of HTTP 429s that read as "clean".
+    records: list[dict] = []
+    for position, item in enumerate(targets):
+        if len(records) >= ONLINE_DAILY_STOP:
+            print(f"\n  stopping at the {ONLINE_DAILY_STOP}-lookup daily budget "
+                  f"({len(targets) - len(records)} APKs not scored)", flush=True)
+            break
+        sample_started = time.time()
+        records.append(one(item))
+        if position < len(targets) - 1:
+            time.sleep(max(0.0, ONLINE_SECONDS_PER_SAMPLE - (time.time() - sample_started)))
+    print(f"\nonline lookups performed this run: {len(records)} "
+          f"(VirusTotal public tier allows 500/day)", flush=True)
+    return records
 
 
 # ── reporting ────────────────────────────────────────────────────────────────
@@ -178,10 +214,12 @@ def _quantile(sorted_values: list[float], p: float) -> float:
     return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (i - lo)
 
 
-def _band_of(total: float, bands: tuple[float, float, float]) -> str:
-    low, suspicious, high = bands
+def _band_of(total: float, bands: tuple[float, float, float, float]) -> str:
+    low, medium, suspicious, high = bands
     if total <= low:
         return "low"
+    if total <= medium:
+        return "medium"
     if total <= suspicious:
         return "suspicious"
     if total <= high:
@@ -189,7 +227,7 @@ def _band_of(total: float, bands: tuple[float, float, float]) -> str:
     return "malicious"
 
 
-def report(records: list[dict], bands: tuple[float, float, float]) -> None:
+def report(records: list[dict], bands: tuple[float, float, float, float]) -> None:
     ok = [r for r in records if "error" not in r]
     failed = [r for r in records if "error" in r]
     groups = {
@@ -215,7 +253,7 @@ def report(records: list[dict], bands: tuple[float, float, float]) -> None:
 
     print(f"\n── verdict bands at {bands} " + "─" * 40)
     print(f"{'band':<14}{'benign':>10}{'malware':>10}")
-    for band in ("low", "suspicious", "high", "malicious"):
+    for band in ("low", "medium", "suspicious", "high", "malicious"):
         counts = [
             sum(1 for r in group if _band_of(r["total"], bands) == band)
             for group in groups.values()
@@ -283,11 +321,26 @@ def main() -> None:
     parser.add_argument("--out", default=DEFAULT_OUT)
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--bands", default=None,
-                        help="comma-separated low,suspicious,high ceilings to report "
-                             "against; defaults to the shipped thresholds")
+                        help="comma-separated low,medium,suspicious,high ceilings to "
+                             "report against; defaults to the shipped thresholds")
     parser.add_argument("--from-json", default=None,
                         help="re-report an earlier run instead of re-scoring")
+    parser.add_argument("--resume", action="store_true",
+                        help="load --out if it exists, skip APKs already scored, and "
+                             "merge before writing. Also lets several --benign-dir "
+                             "runs accumulate into one file.")
+    parser.add_argument("--online", action="store_true",
+                        help="enable VirusTotal/MalwareBazaar lookups. Forces "
+                             "--workers 1 and paces at 4/min, so expect ~15s per APK "
+                             "and a hard stop at the daily budget.")
     args = parser.parse_args()
+
+    # Children inherit this through _run_child's env copy. Default off: see the
+    # module docstring for the quota arithmetic.
+    os.environ["ONLINE_LOOKUPS_ENABLED"] = "true" if args.online else "false"
+    if args.online and args.workers != 1:
+        print(f"--online pins --workers 1 (was {args.workers}) to hold 4/min")
+        args.workers = 1
 
     # A redirected stdout on Windows defaults to cp1252, and the report's rules and
     # arrows are not in it — a 50-minute run must not die at the print statement.
@@ -313,13 +366,17 @@ def main() -> None:
 
     if args.bands:
         bands = tuple(float(x) for x in args.bands.split(","))
-        if len(bands) != 3:
-            parser.error("--bands takes exactly three ceilings, e.g. 35,50,75")
+        if len(bands) != 4:
+            parser.error("--bands takes exactly four ceilings, e.g. 30,40,60,75")
     else:
         from app.reports.scoring import (
-            BAND_LOW_CEILING, BAND_SUSPICIOUS_CEILING, BAND_HIGH_CEILING,
+            BAND_LOW_CEILING, BAND_MEDIUM_CEILING, BAND_SUSPICIOUS_CEILING,
+            BAND_HIGH_CEILING,
         )
-        bands = (BAND_LOW_CEILING, BAND_SUSPICIOUS_CEILING, BAND_HIGH_CEILING)
+        bands = (
+            BAND_LOW_CEILING, BAND_MEDIUM_CEILING, BAND_SUSPICIOUS_CEILING,
+            BAND_HIGH_CEILING,
+        )
 
     if args.from_json:
         with open(args.from_json, encoding="utf-8") as fh:
@@ -339,10 +396,30 @@ def main() -> None:
 
     targets = ([("benign", p) for p in pick(benign)]
                + [("malware", p) for p in pick(malware)])
-    print(f"Scoring {len(targets)} APKs on {args.workers} workers "
-          f"({len(pick(benign))} benign / {len(pick(malware))} malware)")
 
-    records = score_corpus(targets, args.workers)
+    # --resume: previously scored APKs are keyed by basename, which is what a
+    # record carries. A crash at 95% of a two-hour run used to cost the run.
+    existing: list[dict] = []
+    if args.resume and os.path.exists(args.out):
+        with open(args.out, encoding="utf-8") as fh:
+            existing = json.load(fh)
+        done = {r["apk"] for r in existing if "error" not in r}
+        before = len(targets)
+        targets = [t for t in targets if os.path.basename(t[1]) not in done]
+        print(f"--resume: {len(done)} already in {args.out}, "
+              f"skipping {before - len(targets)} of {before}")
+
+    print(f"Scoring {len(targets)} APKs on {args.workers} workers "
+          f"({sum(1 for lbl, _ in targets if lbl == 'benign')} benign / "
+          f"{sum(1 for lbl, _ in targets if lbl == 'malware')} malware)"
+          f"{' -- ONLINE, paced at 4/min' if args.online else ''}")
+
+    records = score_corpus(targets, args.workers, online=args.online)
+
+    # Merge new over old so a re-run of a failed APK replaces its error record.
+    merged = {r["apk"]: r for r in existing}
+    merged.update({r["apk"]: r for r in records})
+    records = list(merged.values())
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as fh:

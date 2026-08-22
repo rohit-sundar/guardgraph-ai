@@ -127,7 +127,7 @@ class TestAnalysisPipelinePhases(unittest.TestCase):
         
         self.assertIsInstance(risk_score, RiskScoreBreakdown)
         self.assertTrue(risk_score.total_score >= 0.0)
-        self.assertIn(risk_score.verdict_band, ["low", "suspicious", "high", "malicious"])
+        self.assertIn(risk_score.verdict_band, ["low", "medium", "suspicious", "high", "malicious"])
 
 if __name__ == "__main__":
     unittest.main()

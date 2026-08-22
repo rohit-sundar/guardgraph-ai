@@ -40,6 +40,10 @@ router = APIRouter()
 # reporting "low" on an anti-analysis sample is the worse error. It is not scored
 # higher either, because nothing was actually observed — no anchors, no
 # permissions, no IoCs. The band says "look at this by hand", which is the truth.
+# Still true with the `medium` band in between `low` and `suspicious`
+# (scoring.BAND_MEDIUM_CEILING = 40.0): 50.0 sits above it, so this constant keeps
+# reading "suspicious", not "medium" — pinned by
+# test_unparseable_score_still_reads_suspicious.
 UNPARSEABLE_RISK_SCORE = 50.0
 
 

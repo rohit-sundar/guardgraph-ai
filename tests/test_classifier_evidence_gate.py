@@ -1,17 +1,29 @@
 """
-Regression tests for the TTP model's inability to discriminate.
+Regression tests for the classifier evidence gate.
 
-The model is trained on 134 samples that are all malware, with no benign class, so
-it has learned label priors as much as evidence. Measured against the shipped
-`.joblib`, an all-zeros 181-feature vector predicts 9 techniques at >= 0.5, several
-of them well above their training prevalence (T1471 — ransomware, 9.7% prevalence —
-at 0.5446). End to end that meant a ZIP holding one 35-byte text file renamed `.apk`
-scored 33.92 / `suspicious`, of which 24.10 points came from classifier confidence
-alone.
+The rule: when static analysis recovered no deterministic evidence — no CFGs, no
+forensic anchors, no behavioural features — the classifier gets no vote, and
+`classifier_confidence_component` contributes nothing to the risk score.
 
-Retraining with a benign class is the real fix and needs data that isn't in the repo
-(scripts/build_ttp_dataset.py --stage c --benign-dir). These tests lock in the
-interim mitigation: when the analysis observed nothing, the model gets no vote.
+**Why this is a code-level guarantee and not a training concern.** Any multi-label
+model learns each label's prior alongside its features, so an input the analyser
+learned nothing from does not yield "no prediction" — it yields the prior, which is
+indistinguishable from a finding by the time it reaches a score. Training data that
+includes a benign class suppresses this, but the model is *data*, not code: it can
+be retrained, rebalanced or swapped without any change to this repository, and the
+scoring path cannot inspect the corpus behind whatever `.joblib` it loads. The gate
+is where the guarantee belongs because it is the part that ships with the code.
+
+**`train_model.py`'s `zero_vector_sanity_check` is the complement, not a
+replacement.** It refuses to save a model that predicts anything for an all-zero
+feature vector, which covers exactly one input. The gate covers every input where
+the analysis observed nothing, including partial recoveries that are not all-zero.
+
+This was never hypothetical: an earlier model trained with no benign class at all
+scored a ZIP holding one renamed text file as `suspicious`, almost entirely on
+classifier confidence. The corpus behind the model has changed since, more than
+once. The reason for the gate has not, which is why these tests assert the
+behaviour rather than any particular model's numbers.
 
 Fully offline — no model, no Neo4j, no Ollama.
 """

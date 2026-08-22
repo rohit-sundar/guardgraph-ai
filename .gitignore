@@ -32,7 +32,10 @@ test_malware_samples/
 data/ttp_apks/
 
 # Benign APK corpus (scripts/build_ttp_dataset.py --stage c) — ~1GB, regeneratable
-data/benign_apks/
+data/benign_apks/*
+!data/benign_apks/.gitkeep
+data/benign_holdout/*
+!data/benign_holdout/.gitkeep
 
 # Run logs (scripts/build_ttp_dataset.py writes a per-run file sink here) —
 # keep the directory in the repo, ignore everything written into it
