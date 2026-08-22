@@ -172,6 +172,21 @@ class AnalysisManifest(BaseModel):
     resolved_dcl_targets: list[str] = []
     resolved_webview_bridges: list[str] = []
     resolved_native_bridges: list[str] = []
+    # MITRE ATT&CK Mobile context for predicted_ttps — same ontology lookup
+    # GraphRAG grounds its narrative in (app/graph/ontology.get_technique_context),
+    # so the UI's technique names/tactics/descriptions can never drift from what
+    # the LLM was told. Each entry: {technique_id, name, tactic, description,
+    # probability}, sorted by probability descending. Empty when predicted_ttps
+    # is empty (nothing predicted, or classifier evidence gate withheld a verdict).
+    ttp_context: list[dict] = []
+    # Other previously-cached samples correlated via shared MITRE techniques,
+    # shared C2 infrastructure, and/or a reused signing certificate — a
+    # graph-native query over Neo4j (app/graph/cache.find_related_samples)
+    # that a flat JSON cache can't do cheaply. Each entry: {sha256, app_name,
+    # family, risk_score, shared_techniques, shared_c2, shared_cert}. Empty
+    # when nothing in the graph overlaps, or when Neo4j is unreachable (fails
+    # closed, same as the rest of cache.py).
+    related_samples: list[dict] = []
 
 
 class RiskScoreBreakdown(BaseModel):

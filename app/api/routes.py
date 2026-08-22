@@ -27,12 +27,31 @@ import uuid
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from loguru import logger
 
-from app.graph.cache import lookup_signature, store_signature
+from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape
+from app.graph.ontology import get_technique_context
 from app.reports.scoring import compute_risk_score, _band_for
 from app.core.config import settings
 from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown, SignatureYaraResult
 
 router = APIRouter()
+
+
+def _build_ttp_context(predicted_ttps: dict[str, float]) -> list[dict]:
+    """
+    Merges predicted_ttps (technique_id -> probability) with MITRE ATT&CK Mobile
+    ontology facts (name/tactic/description) via the same get_technique_context()
+    GraphRAG grounds its narrative in — so the UI can never show a technique name
+    the LLM wasn't also given. Sorted by probability descending.
+    """
+    if not predicted_ttps:
+        return []
+    context = get_technique_context(list(predicted_ttps.keys()))
+    rows = [
+        {**ctx, "probability": predicted_ttps.get(ctx["technique_id"], 0.0)}
+        for ctx in context
+    ]
+    rows.sort(key=lambda r: r["probability"], reverse=True)
+    return rows
 
 # Score assigned when the APK cannot be parsed at all. Deliberately mid-band
 # ("suspicious") rather than 0: a file that defeats Androguard's AXML parser or
@@ -45,6 +64,16 @@ router = APIRouter()
 # reading "suspicious", not "medium" — pinned by
 # test_unparseable_score_still_reads_suspicious.
 UNPARSEABLE_RISK_SCORE = 50.0
+
+
+@router.get("/graph/landscape")
+async def graph_landscape(limit: int = 30):
+    """
+    Cytoscape-ready snapshot of the whole correlation graph (Sample/
+    MalwareFamily/Technique/C2Indicator/Certificate) for the UI's "Threat
+    Landscape" tab — not tied to any single analysis run.
+    """
+    return get_threat_landscape(limit=limit)
 
 
 @router.post("/analyze", response_model=AnalysisReport)
@@ -242,6 +271,12 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             predicted_ttps=cached_ttps,
             predicted_family=cached.get("family"),
             family_confidence=None,
+            ttp_context=_build_ttp_context(cached_ttps),
+            related_samples=find_related_samples(
+                list(cached_ttps.keys()), ingestion.c2_indicators,
+                exclude_sha256=ingestion.sha256,
+                cert_thumbprint=ingestion.cert_thumbprint,
+            ),
             signature_yara=cached_sig_yara,
             permissions=cached_permissions,
             c2_indicators=ingestion.c2_indicators,
@@ -323,6 +358,12 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         predicted_ttps=predicted_ttps,
         predicted_family=predicted_family,
         family_confidence=family_confidence,
+        ttp_context=_build_ttp_context(predicted_ttps),
+        related_samples=find_related_samples(
+            list(predicted_ttps.keys()), ingestion.c2_indicators,
+            exclude_sha256=ingestion.sha256,
+            cert_thumbprint=ingestion.cert_thumbprint,
+        ),
         signature_yara=sig_yara,
         permissions=ingestion.permissions,
         c2_indicators=ingestion.c2_indicators,
@@ -369,6 +410,9 @@ def _run_analysis(filepath: str) -> AnalysisReport:
             permissions=ingestion.permissions,
             risk_components=risk_score.model_dump(),
             obfuscation_data=obfuscation.model_dump(),
+            package_name=ingestion.package_name,
+            c2_indicators=ingestion.c2_indicators,
+            cert_thumbprint=ingestion.cert_thumbprint,
         )
 
     return AnalysisReport(

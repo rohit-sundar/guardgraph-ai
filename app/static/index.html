@@ -209,6 +209,15 @@
           <button class="tab-btn" onclick="switchTab('reFindings')">
             🔬 Reverse Engineering (<span id="reFindingsCount">0</span>)
           </button>
+          <button class="tab-btn" onclick="switchTab('mitreMapping')">
+            🎯 MITRE ATT&CK Mapping (<span id="mitreCount">0</span>)
+          </button>
+          <button class="tab-btn" onclick="switchTab('relatedSamples')">
+            🔗 Correlated Samples (<span id="relatedCount">0</span>)
+          </button>
+          <button class="tab-btn" onclick="switchTab('threatLandscape')">
+            🌐 Threat Landscape
+          </button>
         </div>
 
         <div class="tabs-body">
@@ -271,8 +280,10 @@
             <div class="graph-explorer-wrapper">
               <div class="graph-explorer-header">
                 <div>
-                  <h5>Interactive Behavioral Subgraph Explorer</h5>
-                  <p class="graph-subtitle">Visual representation of suspicious control-flow basic blocks and forensic anchor clusters</p>
+                  <h5>Sample Correlation Graph</h5>
+                  <p class="graph-subtitle">This sample's own neighborhood in the live Neo4j graph — predicted family,
+                    MITRE techniques and C2 infrastructure. Same graph as the Threat Landscape tab, scoped to just
+                    this sample.</p>
                 </div>
                 <div class="graph-controls">
                   <button class="btn btn-sm btn-control" onclick="resetGraphView()">🎯 Fit View</button>
@@ -281,13 +292,13 @@
                 </div>
               </div>
               <div class="graph-canvas-container" id="cyGraphContainer">
-                <div class="graph-placeholder-text">Run analysis to explore interactive CFG behavioral graph</div>
+                <div class="graph-placeholder-text">Run analysis to see this sample's correlation graph</div>
               </div>
               <div class="graph-legend">
-                <div class="legend-item"><span class="legend-dot dot-outlier"></span> Outlier Node (Flattening)</div>
-                <div class="legend-item"><span class="legend-dot dot-behavior"></span> Behavioral Subgraph / Anchor</div>
-                <div class="legend-item"><span class="legend-dot dot-api"></span> Sensitive Target API</div>
-                <div class="legend-item"><span class="legend-dot dot-normal"></span> Control Flow Block</div>
+                <div class="legend-item"><span class="legend-dot" style="background:#eab308;"></span> This Sample</div>
+                <div class="legend-item"><span class="legend-dot" style="background:#84cc16;"></span> Malware Family</div>
+                <div class="legend-item"><span class="legend-dot" style="background:#3b82f6;"></span> MITRE Technique</div>
+                <div class="legend-item"><span class="legend-dot" style="background:#ef4444;"></span> C2 Indicator</div>
               </div>
             </div>
 
@@ -336,6 +347,51 @@
             <div class="re-findings-section">
               <h5>⚙️ Native / JNI Bridges</h5>
               <div class="re-findings-list" id="reNativeList"><span class="re-empty">None found</span></div>
+            </div>
+          </div>
+
+          <!-- Tab 7: MITRE ATT&CK Mapping -->
+          <div class="tab-content" id="tabMitreMapping">
+            <p class="graph-subtitle" style="margin-bottom:1rem;">
+              MITRE ATT&amp;CK Mobile techniques predicted by the multi-label classifier, grounded
+              against the same ontology facts (name/tactic/description) GraphRAG cites in the
+              narrative report — nothing shown here is invented independently of what the LLM saw.
+            </p>
+            <div class="mitre-mapping-list" id="mitreMappingList"><span class="re-empty">Run analysis to see predicted techniques</span></div>
+          </div>
+
+          <!-- Tab 8: Correlated Samples (Neo4j graph correlation) -->
+          <div class="tab-content" id="tabRelatedSamples">
+            <p class="graph-subtitle" style="margin-bottom:1rem;">
+              Other previously-analyzed samples in this instance's Neo4j graph that share
+              MITRE techniques and/or C2 infrastructure with this one — a live graph query,
+              not a static rule. An empty section means nothing cached so far overlaps.
+            </p>
+            <div class="related-samples-list" id="relatedSamplesList"><span class="re-empty">None found</span></div>
+          </div>
+
+          <!-- Tab 9: Threat Landscape (whole-graph Neo4j view, not per-sample) -->
+          <div class="tab-content" id="tabThreatLandscape">
+            <div class="graph-explorer-header">
+              <div>
+                <h5>Live Correlation Graph — Neo4j</h5>
+                <p class="graph-subtitle">Every cached sample, family, MITRE technique, C2 indicator and reused
+                  certificate this instance has ever seen — not just the current report.</p>
+              </div>
+              <div class="graph-controls">
+                <button class="btn btn-sm btn-control" onclick="loadThreatLandscape()">🔄 Refresh</button>
+                <button class="btn btn-sm btn-control" onclick="relayoutLandscape('cose')">🎯 Re-cluster</button>
+              </div>
+            </div>
+            <div class="graph-canvas-container" id="landscapeGraphContainer" style="margin-top:1rem;">
+              <div class="graph-placeholder-text">Click Refresh to load the live graph from Neo4j</div>
+            </div>
+            <div class="graph-legend">
+              <div class="legend-item"><span class="legend-dot" style="background:#eab308;"></span> Sample</div>
+              <div class="legend-item"><span class="legend-dot" style="background:#84cc16;"></span> Malware Family</div>
+              <div class="legend-item"><span class="legend-dot" style="background:#3b82f6;"></span> MITRE Technique</div>
+              <div class="legend-item"><span class="legend-dot" style="background:#ef4444;"></span> C2 Indicator</div>
+              <div class="legend-item"><span class="legend-dot" style="background:#a855f7;"></span> Reused Certificate</div>
             </div>
           </div>
         </div>
