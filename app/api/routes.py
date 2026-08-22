@@ -19,18 +19,23 @@ Changes vs. original skeleton:
 - The TTP classifier only votes when the analysis actually observed something —
   it was trained without a benign class and answers confidently regardless.
 """
+import asyncio
+import json
 import os
 import shutil
 import tempfile
+import threading
 import uuid
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from loguru import logger
 
 from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape
 from app.graph.ontology import get_technique_context
 from app.reports.scoring import compute_risk_score, _band_for
+from app.core import progress
 from app.core.config import settings
 from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown, SignatureYaraResult
 
@@ -77,8 +82,29 @@ async def graph_landscape(limit: int = 30):
     return get_threat_landscape(limit=limit)
 
 
+def _analyze_with_fallback(filepath: str, job_id: str | None = None) -> AnalysisReport:
+    """
+    Shared body of both analysis entry points: run the pipeline, and if the APK
+    defeats it entirely, fall back to the mid-band "look at this by hand" report
+    instead of a raw 500. Synchronous — callers are responsible for getting it off
+    the event loop (run_in_threadpool for the blocking HTTP path, a plain
+    background thread for the SSE job path; see /analyze/start below).
+    """
+    try:
+        return _run_analysis(filepath, job_id=job_id)
+    except Exception as exc:
+        logger.error(f"Unparseable APK fallback triggered: {exc}")
+        return _unparseable_report(filepath, exc)
+
+
 @router.post("/analyze", response_model=AnalysisReport)
 async def analyze(file: UploadFile = File(...)):
+    """
+    Synchronous: blocks until the full report is ready. This is what curl, the
+    README's quickstart, and scripts/test_upload.py use — kept exactly as it was
+    for anything that isn't the browser UI. The UI itself uses /analyze/start +
+    /analyze/stream below, which is the same pipeline with real progress attached.
+    """
     if not file.filename.endswith(".apk"):
         raise HTTPException(400, "Only .apk files are supported in this prototype.")
 
@@ -90,17 +116,11 @@ async def analyze(file: UploadFile = File(...)):
         with open(tmp_path, "wb") as f:
             f.write(content)
 
-        try:
-            # _run_analysis is fully synchronous and takes minutes. Called directly
-            # inside `async def` it blocks the event loop for its whole duration —
-            # the server stops answering everything, /health included, so a second
-            # person uploading sees a dead application rather than a queue.
-            result = await run_in_threadpool(_run_analysis, tmp_path)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            logger.error(f"Unparseable APK fallback triggered: {exc}")
-            result = _unparseable_report(tmp_path, exc)
+        # _analyze_with_fallback is fully synchronous and takes minutes. Called
+        # directly inside `async def` it blocks the event loop for its whole
+        # duration — the server stops answering everything, /health included, so
+        # a second person uploading sees a dead application rather than a queue.
+        result = await run_in_threadpool(_analyze_with_fallback, tmp_path)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -112,7 +132,172 @@ async def analyze_sample():
     sample_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "guardgraph_test", "guardgraph_test.apk"))
     if not os.path.exists(sample_path):
         raise HTTPException(404, f"Sample file not found at {sample_path}")
-    return await run_in_threadpool(_run_analysis, sample_path)
+    return await run_in_threadpool(_analyze_with_fallback, sample_path)
+
+
+# ── Streamed progress (SSE) ─────────────────────────────────────────────────
+#
+# The UI previously showed a progress bar driven by simulatePipelineProgress() —
+# fixed setTimeout delays with no connection to the real pipeline, reaching 95%
+# and sitting there however long the analysis actually took. These two endpoints
+# replace it with the pipeline's own phase boundaries (app/core/progress.py),
+# streamed to the browser as they actually happen.
+#
+# Two endpoints instead of one, because SSE needs the client to already be
+# holding a job_id before the long-running work starts, and a single POST
+# can't hand back an id AND stream from the same request:
+#   1. POST /analyze/start   — saves the upload, starts the analysis on a
+#                              background thread, returns {job_id} in
+#                              milliseconds.
+#   2. GET  /analyze/stream/{job_id} — the browser opens this immediately after
+#                              receiving job_id; it relays progress events and,
+#                              as its final event, the complete AnalysisReport.
+#
+# /analyze itself is untouched and stays fully synchronous — see its docstring.
+
+# job_id -> {"status": "running" | "complete" | "error", "result": dict | None,
+#            "error": str | None}. Deliberately a plain process-lifetime dict, not
+# Neo4j or a real job queue: a hackathon prototype's demo session lives entirely
+# in one process, and a restart already discards in-flight uploads regardless.
+# Entries are popped by the stream endpoint once delivered, so this only grows
+# by jobs whose stream was never opened.
+_JOBS: dict[str, dict] = {}
+_JOBS_LOCK = threading.Lock()
+
+
+def _run_background_job(tmp_dir: str, tmp_path: str, job_id: str) -> None:
+    """
+    Runs on a plain threading.Thread (not run_in_threadpool/anyio) because nothing
+    here is awaiting the result inside the request that started it — the request
+    already returned. Cleans up the temp upload itself, since no `finally` in the
+    request handler will run after this point.
+    """
+    try:
+        report = _analyze_with_fallback(tmp_path, job_id=job_id)
+        with _JOBS_LOCK:
+            _JOBS[job_id] = {"status": "complete", "result": report.model_dump(mode="json")}
+        progress.emit_final(job_id, "complete")
+    except Exception as exc:  # last-resort guard: a bug here must not hang the stream forever
+        logger.error(f"[progress] background analysis {job_id} crashed: {exc}")
+        with _JOBS_LOCK:
+            _JOBS[job_id] = {"status": "error", "error": str(exc)}
+        progress.emit_final(job_id, "error", str(exc))
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+@router.post("/analyze/start")
+async def analyze_start(file: UploadFile = File(...)):
+    if not file.filename.endswith(".apk"):
+        raise HTTPException(400, "Only .apk files are supported in this prototype.")
+
+    tmp_dir = tempfile.mkdtemp()
+    tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}.apk")
+    try:
+        content = await file.read()
+        with open(tmp_path, "wb") as f:
+            f.write(content)
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+    job_id = uuid.uuid4().hex
+    progress.broker.create(job_id)
+    with _JOBS_LOCK:
+        _JOBS[job_id] = {"status": "running", "result": None}
+
+    threading.Thread(
+        target=_run_background_job, args=(tmp_dir, tmp_path, job_id),
+        name=f"analyze-{job_id[:8]}", daemon=True,
+    ).start()
+
+    return {"job_id": job_id}
+
+
+@router.post("/analyze_sample/start")
+async def analyze_sample_start():
+    """Same as /analyze/start but against the bundled demo sample — the 'Quick
+    Test' button gets real progress too, not just uploaded files."""
+    sample_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "guardgraph_test", "guardgraph_test.apk"))
+    if not os.path.exists(sample_path):
+        raise HTTPException(404, f"Sample file not found at {sample_path}")
+
+    job_id = uuid.uuid4().hex
+    progress.broker.create(job_id)
+    with _JOBS_LOCK:
+        _JOBS[job_id] = {"status": "running", "result": None}
+
+    # No tmp_dir to clean up — the sample file is a permanent fixture, not an
+    # upload — so the cleanup path is a no-op directory that doesn't exist.
+    threading.Thread(
+        target=_run_background_job, args=(tempfile.mkdtemp(), sample_path, job_id),
+        name=f"analyze-sample-{job_id[:8]}", daemon=True,
+    ).start()
+
+    return {"job_id": job_id}
+
+
+@router.get("/analyze/stream/{job_id}")
+async def analyze_stream(job_id: str):
+    if not progress.broker.exists(job_id):
+        raise HTTPException(404, "Unknown or expired job_id.")
+
+    async def event_source():
+        # Only True once the terminal event has actually completed a `yield` back
+        # to the client. A disconnected browser's EventSource retries the SAME
+        # GET automatically, and this generator is torn down by an exception
+        # (GeneratorExit / CancelledError) at whatever point that disconnect is
+        # noticed. Cleanup runs ONLY on the confirmed-delivered path; otherwise
+        # both registries are left intact so the reconnect can still receive the
+        # completion event instead of "Unknown or expired job_id" on an analysis
+        # that is still running, or already finished, server-side.
+        #
+        # Completion is read from _JOBS rather than from the progress queue's
+        # "final" marker, deliberately: broker.try_get() DEQUEUES — if that final
+        # marker were consumed here and the yield below then failed to reach a
+        # client that disconnected at that exact instant, the marker would be
+        # gone and a reconnect would poll forever. A plain dict lookup has no such
+        # failure mode, so it is the single source of truth for "is this done";
+        # the queue is used only for the (loseable-without-harm) progress ticks.
+        delivered_final = False
+        try:
+            while True:
+                event = progress.broker.try_get(job_id)
+                if event is not None and not event.get("final"):
+                    yield f"event: progress\ndata: {json.dumps(event)}\n\n"
+                    continue
+
+                with _JOBS_LOCK:
+                    job = _JOBS.get(job_id)
+                if job is not None and job.get("status") in ("complete", "error"):
+                    payload = {
+                        "phase": "final",
+                        "name": "Complete" if job["status"] == "complete" else "Failed",
+                        "final": True,
+                        **job,
+                    }
+                    yield f"event: complete\ndata: {json.dumps(payload)}\n\n"
+                    delivered_final = True
+                    return
+
+                await asyncio.sleep(0.15)
+        finally:
+            if delivered_final:
+                progress.broker.discard(job_id)
+                with _JOBS_LOCK:
+                    _JOBS.pop(job_id, None)
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Disables response buffering on nginx-fronted deployments; harmless
+            # and inert when served directly by uvicorn, as in this prototype.
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
@@ -214,17 +399,30 @@ from app.core.pipeline import (
     NO_CLASSIFIER_EVIDENCE_NOTE,
 )
 
-def _run_analysis(filepath: str) -> AnalysisReport:
+def _run_analysis(filepath: str, job_id: str | None = None) -> AnalysisReport:
+    """
+    job_id is optional and purely additive: when given, each phase boundary is
+    published via app.core.progress for /analyze/stream/{job_id} to relay over SSE.
+    None (the default) makes every progress.emit() call a no-op, so /analyze,
+    /analyze_sample, and every test or script calling this directly are
+    byte-for-byte unaffected — see progress.py's module docstring for why.
+    """
     # --- Phase 1: Ingestion & Metadata (+ Android malware static enrichments) ---
+    progress.emit(job_id, 1, "APK Ingestion", "start")
     ingestion, apk_obj, dvm, analysis_obj, yara_targets = (
         AnalysisPipeline.run_phase1_ingestion(filepath)
     )
+    progress.emit(job_id, 1, "APK Ingestion", "done")
 
     # --- Hot path: cache lookup ---
     cached = lookup_signature(ingestion.sha256)
     cache_hit = cached is not None
 
     if cache_hit:
+        # Phases 1.5-7 never run on this path — say so once rather than emitting
+        # nine individual "skipped" events for the UI to collapse itself.
+        for phase, name in progress.PHASES[1:]:
+            progress.emit(job_id, phase, name, "skipped", "known sample — cache hit")
         # A cache hit means "we already reached a verdict on this SHA-256" —
         # return that verdict, not one recomputed from emptied inputs. A prior
         # version called compute_risk_score() with predicted_ttps={}, no
@@ -313,31 +511,41 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         )
 
     # --- Phase 1.5: Signature Detection & YARA (APK + uncompressed DEX/assets) ---
+    progress.emit(job_id, 1.5, "Signature & YARA Scan", "start")
     sig_yara = AnalysisPipeline.run_phase1b_signature_yara(
         filepath, ingestion, yara_targets=yara_targets
     )
+    progress.emit(job_id, 1.5, "Signature & YARA Scan", "done")
 
     # --- Phase 2: Graph Representation ---
+    progress.emit(job_id, 2, "CFG / ACFG Construction", "start")
     cfgs, parse_failure_rate = AnalysisPipeline.run_phase2_graph_construction(analysis_obj)
+    progress.emit(job_id, 2, "CFG / ACFG Construction", "done")
 
     # --- Phase 3: Forensic Matching & Subgraph Extraction ---
+    progress.emit(job_id, 3, "Forensic Anchor Matching", "start")
     all_matches, behavioral_subgraphs, all_strings = AnalysisPipeline.run_phase3_forensic_matching(cfgs, ingestion)
 
     # Merge C2 IoCs found in DEX string literals into ingestion
     ingestion = AnalysisPipeline.merge_c2_from_strings(ingestion, all_strings)
+    progress.emit(job_id, 3, "Forensic Anchor Matching", "done")
 
     # --- Phase 3.5: Reverse-Engineering Deep Dive (crypto/DCL/WebView/native) ---
+    progress.emit(job_id, 3.5, "Reverse-Engineering Deep Dive", "start")
     resolved_crypto, resolved_dcl, resolved_webview, resolved_native = (
         AnalysisPipeline.run_phase3b_re_deepdive(cfgs, ingestion, apk_obj=apk_obj, analysis_obj=analysis_obj)
     )
+    progress.emit(job_id, 3.5, "Reverse-Engineering Deep Dive", "done")
 
     # --- Phase 4: Feature Engineering (family 35-vec + multi-label TTP 181-vec) ---
+    progress.emit(job_id, 4, "Feature Engineering", "start")
     obfuscation, feature_vector, ttp_feature_vector, mean_density, total_nodes = (
         AnalysisPipeline.run_phase4_feature_engineering(
             ingestion, cfgs, all_matches, behavioral_subgraphs, all_strings, parse_failure_rate,
             sig_yara=sig_yara,
         )
     )
+    progress.emit(job_id, 4, "Feature Engineering", "done")
 
     # --- Classifier evidence gate ---
     # The TTP model was trained without a benign class, so it answers confidently
@@ -351,12 +559,16 @@ def _run_analysis(filepath: str) -> AnalysisReport:
     )
 
     # --- Phase 5: Multi-label TTP Classification (direct) + auxiliary family label ---
+    progress.emit(job_id, 5, "MITRE TTP Classification", "start")
     predicted_ttps, predicted_family, family_confidence = AnalysisPipeline.run_phase5_ml_classification(
         ttp_feature_vector, feature_vector, evidence_present=classifier_evidence
     )
+    progress.emit(job_id, 5, "MITRE TTP Classification", "done")
 
     # --- Phase 5.5: Brand impersonation (identity, not payload) ---
+    progress.emit(job_id, 5.5, "Brand Impersonation Checks", "start")
     impersonation = AnalysisPipeline.run_phase5b_impersonation(ingestion)
+    progress.emit(job_id, 5.5, "Brand Impersonation Checks", "done")
 
     manifest = AnalysisManifest(
         target_package=ingestion.package_name,
@@ -395,6 +607,7 @@ def _run_analysis(filepath: str) -> AnalysisReport:
     )
 
     # --- Phase 6: Risk Scoring (includes static malware anchors) ---
+    progress.emit(job_id, 6, "Risk Scoring", "start")
     risk_score = AnalysisPipeline.run_phase6_risk_scoring(
         predicted_ttps, ingestion.permissions, obfuscation, all_matches, cache_hit, None,
         sig_yara=sig_yara,
@@ -402,11 +615,14 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         classifier_evidence_present=classifier_evidence,
         impersonation=impersonation,
     )
+    progress.emit(job_id, 6, "Risk Scoring", "done")
 
     # --- Phase 7: Explainable Reporting ---
+    progress.emit(job_id, 7, "GraphRAG Report Generation", "start")
     narrative, limitations, grounding = AnalysisPipeline.run_phase7_reporting(
         manifest, risk_score
     )
+    progress.emit(job_id, 7, "GraphRAG Report Generation", "done")
 
     if not classifier_evidence:
         limitations = list(limitations) + [NO_CLASSIFIER_EVIDENCE_NOTE]

@@ -83,43 +83,59 @@
       </div>
     </section>
 
-    <!-- Pipeline Progress Visualizer -->
+    <!-- Pipeline Progress Visualizer — driven by real SSE events from
+         /analyze/stream/{job_id}, not a fixed timer. See app.js:renderProgressEvent.
+         The step list below must stay in the same order as app/core/progress.PHASES;
+         data-phase carries the exact phase number that module emits. -->
     <section class="progress-section hidden" id="progressSection">
       <div class="glass-card progress-card">
         <div class="progress-header">
-          <h3>Analyzing Target Package...</h3>
+          <h3 id="progressHeadline">Analyzing Target Package&hellip;</h3>
           <span class="progress-percentage" id="progressPercent">0%</span>
         </div>
         <div class="progress-bar-container">
           <div class="progress-bar-fill" id="progressBarFill"></div>
         </div>
-        <div class="pipeline-steps">
-          <div class="step-item" id="step1">
+        <div class="progress-live-note" id="progressLiveNote">Connecting&hellip;</div>
+        <div class="pipeline-steps pipeline-steps-10">
+          <div class="step-item" data-phase="1">
             <div class="step-dot">1</div>
             <span class="step-label">APK Ingestion</span>
           </div>
-          <div class="step-item" id="step2">
+          <div class="step-item" data-phase="1.5">
             <div class="step-dot">2</div>
-            <span class="step-label">YARA Scan</span>
+            <span class="step-label">Signature &amp; YARA</span>
           </div>
-          <div class="step-item" id="step3">
+          <div class="step-item" data-phase="2">
             <div class="step-dot">3</div>
-            <span class="step-label">CFG Graph</span>
+            <span class="step-label">CFG / ACFG</span>
           </div>
-          <div class="step-item" id="step4">
+          <div class="step-item" data-phase="3">
             <div class="step-dot">4</div>
+            <span class="step-label">Forensic Anchors</span>
+          </div>
+          <div class="step-item" data-phase="3.5">
+            <div class="step-dot">5</div>
+            <span class="step-label">Reverse Engineering</span>
+          </div>
+          <div class="step-item" data-phase="4">
+            <div class="step-dot">6</div>
+            <span class="step-label">Feature Engineering</span>
+          </div>
+          <div class="step-item" data-phase="5">
+            <div class="step-dot">7</div>
             <span class="step-label">MITRE TTPs</span>
           </div>
-          <div class="step-item" id="step5">
-            <div class="step-dot">5</div>
-            <span class="step-label">Obfuscation</span>
+          <div class="step-item" data-phase="5.5">
+            <div class="step-dot">8</div>
+            <span class="step-label">Impersonation</span>
           </div>
-          <div class="step-item" id="step6">
-            <div class="step-dot">6</div>
+          <div class="step-item" data-phase="6">
+            <div class="step-dot">9</div>
             <span class="step-label">Risk Scoring</span>
           </div>
-          <div class="step-item" id="step7">
-            <div class="step-dot">7</div>
+          <div class="step-item" data-phase="7">
+            <div class="step-dot">10</div>
             <span class="step-label">GraphRAG AI</span>
           </div>
         </div>

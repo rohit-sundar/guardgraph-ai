@@ -95,6 +95,7 @@ curl -X POST http://localhost:8000/analyze -F "file=@data/samples/test.apk"
 | Module | State |
 |---|---|
 | FastAPI upload + hashing | Working |
+| Real-time pipeline progress (SSE) | Working. `POST /analyze/start` (or `/analyze_sample/start`) returns a `job_id` immediately; `GET /analyze/stream/{job_id}` relays each of the ten backend phases' actual start/done/skipped boundaries as they happen, ending in one `complete` event carrying the full report — this is what the UI's progress bar is driven by. A dropped connection (network hiccup, tab backgrounded) does not lose the job: reconnecting to the same `job_id` resumes relaying from wherever the analysis currently is, and the terminal event is recoverable even after a disconnect. `POST /analyze` remains a plain synchronous request/response with no progress — used by curl, this quickstart, and `scripts/test_upload.py` |
 | Androguard ingestion | Working (needs `androguard` installed) |
 | CFG construction (NetworkX) | Working |
 | ACFG enrichment | Working |

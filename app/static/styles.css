@@ -337,6 +337,14 @@ body {
   margin-top: 0.5rem;
 }
 
+/* 10 real pipeline phases (was 7 simulated ones) — narrower columns so the row
+   still fits without wrapping on a typical laptop width. */
+.pipeline-steps-10 {
+  grid-template-columns: repeat(5, 1fr);
+  grid-template-rows: repeat(2, auto);
+  gap: 0.65rem 0.4rem;
+}
+
 .step-item {
   display: flex;
   flex-direction: column;
@@ -347,6 +355,20 @@ body {
 }
 
 .step-item.active {
+  opacity: 1;
+}
+
+/* A phase that finished — distinct from "active" (in progress) so the eye can
+   scan how far the real pipeline has actually gotten, not just what's running now. */
+.step-item.completed {
+  opacity: 0.85;
+}
+
+.step-item.skipped {
+  opacity: 0.3;
+}
+
+.step-item.errored {
   opacity: 1;
 }
 
@@ -361,6 +383,7 @@ body {
   font-size: 0.85rem;
   font-weight: 700;
   border: 1px solid var(--border-card);
+  transition: all 0.3s ease;
 }
 
 .step-item.active .step-dot {
@@ -369,10 +392,31 @@ body {
   box-shadow: 0 0 15px var(--primary-glow);
 }
 
+.step-item.completed .step-dot {
+  background: rgba(16, 185, 129, 0.25);
+  border-color: #10b981;
+  color: #10b981;
+}
+
+.step-item.errored .step-dot {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
 .step-label {
   font-size: 0.75rem;
   color: var(--text-muted);
   text-align: center;
+}
+
+.progress-live-note {
+  margin-top: 0.6rem;
+  margin-bottom: 0.9rem;
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  min-height: 1.2em;
 }
 
 /* Results Section */

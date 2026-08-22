@@ -87,24 +87,26 @@ function handleFileSelected(file) {
   }
 }
 
+// Real pipeline phase count — must match app.core.progress.PHASES on the backend.
+// Only used as a fallback when an event omits total_phases; every event from a
+// current server carries its own, so this rarely matters in practice.
+const PIPELINE_PHASE_COUNT = 10;
+
 async function runSampleAnalysis() {
   document.getElementById('uploadSection').classList.add('hidden');
   document.getElementById('progressSection').classList.remove('hidden');
   document.getElementById('resultsSection').classList.add('hidden');
-
-  simulatePipelineProgress();
+  resetPipelineSteps();
 
   try {
-    const response = await fetch('/analyze_sample', { method: 'POST' });
-    if (!response.ok) {
-      throw new Error(`Server returned HTTP ${response.status}`);
+    const startResp = await fetch('/analyze_sample/start', { method: 'POST' });
+    if (!startResp.ok) {
+      throw new Error(`Server returned HTTP ${startResp.status}`);
     }
-    const data = await response.json();
-    renderResults(data);
+    const { job_id } = await startResp.json();
+    await streamAnalysis(job_id);
   } catch (err) {
-    alert("Error running sample analysis: " + err.message);
-    document.getElementById('uploadSection').classList.remove('hidden');
-    document.getElementById('progressSection').classList.add('hidden');
+    handleAnalysisFailure("Error running sample analysis: " + err.message);
   }
 }
 
@@ -112,63 +114,159 @@ async function uploadAndAnalyze(file) {
   document.getElementById('uploadSection').classList.add('hidden');
   document.getElementById('progressSection').classList.remove('hidden');
   document.getElementById('resultsSection').classList.add('hidden');
-
-  simulatePipelineProgress();
+  resetPipelineSteps();
 
   const formData = new FormData();
   formData.append("file", file);
 
   try {
-    const response = await fetch('/analyze', {
+    const startResp = await fetch('/analyze/start', {
       method: 'POST',
       body: formData
     });
-    if (!response.ok) {
-      throw new Error(`Server returned HTTP ${response.status}`);
+    if (!startResp.ok) {
+      throw new Error(`Server returned HTTP ${startResp.status}`);
     }
-    const data = await response.json();
-    renderResults(data);
+    const { job_id } = await startResp.json();
+    await streamAnalysis(job_id);
   } catch (err) {
-    alert("Analysis failed: " + err.message);
-    document.getElementById('uploadSection').classList.remove('hidden');
-    document.getElementById('progressSection').classList.add('hidden');
+    handleAnalysisFailure("Analysis failed: " + err.message);
   }
 }
 
-function simulatePipelineProgress() {
-  const steps = [
-    { id: 'step1', pct: 15, delay: 500 },
-    { id: 'step2', pct: 30, delay: 1800 },
-    { id: 'step3', pct: 45, delay: 3500 },
-    { id: 'step4', pct: 60, delay: 5500 },
-    { id: 'step5', pct: 75, delay: 7000 },
-    { id: 'step6', pct: 90, delay: 8500 },
-    { id: 'step7', pct: 95, delay: 10000 },
-  ];
+function handleAnalysisFailure(message) {
+  alert(message);
+  document.getElementById('uploadSection').classList.remove('hidden');
+  document.getElementById('progressSection').classList.add('hidden');
+}
 
+// Real pipeline progress over Server-Sent Events (app/core/progress.py). Replaces
+// the earlier simulatePipelineProgress(), which was a fixed sequence of setTimeout
+// delays with no connection to the actual pipeline — it reached 95% and sat there
+// however long the real analysis took. Every event here is emitted at the moment
+// the corresponding backend phase actually starts or finishes.
+function streamAnalysis(jobId) {
+  return new Promise((resolve, reject) => {
+    const source = new EventSource(`/analyze/stream/${jobId}`);
+    let settled = false;
+
+    source.addEventListener('progress', (evt) => {
+      try {
+        applyProgressEvent(JSON.parse(evt.data));
+      } catch (e) {
+        // A malformed single event is not fatal to the stream — keep listening.
+      }
+    });
+
+    source.addEventListener('complete', (evt) => {
+      settled = true;
+      source.close();
+
+      let payload;
+      try {
+        payload = JSON.parse(evt.data);
+      } catch (e) {
+        reject(new Error('Malformed completion event from server'));
+        return;
+      }
+
+      applyProgressEvent(payload);
+      if (payload.status === 'complete' && payload.result) {
+        setProgressPercent(100);
+        renderResults(payload.result);
+        resolve();
+      } else {
+        reject(new Error(payload.error || payload.detail || 'Analysis failed'));
+      }
+    });
+
+    source.onerror = () => {
+      // EventSource fires 'error' on a normal server-closed connection too, but we
+      // always call source.close() ourselves inside the 'complete' handler first —
+      // so an error reaching here after settled=true is the browser's harmless
+      // post-close housekeeping, not a real failure.
+      if (settled) return;
+      settled = true;
+      source.close();
+      reject(new Error('Lost connection to the analysis stream'));
+    };
+  });
+}
+
+// Which phase_index values have reached a terminal state (done or skipped) in the
+// run currently on screen — drives the percentage bar off real completed work
+// instead of a guessed pace.
+let _completedPhaseIndices = new Set();
+
+function resetPipelineSteps() {
+  document.querySelectorAll('.step-item').forEach(s => {
+    s.classList.remove('active', 'completed', 'skipped', 'errored');
+  });
+  _completedPhaseIndices = new Set();
+  setProgressPercent(0);
+
+  const note = document.getElementById('progressLiveNote');
+  if (note) note.textContent = 'Connecting…';
+  const headline = document.getElementById('progressHeadline');
+  if (headline) headline.textContent = 'Analyzing Target Package…';
+}
+
+function setProgressPercent(pct) {
   const fill = document.getElementById('progressBarFill');
   const percentText = document.getElementById('progressPercent');
+  if (fill) fill.style.width = `${pct}%`;
+  if (percentText) percentText.textContent = `${Math.round(pct)}%`;
+}
 
-  // Reset steps
-  document.querySelectorAll('.step-item').forEach(s => s.classList.remove('active', 'completed'));
-  fill.style.width = '0%';
-  percentText.textContent = '0%';
+function applyProgressEvent(event) {
+  const note = document.getElementById('progressLiveNote');
 
-  steps.forEach(({ id, pct, delay }) => {
-    setTimeout(() => {
-      const stepEl = document.getElementById(id);
-      if (stepEl) {
-        document.querySelectorAll('.step-item').forEach(s => {
-          if (s !== stepEl && !s.classList.contains('completed')) {
-            s.classList.remove('active');
-          }
-        });
-        stepEl.classList.add('active');
-      }
-      fill.style.width = `${pct}%`;
-      percentText.textContent = `${pct}%`;
-    }, delay);
-  });
+  if (event.final) {
+    if (event.status === 'error') {
+      const headline = document.getElementById('progressHeadline');
+      if (headline) headline.textContent = 'Analysis failed';
+      if (note) note.textContent = event.detail || event.error || 'Unknown error';
+      document.querySelectorAll('.step-item.active').forEach(s => {
+        s.classList.remove('active');
+        s.classList.add('errored');
+      });
+    }
+    return;
+  }
+
+  const stepEl = document.querySelector(`.step-item[data-phase="${event.phase}"]`);
+  if (stepEl) {
+    if (event.status === 'start') {
+      stepEl.classList.add('active');
+      stepEl.classList.remove('completed', 'skipped');
+    } else if (event.status === 'done') {
+      stepEl.classList.remove('active');
+      stepEl.classList.add('completed');
+      if (typeof event.phase_index === 'number') _completedPhaseIndices.add(event.phase_index);
+    } else if (event.status === 'skipped') {
+      stepEl.classList.remove('active');
+      stepEl.classList.add('skipped');
+      if (typeof event.phase_index === 'number') _completedPhaseIndices.add(event.phase_index);
+    }
+  }
+
+  if (note) {
+    if (event.status === 'start') {
+      note.textContent = `Running: ${event.name}…`;
+    } else if (event.status === 'done') {
+      note.textContent = `${event.name} complete.`;
+    } else if (event.status === 'skipped') {
+      note.textContent = `${event.name} skipped — ${event.detail || 'not needed on this path'}.`;
+    }
+  }
+
+  const total = event.total_phases || PIPELINE_PHASE_COUNT;
+  // Capped short of 100 until the terminal 'complete' event actually lands — a
+  // cache hit reports phase 1 done plus nine "skipped" events almost instantly,
+  // which would otherwise read 100% while the response body is still being
+  // assembled, and then appear to hang right at the finish line.
+  const pct = Math.min(97, Math.round((_completedPhaseIndices.size / total) * 100));
+  setProgressPercent(pct);
 }
 
 function renderResults(data) {
