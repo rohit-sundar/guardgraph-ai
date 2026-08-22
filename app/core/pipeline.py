@@ -17,9 +17,13 @@ import openai
 from loguru import logger
 
 from app.analysis.ingest import ingest_apk
-from app.analysis.cfg import build_all_method_cfgs
+from app.analysis.cfg import build_all_method_cfgs, method_key, split_method_signature
 from app.analysis.forensic import ManifestContext, match_anchors, extract_anchor_subgraph
-from app.analysis.topology import compute_topological_invariants, aggregate_subgraph_invariants
+from app.analysis.topology import (
+    compute_topological_invariants,
+    aggregate_subgraph_invariants,
+    detect_flattening_outlier,
+)
 from app.analysis.obfuscation import build_obfuscation_signal
 from app.analysis.signatures import match_signatures
 from app.analysis.yara_engine import scan_apk_with_payloads
@@ -41,13 +45,32 @@ from app.core.schemas import (
     IngestionResult,
     AnalysisManifest,
     BehavioralSubgraph,
+    CFGEdge,
+    CFGNode,
     RiskScoreBreakdown,
     ObfuscationSignal,
     SignatureMatch,
+    SubgraphTopology,
     YaraMatch,
     SignatureYaraResult,
     AnalysisReport
 )
+
+# How many behavioral subgraphs carry serialized topology. Every anchor produces a
+# subgraph, and a large APK produces hundreds; shipping blocks and edges for all of
+# them would dominate the response for no analytic gain, since the explorer draws a
+# bounded number anyway. Selection favours behavioral *breadth* — see
+# _select_topology_subgraphs.
+MAX_TOPOLOGY_SUBGRAPHS = 12
+
+# Block cap per serialized subgraph. A 4-hop window on a large method can run to
+# hundreds of blocks, which is unreadable as a drawing and heavy as JSON.
+MAX_TOPOLOGY_NODES = 40
+
+# Per-block api_calls / string_literals kept for the node tooltip, and the length
+# each literal is truncated to.
+_MAX_NODE_DETAILS = 3
+_MAX_LITERAL_CHARS = 120
 
 # Limitation text surfaced to the analyst when the gate below fires.
 NO_CLASSIFIER_EVIDENCE_NOTE = (
@@ -84,6 +107,130 @@ def has_deterministic_evidence(
     if not any(v != 0.0 for v in ttp_feature_vector):
         return False
     return cfg_count > 0 or bool(matched_behaviors)
+
+
+def _short_api_label(api_call: str) -> str:
+    """
+    Condenses an Androguard invoke operand into something readable on a node.
+
+    The operand looks like `v2, Ljava/lang/reflect/Field;->setAccessible(Z)V`; the
+    method name is the only part that fits on a graph node.
+    """
+    target = api_call.split("->")[-1] if "->" in api_call else api_call
+    name = target.split("(")[0].strip()
+    return name or api_call.strip()
+
+
+def _serialize_topology(
+    sub: nx.DiGraph,
+    method_sig: str,
+    anchor: str,
+    outlier_nodes: Set[str],
+    max_nodes: int = MAX_TOPOLOGY_NODES,
+) -> SubgraphTopology:
+    """
+    Converts the extracted 4-hop subgraph into the wire format the explorer draws.
+
+    Node ids are qualified by cfg.method_key() so blocks that share an offset across
+    methods stay distinct — the frontend keys its node set by id, and bare offsets
+    used to collapse unrelated blocks into one.
+
+    Over `max_nodes`, keep the anchor and its nearest neighbours by hop distance and
+    re-induce, rather than truncating the node list. Truncation would leave edges
+    pointing at blocks that were never serialized, which draws as fragments.
+    """
+    if sub.number_of_nodes() == 0:
+        return SubgraphTopology()
+
+    if sub.number_of_nodes() > max_nodes and anchor in sub:
+        distances = nx.single_source_shortest_path_length(sub.to_undirected(), anchor)
+        nearest = sorted(distances, key=lambda n: (distances[n], str(n)))[:max_nodes]
+        sub = sub.subgraph(nearest).copy()
+
+    key = method_key(method_sig)
+
+    nodes: List[CFGNode] = []
+    for node_id, data in sub.nodes(data=True):
+        api_calls = list(data.get("api_calls", []))
+        offset = data.get("start")
+        if offset is None:
+            offset = int(node_id) if str(node_id).isdigit() else 0
+
+        # Prefer naming the block by what it calls; fall back to its offset.
+        label = _short_api_label(api_calls[0]) if api_calls else f"0x{int(offset):x}"
+
+        # These exist to populate a hover tooltip, so a few entries per block is
+        # enough. Literals are truncated because an obfuscated app's string pool is
+        # full of multi-kilobyte base64 blobs that would dominate the response.
+        literals = [
+            (s[:_MAX_LITERAL_CHARS] + "…") if len(s) > _MAX_LITERAL_CHARS else s
+            for s in data.get("string_literals", [])[:_MAX_NODE_DETAILS]
+        ]
+
+        nodes.append(
+            CFGNode(
+                id=f"{key}#{node_id}",
+                block_offset=int(offset),
+                label=label,
+                api_calls=api_calls[:_MAX_NODE_DETAILS],
+                string_literals=literals,
+                is_anchor=(node_id == anchor),
+                is_outlier=(node_id in outlier_nodes),
+            )
+        )
+
+    edges = [
+        CFGEdge(source=f"{key}#{u}", target=f"{key}#{v}")
+        for u, v in sub.edges()
+    ]
+
+    return SubgraphTopology(nodes=nodes, edges=edges)
+
+
+def _select_topology_subgraphs(
+    subgraphs: List[BehavioralSubgraph],
+    block_counts: List[int],
+    limit: int = MAX_TOPOLOGY_SUBGRAPHS,
+) -> List[int]:
+    """
+    Chooses which subgraphs get topology, returning their indices.
+
+    Breadth before depth: one representative per distinct behavior flag first (the
+    largest window for that behavior), then fill remaining slots by size. A single
+    reflection-heavy app otherwise spends every slot on DYNAMIC_REFLECTION anchors
+    and the explorer shows the same behavior a dozen times over.
+
+    Ranked on absolute block count, deliberately not on `subgraph_size_ratio`: that
+    field is sub_nodes/method_nodes, so a one-block method scores a perfect 1.0 and
+    outranks a genuinely informative window. Measured on a real sample, ratio-ranking
+    filled most slots with single-block subgraphs that draw as isolated dots.
+    """
+    if not subgraphs:
+        return []
+
+    ranked = sorted(
+        range(len(subgraphs)),
+        key=lambda i: block_counts[i],
+        reverse=True,
+    )
+
+    selected: List[int] = []
+    seen_behaviors: Set[str] = set()
+    for i in ranked:
+        flag = subgraphs[i].primary_behavior_flag
+        if flag not in seen_behaviors:
+            seen_behaviors.add(flag)
+            selected.append(i)
+        if len(selected) >= limit:
+            return selected
+
+    for i in ranked:
+        if i not in selected:
+            selected.append(i)
+        if len(selected) >= limit:
+            break
+
+    return selected
 
 
 class AnalysisPipeline:
@@ -189,10 +336,27 @@ class AnalysisPipeline:
         all_matches: Dict[str, List[str]] = {}
         behavioral_subgraphs: List[BehavioralSubgraph] = []
         all_strings: List[str] = []
+        # Keeps the extracted subgraph alongside its BehavioralSubgraph so the
+        # topology post-pass can serialize the ones it selects without re-extracting.
+        pending_topology: List[Tuple[nx.DiGraph, str, str, Set[str]]] = []
 
         for method_sig, g in cfgs.items():
             method_node_count = g.number_of_nodes()
             matches = match_anchors(g, manifest)
+            if not matches:
+                # Nothing to attribute in this method — skip the outlier scan too.
+                for _, data in g.nodes(data=True):
+                    all_strings.extend(data.get("string_literals", []))
+                continue
+
+            # An anchor and a flattening dispatcher are nodes of this same graph, so
+            # whether the behavior sits inside a flattened region is a membership
+            # test, not a guess. Computed once per method however many anchors it has.
+            _, outlier_list = detect_flattening_outlier(
+                g, settings.flattening_degree_outlier_zscore
+            )
+            method_outliers = set(outlier_list)
+
             for behavior, anchor_nodes in matches.items():
                 all_matches.setdefault(behavior, []).extend(anchor_nodes)
 
@@ -204,10 +368,18 @@ class AnalysisPipeline:
                         for api in data.get("api_calls", [])
                     ]
                     size_ratio = (sub.number_of_nodes() / method_node_count) if method_node_count > 0 else 0.0
+                    class_name, method_name = split_method_signature(method_sig)
+                    contained_outliers = [n for n in sub.nodes if n in method_outliers]
 
+                    pending_topology.append((sub, method_sig, anchor, method_outliers))
                     behavioral_subgraphs.append(
                         BehavioralSubgraph(
                             subgraph_id=f"SUB_{method_sig}_{anchor}",
+                            method_signature=method_sig,
+                            class_name=class_name,
+                            method_name=method_name,
+                            anchor_node=anchor,
+                            contains_outlier_nodes=contained_outliers,
                             primary_behavior_flag=behavior,
                             matched_apis=matched_apis[:10],
                             topological_invariants=invariants,
@@ -218,8 +390,22 @@ class AnalysisPipeline:
             for _, data in g.nodes(data=True):
                 all_strings.extend(data.get("string_literals", []))
 
+        # Serialize real blocks and edges for a bounded, behaviorally diverse subset.
+        # Everything else keeps topology=None, which means "not serialized" rather
+        # than "empty subgraph".
+        block_counts = [sub.number_of_nodes() for sub, _, _, _ in pending_topology]
+        for i in _select_topology_subgraphs(behavioral_subgraphs, block_counts):
+            sub, method_sig, anchor, method_outliers = pending_topology[i]
+            behavioral_subgraphs[i].topology = _serialize_topology(
+                sub, method_sig, anchor, method_outliers
+            )
+
         duration = time.time() - start_time
-        logger.info(f"[Phase 3] Completed in {duration:.3f}s. Matched {len(behavioral_subgraphs)} suspicious behavioral subgraphs.")
+        drawn = sum(1 for bs in behavioral_subgraphs if bs.topology is not None)
+        logger.info(
+            f"[Phase 3] Completed in {duration:.3f}s. Matched {len(behavioral_subgraphs)} "
+            f"suspicious behavioral subgraphs ({drawn} with serialized topology)."
+        )
         return all_matches, behavioral_subgraphs, all_strings
 
     @staticmethod

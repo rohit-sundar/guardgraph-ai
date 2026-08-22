@@ -14,8 +14,9 @@ from collections import Counter
 
 import networkx as nx
 
+from app.analysis.cfg import method_key, split_method_signature
 from app.analysis.topology import detect_flattening_outlier
-from app.core.schemas import ObfuscationSignal
+from app.core.schemas import ObfuscationSignal, OutlierNode
 
 
 def shannon_entropy(s: str) -> float:
@@ -78,13 +79,31 @@ def build_obfuscation_signal(
     # prevalence is what scoring reads.
     flattening_suspected = False
     flattening_nodes: list[str] = []
+    flattening_details: list[OutlierNode] = []
     flattening_methods = 0
-    for g in cfgs.values():
+    # Iterate .items(), not .values(): the key is the full method signature, and
+    # dropping it is what left `flattening_outlier_nodes` a list of bare block
+    # offsets that no consumer could attribute back to a class or method.
+    for method_sig, g in cfgs.items():
         suspected, nodes = detect_flattening_outlier(g, flattening_zscore)
         if suspected:
             flattening_suspected = True
             flattening_methods += 1
             flattening_nodes.extend(nodes)
+
+            class_name, method_name = split_method_signature(method_sig)
+            key = method_key(method_sig)
+            for node in nodes:
+                flattening_details.append(
+                    OutlierNode(
+                        node_id=f"{key}#{node}",
+                        method_signature=method_sig,
+                        class_name=class_name,
+                        method_name=method_name,
+                        block_offset=int(node) if str(node).isdigit() else 0,
+                        degree=g.degree[node],
+                    )
+                )
     analyzed_methods = len(cfgs)
     flattening_ratio = (flattening_methods / analyzed_methods) if analyzed_methods else 0.0
 
@@ -138,6 +157,7 @@ def build_obfuscation_signal(
         string_entropy_score=entropy_score,
         flattening_suspected=flattening_suspected,
         flattening_outlier_nodes=flattening_nodes,
+        flattening_outlier_details=flattening_details,
         reflection_call_count=reflection_total,
         unresolved_reflection_targets=reflection_unresolved,
         method_parse_failure_rate=method_parse_failure_rate,

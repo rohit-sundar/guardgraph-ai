@@ -287,12 +287,31 @@ function renderResults(data) {
 
   const outliersContainer = document.getElementById('outlierNodesList');
   outliersContainer.innerHTML = '';
-  const outliers = obf.flattening_outlier_nodes || [];
-  if (outliers.length > 0) {
-    outliers.forEach(node => {
+  const outlierDetails = obf.flattening_outlier_details || [];
+  if (outlierDetails.length > 0) {
+    // Highest-degree first: those are the most dispatcher-shaped blocks.
+    const ranked = [...outlierDetails].sort((a, b) => (b.degree || 0) - (a.degree || 0));
+    ranked.slice(0, MAX_OUTLIER_CHIPS).forEach(o => {
       const chip = document.createElement('span');
       chip.className = 'chip';
-      chip.textContent = `Node #${node}`;
+      chip.textContent = shortenMethodSig(o);
+      chip.title = `${o.method_signature} @0x${(o.block_offset || 0).toString(16)} (degree ${o.degree})`;
+      outliersContainer.appendChild(chip);
+    });
+    if (ranked.length > MAX_OUTLIER_CHIPS) {
+      const more = document.createElement('span');
+      more.className = 'chip';
+      more.textContent = `+${ranked.length - MAX_OUTLIER_CHIPS} more`;
+      outliersContainer.appendChild(more);
+    }
+  } else {
+    // Cached records predate the attributed field and carry bare block offsets,
+    // which cannot be resolved to a method.
+    (obf.flattening_outlier_nodes || []).forEach(node => {
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.textContent = `block 0x${Number(node).toString(16)}`;
+      chip.title = `Block offset ${node} — owning method not recorded`;
       outliersContainer.appendChild(chip);
     });
   }
@@ -390,6 +409,21 @@ function renderResults(data) {
 
 let cyInstance = null;
 
+// Dispatchers drawn without a surrounding subgraph, and outlier chips listed under
+// the stats. An obfuscated APK produces hundreds of both; past these counts the
+// panel stops being readable and the extras add nothing an analyst can act on.
+const MAX_STANDALONE_OUTLIERS = 12;
+const MAX_OUTLIER_CHIPS = 24;
+
+// Condenses an attributed node ({class_name, method_name}) to "Bar.baz". Block
+// offsets alone are not identifying — offset 4 exists in nearly every method — so
+// anything drawn or listed for a block is labelled by its owning method.
+function shortenMethodSig(o) {
+  const shortClass = (o.class_name || '').split('.').pop() || o.class_name || '';
+  if (!shortClass) return o.node_id || `block ${o.block_offset}`;
+  return o.method_name ? `${shortClass}.${o.method_name}` : shortClass;
+}
+
 function renderGraphExplorer(manifest) {
   const container = document.getElementById('cyGraphContainer');
   if (!container || typeof cytoscape === 'undefined') return;
@@ -398,15 +432,17 @@ function renderGraphExplorer(manifest) {
   const outlierNodes = obf.flattening_outlier_nodes || [];
   const subgraphs = manifest.behavioral_subgraphs || [];
 
+  const outlierDetails = obf.flattening_outlier_details || [];
+
   const elements = [];
   const nodeSet = new Set();
 
-  function addNode(id, label, type, tooltip) {
+  function addNode(id, label, type, tooltip, parent) {
     if (!nodeSet.has(id)) {
       nodeSet.add(id);
-      elements.push({
-        data: { id, label, type, tooltip }
-      });
+      const data = { id, label, type, tooltip };
+      if (parent) data.parent = parent;
+      elements.push({ data });
     }
   }
 
@@ -421,54 +457,146 @@ function renderGraphExplorer(manifest) {
     });
   }
 
-  // 1. Add outlier nodes
-  outlierNodes.forEach((nodeNum, idx) => {
-    const id = `outlier_${nodeNum}`;
-    addNode(id, `Node #${nodeNum}`, 'outlier', `Flattening Outlier Node #${nodeNum}`);
+  // Every node drawn below is a real basic block from the backend's induced
+  // subgraph, and every edge is a real control transition. Behavior flag and
+  // matched API are properties *of* a block, not nodes of their own.
+  //
+  // Subgraphs are merged per method first. Several anchors in one method produce
+  // overlapping 4-hop windows over the SAME CFG, so their block ids are identical
+  // by construction. Drawing them as separate components made the later ones
+  // dedupe to nothing — an empty compound box — and stole the purple styling from
+  // their anchors, which the earlier window had already added as plain blocks.
+  const byMethod = new Map();
 
-    // Create a mini CFG structure around outlier
-    const entryId = `entry_${nodeNum}`;
-    const exitId = `exit_${nodeNum}`;
-    addNode(entryId, `BB_entry_${idx+1}`, 'normal', 'Dispatcher Basic Block');
-    addNode(exitId, `BB_exit_${idx+1}`, 'normal', 'Switch Handler Block');
-    addEdge(entryId, id, 'dispatch');
-    addEdge(id, exitId, 'case_branch');
-  });
+  subgraphs.forEach(sg => {
+    const topo = sg.topology;
+    if (!topo || !(topo.nodes || []).length) return;
 
-  // 2. Add behavioral subgraphs
-  subgraphs.slice(0, 12).forEach((sg, idx) => {
-    const sgId = `sg_${idx}`;
-    const flag = sg.primary_behavior_flag || `Anchor #${idx+1}`;
-    addNode(sgId, flag, 'behavior', `Behavioral Anchor: ${flag}`);
+    const key = sg.method_signature || shortenMethodSig(sg);
+    let m = byMethod.get(key);
+    if (!m) {
+      m = {
+        label: shortenMethodSig(sg),
+        signature: sg.method_signature || '',
+        nodes: new Map(),
+        edges: new Map(),
+        anchorFlags: new Map(),
+        matched: new Set()
+      };
+      byMethod.set(key, m);
+    }
 
-    (sg.matched_apis || []).slice(0, 3).forEach((api, aIdx) => {
-      const apiId = `api_${idx}_${aIdx}`;
-      const shortApi = api.split('/').pop() || api;
-      addNode(apiId, shortApi, 'api', `Target API: ${api}`);
-      addEdge(sgId, apiId, 'invokes');
+    (sg.matched_apis || []).forEach(a => m.matched.add(a));
+
+    (topo.nodes || []).forEach(n => {
+      const prev = m.nodes.get(n.id);
+      if (prev) {
+        // Same block seen through another window: keep whichever view found it
+        // interesting rather than letting the first arrival win.
+        prev.is_anchor = prev.is_anchor || n.is_anchor;
+        prev.is_outlier = prev.is_outlier || n.is_outlier;
+      } else {
+        m.nodes.set(n.id, Object.assign({}, n));
+      }
+      if (n.is_anchor) {
+        if (!m.anchorFlags.has(n.id)) m.anchorFlags.set(n.id, new Set());
+        m.anchorFlags.get(n.id).add(sg.primary_behavior_flag || 'ANCHOR');
+      }
     });
 
-    // Link to nearby outlier node if available
-    if (outlierNodes.length > 0) {
-      const randomOutlier = `outlier_${outlierNodes[idx % outlierNodes.length]}`;
-      addEdge(randomOutlier, sgId, 'triggers');
-    }
+    (topo.edges || []).forEach(e => m.edges.set(`${e.source}->${e.target}`, e));
   });
 
-  // Fallback if empty
-  if (elements.length === 0) {
-    addNode('root', 'Root Method (Entry)', 'normal', 'App Entry');
-    addNode('n1', 'Method::init', 'normal', 'Initialization');
-    addNode('n2', 'SMS Broadcast Receiver', 'behavior', 'SMS Interception Logic');
-    addNode('n3', 'sendTextMessage()', 'api', 'Telephony API Call');
-    addEdge('root', 'n1', 'call');
-    addEdge('n1', 'n2', 'register');
-    addEdge('n2', 'n3', 'invoke');
+  const drawnMethods = new Set();
+  let groupIdx = 0;
+
+  byMethod.forEach(m => {
+    const groupId = `grp_${groupIdx++}`;
+    addNode(groupId, m.label, 'group', m.signature || m.label);
+    if (m.signature) drawnMethods.add(m.signature);
+
+    m.nodes.forEach(n => {
+      const flags = m.anchorFlags.get(n.id);
+      let type = 'normal';
+      if (n.is_anchor && n.is_outlier) type = 'anchor_outlier';
+      else if (n.is_anchor) type = 'anchor';
+      else if (n.is_outlier) type = 'outlier';
+      else if ((n.api_calls || []).some(a => m.matched.has(a))) type = 'api_block';
+
+      const offsetHex = `0x${(n.block_offset || 0).toString(16)}`;
+      // The compound parent already names the method, so an anchor shows only what
+      // it anchors. Repeating the method here is what overflowed the labels.
+      const label = flags ? [...flags].join('\n') : (n.label || offsetHex);
+
+      const tipLines = [];
+      if (flags) tipLines.push(`Anchor block ${offsetHex} — ${[...flags].join(', ')}`);
+      else tipLines.push(`Basic block ${offsetHex}`);
+      if (m.signature) tipLines.push(m.signature);
+      if (n.is_outlier) tipLines.push('Flattening dispatcher (high-degree block)');
+      (n.api_calls || []).forEach(a => tipLines.push(`calls ${a}`));
+      (n.string_literals || []).forEach(s => tipLines.push(`"${s}"`));
+
+      addNode(n.id, label, type, tipLines.join(' | '), groupId);
+    });
+
+    m.edges.forEach(e => {
+      // Only draw transitions whose endpoints both survived the backend node cap.
+      if (nodeSet.has(e.source) && nodeSet.has(e.target)) {
+        addEdge(e.source, e.target, '');
+      }
+    });
+  });
+
+  // Flattening dispatchers in methods that produced no anchor subgraph. These have
+  // no topology to sit inside, so they are drawn standalone. `node_id` is
+  // method-qualified, so same-offset blocks in different classes stay distinct.
+  // A real APK yields hundreds of these; they are supporting context, not the
+  // subject of the panel, so take only the most dispatcher-like by degree.
+  outlierDetails
+    .filter(o => !drawnMethods.has(o.method_signature))
+    .sort((a, b) => (b.degree || 0) - (a.degree || 0))
+    .slice(0, MAX_STANDALONE_OUTLIERS)
+    .forEach(o => {
+      addNode(
+        o.node_id,
+        shortenMethodSig(o),
+        'outlier',
+        `Flattening dispatcher @0x${(o.block_offset || 0).toString(16)} (degree ${o.degree}) — ${o.method_signature}`
+      );
+    });
+
+  // Pre-`flattening_outlier_details` responses (cached records) only carry bare
+  // offsets. Nothing can be attributed from those, so label them as such.
+  if (!outlierDetails.length && outlierNodes.length && !drawnMethods.size) {
+    outlierNodes.forEach(nodeNum => {
+      addNode(
+        `outlier_${nodeNum}`,
+        `block 0x${Number(nodeNum).toString(16)}`,
+        'outlier',
+        `Flattening dispatcher at block offset ${nodeNum} (method not recorded)`
+      );
+    });
   }
 
   if (cyInstance) {
     cyInstance.destroy();
+    cyInstance = null;
   }
+
+  // Nothing matched. Say so, rather than drawing the placeholder SMS-malware graph
+  // that used to stand in here — an invented graph on an empty result reads as a
+  // finding, which is the exact failure this panel is being fixed for. A cache hit
+  // also lands here, since the hot path returns no behavioral subgraphs.
+  if (elements.length === 0) {
+    const why = manifest.cache_hit
+      ? 'Cached result — subgraph topology is only produced on a full analysis run.'
+      : 'No forensic anchors matched, so there is no behavioral subgraph to draw.';
+    container.innerHTML = `<div class="graph-placeholder-text">${why}</div>`;
+    return;
+  }
+
+  // Drop the "run analysis" placeholder before Cytoscape mounts its canvas.
+  container.innerHTML = '';
 
   cyInstance = cytoscape({
     container: container,
@@ -505,25 +633,67 @@ function renderGraphExplorer(manifest) {
         }
       },
       {
-        selector: 'node[type="behavior"]',
+        selector: 'node[type="anchor"]',
         style: {
           'background-color': '#a855f7',
           'border-color': '#581c87',
           'border-width': 2,
-          'width': 30,
-          'height': 30,
-          'color': '#d8b4fe'
+          'width': 34,
+          'height': 34,
+          'color': '#d8b4fe',
+          'text-wrap': 'wrap',
+          'text-max-width': '140px',
+          'font-weight': 'bold'
         }
       },
       {
-        selector: 'node[type="api"]',
+        // Anchor that is also a flattening dispatcher: suspicious behavior sitting
+        // inside obfuscated control flow. Purple fill keeps it readable as an
+        // anchor, red border marks the corroboration.
+        selector: 'node[type="anchor_outlier"]',
+        style: {
+          'background-color': '#a855f7',
+          'border-color': '#f43f5e',
+          'border-width': 5,
+          'width': 38,
+          'height': 38,
+          'color': '#d8b4fe',
+          'text-wrap': 'wrap',
+          'text-max-width': '140px',
+          'font-weight': 'bold'
+        }
+      },
+      {
+        selector: 'node[type="api_block"]',
         style: {
           'background-color': '#0ea5e9',
           'border-color': '#0369a1',
           'border-width': 2,
-          'width': 24,
-          'height': 24,
+          'width': 26,
+          'height': 26,
           'color': '#7dd3fc'
+        }
+      },
+      {
+        selector: 'node[type="group"]',
+        style: {
+          'background-color': 'rgba(30, 41, 59, 0.45)',
+          'background-opacity': 0.45,
+          'border-color': 'rgba(148, 163, 184, 0.35)',
+          'border-width': 1,
+          'shape': 'round-rectangle',
+          'label': 'data(label)',
+          'text-valign': 'top',
+          'text-halign': 'center',
+          'text-margin-y': -6,
+          'font-size': '11px',
+          'font-weight': 'bold',
+          'color': '#94a3b8',
+          // Obfuscated class names run to 30+ characters. Wrap them instead of
+          // letting adjacent group titles overrun each other.
+          'text-wrap': 'wrap',
+          'text-max-width': '150px',
+          'padding': '22px'
         }
       },
       {

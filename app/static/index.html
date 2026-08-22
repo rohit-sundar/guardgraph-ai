@@ -269,7 +269,7 @@
               <div class="graph-explorer-header">
                 <div>
                   <h5>Interactive Behavioral Subgraph Explorer</h5>
-                  <p class="graph-subtitle">Visual representation of suspicious control-flow basic blocks and forensic anchor clusters</p>
+                  <p class="graph-subtitle">Real basic blocks and control transitions from each method's 4-hop anchor subgraph</p>
                 </div>
                 <div class="graph-controls">
                   <button class="btn btn-sm btn-control" onclick="resetGraphView()">🎯 Fit View</button>
@@ -281,10 +281,11 @@
                 <div class="graph-placeholder-text">Run analysis to explore interactive CFG behavioral graph</div>
               </div>
               <div class="graph-legend">
-                <div class="legend-item"><span class="legend-dot dot-outlier"></span> Outlier Node (Flattening)</div>
-                <div class="legend-item"><span class="legend-dot dot-behavior"></span> Behavioral Subgraph / Anchor</div>
-                <div class="legend-item"><span class="legend-dot dot-api"></span> Sensitive Target API</div>
-                <div class="legend-item"><span class="legend-dot dot-normal"></span> Control Flow Block</div>
+                <div class="legend-item"><span class="legend-dot dot-behavior"></span> Anchor Block</div>
+                <div class="legend-item"><span class="legend-dot dot-anchor-outlier"></span> Anchor inside Flattened Region</div>
+                <div class="legend-item"><span class="legend-dot dot-outlier"></span> Flattening Dispatcher</div>
+                <div class="legend-item"><span class="legend-dot dot-api"></span> Block with Sensitive API</div>
+                <div class="legend-item"><span class="legend-dot dot-normal"></span> Basic Block</div>
               </div>
             </div>
 

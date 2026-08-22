@@ -35,6 +35,54 @@ class IngestionResult(BaseModel):
     dropper_signals: list[str] = []
 
 
+class CFGNode(BaseModel):
+    """
+    One basic block of a method's control-flow graph, as drawn by the UI.
+
+    `id` is method-qualified ("<method_key>#<block_offset>") because block offsets
+    are only unique *within* a method — offset 4 exists in almost every method, so
+    a bare offset collapses unrelated blocks into one node downstream. The key is
+    cfg.method_key(): a short digest, not the signature itself, which would repeat
+    ~180 characters once per block and twice per edge. The readable signature
+    travels once, on the owning BehavioralSubgraph / OutlierNode.
+    """
+    id: str
+    block_offset: int
+    label: str                    # short display label, e.g. "setAccessible" or "0x1c"
+    api_calls: list[str] = []
+    string_literals: list[str] = []
+    is_anchor: bool = False       # carries the forensic evidence this subgraph matched
+    is_outlier: bool = False      # this block is also a flattening dispatcher
+
+
+class CFGEdge(BaseModel):
+    """A real control transition (fallthrough, branch, or exception) between blocks."""
+    source: str
+    target: str
+
+
+class SubgraphTopology(BaseModel):
+    """
+    The induced 4-hop subgraph itself. Before this existed the API shipped only
+    scalars, so the explorer had no edges to draw and manufactured them client-side.
+    """
+    nodes: list[CFGNode] = []
+    edges: list[CFGEdge] = []
+
+
+class OutlierNode(BaseModel):
+    """
+    A flattening dispatcher block, with the method attribution that
+    `flattening_outlier_nodes` (a bare list of offsets) cannot carry.
+    """
+    node_id: str                  # "<method_key>#<block_offset>"
+    method_signature: str
+    class_name: str
+    method_name: str
+    block_offset: int
+    degree: int
+
+
 class BehavioralSubgraph(BaseModel):
     subgraph_id: str
     primary_behavior_flag: str
@@ -45,12 +93,29 @@ class BehavioralSubgraph(BaseModel):
     # on real APKs. 1.0 = subgraph covers entire method (hops too wide);
     # very low = likely cutting off the behavior chain (hops too narrow).
     subgraph_size_ratio: float = 0.0
+    # Attribution. `subgraph_id` has always packed these three together as
+    # "SUB_<method_sig>_<anchor>"; split out so consumers need not parse it.
+    method_signature: str = ""
+    class_name: str = ""
+    method_name: str = ""
+    anchor_node: str = ""
+    # The real blocks and edges. None on subgraphs beyond MAX_TOPOLOGY_SUBGRAPHS —
+    # absent topology means "not serialized", never "the subgraph was empty".
+    topology: Optional[SubgraphTopology] = None
+    # Flattening dispatcher blocks that fall inside this 4-hop window. Non-empty
+    # means the behavior is wrapped in obfuscated control flow: two independent
+    # signals landing on the same basic blocks. Reported, not scored.
+    contains_outlier_nodes: list[str] = []
 
 
 class ObfuscationSignal(BaseModel):
     string_entropy_score: float
     flattening_suspected: bool
+    # Bare block offsets, ambiguous across methods. Kept as-is: it is one of the
+    # frozen feature-vector inputs. `flattening_outlier_details` carries the same
+    # nodes with the method attribution this field structurally cannot hold.
     flattening_outlier_nodes: list[str] = []
+    flattening_outlier_details: list[OutlierNode] = []
     reflection_call_count: int = 0
     unresolved_reflection_targets: int = 0
     # Rate of methods that failed CFG parsing — 0.0 to 1.0 (§9.6 fix).

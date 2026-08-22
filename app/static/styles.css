@@ -938,6 +938,14 @@ body {
   box-shadow: 0 0 6px #a855f7;
 }
 
+/* Anchor that is also a flattening dispatcher — purple fill, red rim, matching
+   the node style in the explorer. */
+.dot-anchor-outlier {
+  background: #a855f7;
+  border: 2px solid #f43f5e;
+  box-shadow: 0 0 6px #f43f5e;
+}
+
 .dot-api {
   background: #38bdf8;
   box-shadow: 0 0 6px #38bdf8;

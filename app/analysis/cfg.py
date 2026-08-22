@@ -21,6 +21,7 @@ Changes vs. original:
   quotes, so the only literals that survived were ones whose *text* contained
   an apostrophe — and those were then split on it. See parse_const_string().
 """
+import hashlib
 import re
 
 import networkx as nx
@@ -44,6 +45,54 @@ def parse_const_string(output: str) -> str | None:
     """
     match = _CONST_STRING_RE.search(output)
     return match.group(2) if match else None
+
+
+def method_key(method_sig: str) -> str:
+    """
+    A short, stable, collision-resistant handle for a method signature.
+
+    Block ids have to be qualified by their owning method — offset 4 exists in
+    almost every method, and an unqualified id merges unrelated blocks. Embedding
+    the signature itself would work but is ruinously repetitive: an obfuscated APK
+    has ~180-character signatures, and each one would be repeated once per block
+    plus twice per edge. The full signature travels once, on the owning record.
+    """
+    return hashlib.sha1(method_sig.encode("utf-8", "replace")).hexdigest()[:10]
+
+
+def split_method_signature(method_sig: str) -> tuple[str, str]:
+    """
+    Splits a CFG map key into a display-ready (class_name, method_name).
+
+    `build_all_method_cfgs` keys its graphs by `str(method_analysis.get_method())`,
+    which Androguard renders as `Lcom/foo/Bar; ->baz (Ljava/lang/String;)V` — the
+    arrow separator is present on real output but absent from some hand-written
+    signatures, so both shapes are accepted. Callers want "com.foo.Bar" and "baz"
+    for labelling, so do the parse in one place.
+
+    Never raises: a signature that does not match the expected shape comes back as
+    (method_sig, "") so a malformed key degrades to a worse label rather than
+    breaking analysis.
+    """
+    if not method_sig:
+        return "", ""
+
+    class_part, sep, rest = method_sig.partition(";")
+    if not sep:
+        return method_sig, ""
+
+    class_name = class_part.strip()
+    if class_name.startswith("L"):
+        class_name = class_name[1:]
+    class_name = class_name.replace("/", ".")
+
+    # `rest` is " ->baz (Ljava/lang/String;)V" — the method name is the first token,
+    # and the descriptor that follows it is not useful for display.
+    method_name = rest.strip().split("(")[0].strip()
+    if method_name.startswith("->"):
+        method_name = method_name[2:].strip()
+
+    return (class_name or method_sig), method_name
 
 
 def build_method_cfg(method_analysis) -> nx.DiGraph:
