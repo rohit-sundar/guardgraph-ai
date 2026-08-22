@@ -145,7 +145,17 @@ class AnalysisManifest(BaseModel):
     exported_risks: list[str] = []
     payload_assets: list[str] = []
     dropper_signals: list[str] = []
-
+    # Reverse-engineering findings from static_resolution.py's shared register/
+    # class propagation engine — resolved crypto configs (Cipher/SecretKeySpec/
+    # IvParameterSpec), traced DexClassLoader-family targets, WebView
+    # addJavascriptInterface bridge exposure, and JNI/native library symbol
+    # correlation. Each entry is a human-readable, already-formatted finding
+    # string (see the respective module's `describe()`); empty on a cache hit,
+    # since these are cold-path-only enrichments.
+    resolved_crypto_configs: list[str] = []
+    resolved_dcl_targets: list[str] = []
+    resolved_webview_bridges: list[str] = []
+    resolved_native_bridges: list[str] = []
 
 
 class RiskScoreBreakdown(BaseModel):

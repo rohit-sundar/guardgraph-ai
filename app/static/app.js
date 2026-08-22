@@ -307,6 +307,9 @@ function renderResults(data) {
   // Render interactive Cytoscape graph
   renderGraphExplorer(manifest);
 
+  // Reverse Engineering Findings (crypto / DCL / WebView / native)
+  renderReFindings(manifest);
+
   // 4. Permissions Matrix
   const permContainer = document.getElementById('permissionsList');
   permContainer.innerHTML = '';
@@ -388,6 +391,39 @@ function renderResults(data) {
     }
     breakdownContainer.appendChild(item);
   });
+}
+
+function renderReFindings(manifest) {
+  const sections = [
+    { listId: 'reCryptoList', items: manifest.resolved_crypto_configs || [] },
+    { listId: 'reDclList', items: manifest.resolved_dcl_targets || [] },
+    { listId: 'reWebviewList', items: manifest.resolved_webview_bridges || [] },
+    { listId: 'reNativeList', items: manifest.resolved_native_bridges || [] },
+  ];
+
+  let total = 0;
+  sections.forEach(({ listId, items }) => {
+    const container = document.getElementById(listId);
+    if (!container) return;
+    container.innerHTML = '';
+    total += items.length;
+    if (items.length === 0) {
+      container.innerHTML = '<span class="re-empty">None found</span>';
+      return;
+    }
+    items.forEach(finding => {
+      const item = document.createElement('div');
+      item.className = 're-finding-item';
+      // WEAK: flags a real risk — highlight it distinctly rather than blending
+      // it into the same neutral text as an ordinary resolved finding.
+      item.classList.toggle('re-finding-weak', finding.includes('WEAK:'));
+      item.textContent = finding;
+      container.appendChild(item);
+    });
+  });
+
+  const countEl = document.getElementById('reFindingsCount');
+  if (countEl) countEl.textContent = total;
 }
 
 let cyInstance = null;

@@ -831,6 +831,47 @@ body {
   color: var(--text-muted);
 }
 
+/* Reverse Engineering Findings tab */
+.re-findings-section {
+  margin-bottom: 1.5rem;
+}
+
+.re-findings-section h5 {
+  color: var(--text-main);
+  font-size: 0.95rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+
+.re-findings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.re-finding-item {
+  padding: 0.6rem 0.9rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  border-left: 3px solid var(--accent-purple);
+  font-family: 'SF Mono', Consolas, monospace;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.re-finding-item.re-finding-weak {
+  border-left-color: var(--danger);
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.06);
+}
+
+.re-empty {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  font-style: italic;
+}
+
 /* Graph Explorer */
 .graph-explorer-wrapper {
   background: rgba(15, 23, 42, 0.6);

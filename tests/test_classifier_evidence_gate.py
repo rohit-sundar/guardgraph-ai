@@ -292,6 +292,7 @@ class TestSuppressionReachesTheReport(unittest.TestCase):
             mp.run_phase1b_signature_yara.return_value = SignatureYaraResult()
             mp.run_phase2_graph_construction.return_value = ({}, 0.0)   # 0 CFGs
             mp.run_phase3_forensic_matching.return_value = ({}, [], []) # 0 anchors
+            mp.run_phase3b_re_deepdive.return_value = ([], [], [], [])
             mp.run_phase4_feature_engineering.return_value = (
                 obf, [0.0] * len(FEATURE_NAMES), [0.0] * N_TTP_FEATURES, 0.0, 0
             )

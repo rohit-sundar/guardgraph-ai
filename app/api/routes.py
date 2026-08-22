@@ -268,6 +268,11 @@ def _run_analysis(filepath: str) -> AnalysisReport:
     # Merge C2 IoCs found in DEX string literals into ingestion
     ingestion = AnalysisPipeline.merge_c2_from_strings(ingestion, all_strings)
 
+    # --- Phase 3.5: Reverse-Engineering Deep Dive (crypto/DCL/WebView/native) ---
+    resolved_crypto, resolved_dcl, resolved_webview, resolved_native = (
+        AnalysisPipeline.run_phase3b_re_deepdive(cfgs, ingestion, apk_obj=apk_obj, analysis_obj=analysis_obj)
+    )
+
     # --- Phase 4: Feature Engineering (family 35-vec + multi-label TTP 181-vec) ---
     obfuscation, feature_vector, ttp_feature_vector, mean_density, total_nodes = (
         AnalysisPipeline.run_phase4_feature_engineering(
@@ -313,6 +318,10 @@ def _run_analysis(filepath: str) -> AnalysisReport:
         exported_risks=ingestion.exported_risks,
         payload_assets=ingestion.payload_assets,
         dropper_signals=ingestion.dropper_signals,
+        resolved_crypto_configs=resolved_crypto,
+        resolved_dcl_targets=resolved_dcl,
+        resolved_webview_bridges=resolved_webview,
+        resolved_native_bridges=resolved_native,
     )
 
     # --- Phase 6: Risk Scoring (includes static malware anchors) ---

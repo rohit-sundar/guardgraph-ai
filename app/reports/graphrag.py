@@ -57,6 +57,10 @@ STRICT RULES — violating ANY of these makes the report unusable:
    - cert_anomalies (debug keys, self-signed, expired)
    - secondary_dex_count / payload_assets / dropper_signals
    - exported_risks (unprotected exported receivers/services)
+   - resolved_crypto_configs (recovered cipher transformation/algorithm, weak-mode flags)
+   - resolved_dcl_targets (traced DexClassLoader/PathClassLoader payload paths)
+   - resolved_webview_bridges (addJavascriptInterface bridge name + exposed methods)
+   - resolved_native_bridges (System.loadLibrary target + JNI symbol correlation)
 6. Do NOT mention any MITRE technique ID (e.g. T1636) or technique name that is
    NOT present in the "## MITRE ATT&CK Mobile Ontology Context" section below.
    If you have general knowledge of a technique but it is absent from that block,
@@ -334,6 +338,14 @@ def generate_report(
         "payload_assets": manifest.payload_assets[:_ANCHOR_LIST_CAP],
         "dropper_signals": manifest.dropper_signals[:_ANCHOR_LIST_CAP],
         "exported_risks": manifest.exported_risks[:_ANCHOR_LIST_CAP],
+        # Reverse-engineering findings — resolved crypto configs, traced dynamic
+        # class-loading targets, WebView JS-interface bridges, and JNI/native
+        # library correlation. Already human-readable strings; nothing further
+        # to derive, so rule 5 instructs the model to cite them verbatim.
+        "resolved_crypto_configs": manifest.resolved_crypto_configs[:_ANCHOR_LIST_CAP],
+        "resolved_dcl_targets": manifest.resolved_dcl_targets[:_ANCHOR_LIST_CAP],
+        "resolved_webview_bridges": manifest.resolved_webview_bridges[:_ANCHOR_LIST_CAP],
+        "resolved_native_bridges": manifest.resolved_native_bridges[:_ANCHOR_LIST_CAP],
         "behavioral_subgraph_summary": _summarize_behavioral_subgraphs(
             manifest.behavioral_subgraphs
         ),

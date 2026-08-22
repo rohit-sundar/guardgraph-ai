@@ -206,6 +206,9 @@
           <button class="tab-btn" onclick="switchTab('riskBreakdown')">
             📊 Risk Components Score
           </button>
+          <button class="tab-btn" onclick="switchTab('reFindings')">
+            🔬 Reverse Engineering (<span id="reFindingsCount">0</span>)
+          </button>
         </div>
 
         <div class="tabs-body">
@@ -307,6 +310,32 @@
           <div class="tab-content" id="tabRiskBreakdown">
             <div class="breakdown-list" id="riskBreakdownList">
               <!-- Breakdown bars rendered here -->
+            </div>
+          </div>
+
+          <!-- Tab 6: Reverse Engineering Findings -->
+          <div class="tab-content" id="tabReFindings">
+            <p class="graph-subtitle" style="margin-bottom:1rem;">
+              Statically resolved reflection/crypto/dynamic-loading/WebView/native targets —
+              register-constant propagation over the CFG, not execution. An empty section means
+              nothing of that kind was found OR nothing resolved to a literal; see the coverage
+              note in the Topology tab for how much of the app's obfuscation defeated resolution.
+            </p>
+            <div class="re-findings-section">
+              <h5>🔑 Crypto Configuration</h5>
+              <div class="re-findings-list" id="reCryptoList"><span class="re-empty">None found</span></div>
+            </div>
+            <div class="re-findings-section">
+              <h5>📦 Dynamic Code Loading</h5>
+              <div class="re-findings-list" id="reDclList"><span class="re-empty">None found</span></div>
+            </div>
+            <div class="re-findings-section">
+              <h5>🌐 WebView JS Bridges</h5>
+              <div class="re-findings-list" id="reWebviewList"><span class="re-empty">None found</span></div>
+            </div>
+            <div class="re-findings-section">
+              <h5>⚙️ Native / JNI Bridges</h5>
+              <div class="re-findings-list" id="reNativeList"><span class="re-empty">None found</span></div>
             </div>
           </div>
         </div>
