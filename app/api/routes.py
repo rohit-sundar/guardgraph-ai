@@ -72,9 +72,11 @@ UNPARSEABLE_RISK_SCORE = 50.0
 MAX_UPLOAD_BYTES = 150 * 1024 * 1024
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
-# Filename /analyze_sample looks for inside settings.samples_dir. Matches the
-# path the README's curl example uses.
-DEMO_SAMPLE_NAME = "test.apk"
+# The demo APK /analyze_sample runs, relative to the repo root. Kept in its own
+# gitignored directory (not data/samples/) because that is the convention the UI
+# button's label and .gitignore already encode.
+DEMO_SAMPLE_RELPATH = os.path.join("guardgraph_test", "guardgraph_test.apk")
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 @router.get("/graph/landscape")
@@ -128,19 +130,21 @@ async def analyze(file: UploadFile = File(...)):
 @router.post("/analyze_sample", response_model=AnalysisReport)
 async def analyze_sample():
     """
-    Analyzes the operator's local demo APK — the UI's "Test Sample" button.
+    Analyzes the operator's local demo APK — the UI's "Quick Test Target
+    Sample" button, which names this file in its own label.
 
-    The file lives at settings.samples_dir/DEMO_SAMPLE_NAME, the directory the
-    README already tells operators to put test APKs in. The 404 names that
-    relative location, not the resolved absolute path, which would disclose the
-    server's filesystem layout to any caller.
+    The APK is deliberately absent from git (.gitignore: `guardgraph_test/*.apk`)
+    because it is live malware, so a fresh clone has no such directory. That is
+    expected — the operator drops their own sample in. The 404 names the path
+    relative to the repo root rather than resolving it, since the absolute path
+    discloses the server's filesystem layout to any caller.
     """
-    sample_path = os.path.join(settings.samples_dir, DEMO_SAMPLE_NAME)
+    sample_path = os.path.join(_REPO_ROOT, DEMO_SAMPLE_RELPATH)
     if not os.path.exists(sample_path):
         raise HTTPException(
             404,
-            f"No demo sample found. Place an APK at "
-            f"{settings.samples_dir}/{DEMO_SAMPLE_NAME} and retry.",
+            f"No demo sample found. Place the APK at {DEMO_SAMPLE_RELPATH} "
+            "(relative to the repo root) and retry.",
         )
 
     # Same fallback as /analyze: a hostile sample that defeats the parser must
