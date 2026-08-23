@@ -7,7 +7,27 @@ document.addEventListener('DOMContentLoaded', () => {
   loadHistory();
   const refreshBtn = document.getElementById('btnRefreshHistory');
   if (refreshBtn) refreshBtn.addEventListener('click', loadHistory);
+  const backBtn = document.getElementById('btnBackToUpload');
+  if (backBtn) backBtn.addEventListener('click', goBackToUpload);
 });
+
+// Returns from a rendered report (fresh or historical) to the landing page.
+// Re-fetches history since the results just viewed may be a new analysis
+// that isn't in the currently-rendered list yet.
+function goBackToUpload() {
+  document.getElementById('resultsSection').classList.add('hidden');
+  document.getElementById('progressSection').classList.add('hidden');
+  document.getElementById('uploadSection').classList.remove('hidden');
+  selectedFile = null;
+  const fileInput = document.getElementById('fileInput');
+  if (fileInput) fileInput.value = '';
+  const preview = document.getElementById('filePreview');
+  if (preview) {
+    preview.classList.add('hidden');
+    preview.style.display = 'none';
+  }
+  loadHistory();
+}
 
 const HISTORY_BAND_VARS = {
   low: '--band-low', medium: '--band-medium', suspicious: '--band-suspicious',

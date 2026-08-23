@@ -47,6 +47,13 @@
   <main class="main-content">
     <!-- Upload Section -->
     <section class="upload-section" id="uploadSection">
+      <!-- Hero — lives inside uploadSection so it hides/reappears with the rest
+           of the landing page via the existing show/hide toggles, with no new JS. -->
+      <div class="hero-block">
+        <h2 class="hero-title">Faster Triage. <span class="hero-accent">Actionable Intelligence.</span></h2>
+        <p class="hero-subtitle">Meet <strong>GuardGraph AI</strong> — GraphRAG-powered static &amp; dynamic analysis engine that takes a suspicious APK from upload to a MITRE ATT&amp;CK-mapped, evidence-grounded verdict in minutes.</p>
+      </div>
+
       <div class="glass-card upload-card">
         <div class="upload-area" id="dropZone">
           <div class="upload-icon-wrapper">
@@ -58,9 +65,17 @@
           </div>
           <h3>Upload APK Sample for Analysis</h3>
           <p class="upload-hint">Drag & drop your <code>.apk</code> file here, or browse from computer</p>
-          
-          <div style="margin: 1.5rem auto; max-width: 400px;">
-            <input type="file" id="fileInput" accept=".apk" style="display: block; margin: 0 auto 1rem auto; color: #f8fafc; font-family: var(--font-mono); font-size: 0.9rem;">
+
+          <div class="file-picker">
+            <label for="fileInput" class="btn btn-secondary file-picker-btn">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+              Browse for APK
+            </label>
+            <input type="file" id="fileInput" accept=".apk" class="file-picker-input">
           </div>
         </div>
 
@@ -154,6 +169,15 @@
 
     <!-- Results Section -->
     <section class="results-section hidden" id="resultsSection">
+      <div class="results-toolbar">
+        <button type="button" class="btn btn-control btn-back" id="btnBackToUpload">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="19" y1="12" x2="5" y2="12"/>
+            <polyline points="12 19 5 12 12 5"/>
+          </svg>
+          Back to Upload
+        </button>
+      </div>
       <!-- Top Overview Banner -->
       <div class="results-overview-grid">
         <!-- Risk Score Card -->
