@@ -11,6 +11,7 @@ since there is nothing to re-upload.
     python scripts/refresh_stale_samples.py
 """
 import glob
+import hashlib
 import os
 import sys
 import time
@@ -24,12 +25,28 @@ from app.graph.neo4j_client import neo4j_client
 APK_DIRS = ["data/benign_apks", "data/ttp_apks"]
 
 
-def find_apk_by_sha256(sha256: str) -> str | None:
+def _sha256_of(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def build_sha256_index() -> dict[str, str]:
+    """
+    Maps sha256 -> filepath by hashing every APK's actual content, not by
+    assuming the filename is the hash. data/ttp_apks names files by hash, but
+    data/benign_apks names them by package name (e.g. com.sidhant.match3.apk)
+    — a filename-only lookup silently mislabels every benign sample "not found
+    on disk" even when it's sitting right there. Content hashing is the only
+    way that works for both directories.
+    """
+    index: dict[str, str] = {}
     for d in APK_DIRS:
-        candidate = os.path.join(d, f"{sha256}.apk")
-        if os.path.exists(candidate):
-            return candidate
-    return None
+        for path in glob.glob(os.path.join(d, "*.apk")):
+            index[_sha256_of(path)] = path
+    return index
 
 
 def main() -> int:
@@ -40,9 +57,14 @@ def main() -> int:
     stale = [(r["sha256"], r.get("app_name") or r["sha256"]) for r in rows]
     print(f"Found {len(stale)} stale (pre-record_json) samples.")
 
+    print("Hashing every APK on disk to find matches (filename can't be trusted — "
+          "data/benign_apks names files by package, not sha256)...")
+    sha256_index = build_sha256_index()
+    print(f"Indexed {len(sha256_index)} APKs on disk.")
+
     refreshed, skipped, failed = 0, 0, 0
     for i, (sha256, app_name) in enumerate(stale, 1):
-        apk_path = find_apk_by_sha256(sha256)
+        apk_path = sha256_index.get(sha256)
         if not apk_path:
             print(f"[{i}/{len(stale)}] {app_name} ({sha256[:12]}): SKIP — APK not found on disk")
             skipped += 1
