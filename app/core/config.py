@@ -56,6 +56,15 @@ class Settings(BaseSettings):
     # so pin it rather than relying on greedy decoding alone.
     graphrag_seed: int = 42
 
+    # Penalizes tokens already used in the completion so far, applied to logits
+    # BEFORE the greedy argmax pick — still fully deterministic given the same
+    # seed and history, unlike temperature/top_p which reintroduce sampling.
+    # Ollama's default (1.1) was not enough to stop a live-observed degenerate
+    # loop: qwen2.5:7b-instruct-q4_K_M repeated "API Coverage Component Weighted
+    # Score: 1234567890" for most of a 2000-token completion budget rather than
+    # writing the report (2026-08-23). Raised until that stops recurring.
+    graphrag_repeat_penalty: float = 1.3
+
     # How long Ollama should keep the model resident after a request. Measured:
     # the FIRST large prefill after a model load decodes differently from every
     # later one, so an idle unload (Ollama's default is 5m) silently makes the

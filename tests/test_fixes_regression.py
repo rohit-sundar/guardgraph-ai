@@ -387,6 +387,37 @@ class TestIdentifierCheckLogic(unittest.TestCase):
         result = _identifier_check("A clean narrative with no hash labels.", "aa" * 32, "com.x")
         self.assertEqual(result, [])
 
+    def test_flags_fabricated_signature_label(self):
+        # Observed live 2026-08-23: "**Signature:** 1234567890abcdef..." evaded
+        # every check before _GENERIC_HASH_LABEL_RE was added, since neither
+        # MD5/SHA-* nor Sample/File Name labels matched "Signature".
+        from app.reports.graphrag import _identifier_check
+        real_sha = "90abcdef1234567890fedcba1234567890fedcba1234567890fedcba1234567890"
+        narrative = "**Signature:** 1234567890abcdef1234567890abcdef"
+        result = _identifier_check(narrative, real_sha, None)
+        self.assertTrue(any("1234567890abcdef1234567890abcdef" in r for r in result))
+
+    def test_no_flag_for_signature_prose_without_hex_value(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "90abcdef1234567890fedcba1234567890fedcba1234567890fedcba1234567890"
+        narrative = "The APK's signature was validated against the platform key."
+        result = _identifier_check(narrative, real_sha, None)
+        self.assertEqual(result, [])
+
+    def test_flags_fabricated_package_name_label(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "90abcdef1234567890fedcba1234567890fedcba1234567890fedcba1234567890"
+        narrative = "**Package Name:** com.example.malware"
+        result = _identifier_check(narrative, real_sha, "org.stypox.dicio")
+        self.assertTrue(any("com.example.malware" in r for r in result))
+
+    def test_no_flag_when_package_name_matches_real_package(self):
+        from app.reports.graphrag import _identifier_check
+        real_sha = "90abcdef1234567890fedcba1234567890fedcba1234567890fedcba1234567890"
+        narrative = "**Package Name:** org.stypox.dicio"
+        result = _identifier_check(narrative, real_sha, "org.stypox.dicio")
+        self.assertEqual(result, [])
+
 
 class TestStripFabricatedIdentification(unittest.TestCase):
     """
@@ -425,6 +456,136 @@ class TestStripFabricatedIdentification(unittest.TestCase):
         from app.reports.graphrag import _strip_fabricated_identification
         narrative = "### Verdict\nMalicious, score 73.7/100.\n"
         cleaned = _strip_fabricated_identification(narrative, "aa" * 32, "com.x")
+        self.assertEqual(cleaned, narrative)
+
+
+# ─── Bug: greedy-decode degenerate repetition loop ───────────────────────────
+# Observed live (2026-08-23): qwen2.5:7b-instruct-q4_K_M repeated "API Coverage
+# Component Weighted Score: 1234567890" ~90 times, burning the entire 2000-token
+# completion budget instead of writing the report. temperature=0 has no
+# randomness to escape a repetitive local optimum once it's entered one.
+
+class TestRepetitionCheckLogic(unittest.TestCase):
+
+    def test_flags_degenerate_repetition(self):
+        from app.reports.graphrag import _repetition_check
+        narrative = "- **API Coverage Component Weighted Score:** 1234567890\n" * 10
+        result = _repetition_check(narrative)
+        self.assertIsNotNone(result)
+        self.assertIn("10 times", result)
+
+    def test_no_flag_on_clean_narrative(self):
+        from app.reports.graphrag import _repetition_check
+        narrative = "### Key Evidence\nThe app requests SEND_SMS and RECORD_AUDIO.\n"
+        self.assertIsNone(_repetition_check(narrative))
+
+    def test_no_flag_at_exactly_the_threshold(self):
+        from app.reports.graphrag import _repetition_check, _REPETITION_MAX_REPEATS
+        narrative = "This exact line repeats.\n" * _REPETITION_MAX_REPEATS
+        self.assertIsNone(_repetition_check(narrative))
+
+    def test_no_crash_on_empty_narrative(self):
+        from app.reports.graphrag import _repetition_check
+        self.assertIsNone(_repetition_check(""))
+
+    def test_short_lines_do_not_count(self):
+        # Blank lines and short markdown separators (e.g. "---") are legitimate
+        # to repeat across sections and must not trip the detector.
+        from app.reports.graphrag import _repetition_check
+        narrative = "---\n\n" * 20
+        self.assertIsNone(_repetition_check(narrative))
+
+
+# ─── Bug: fabricated permission citations left in the narrative ─────────────
+# Observed live (2026-08-23): the LLM cited android.permission.ACCESS_FINE_LOCATION
+# in the narrative for an APK that does not declare it. _permission_check caught
+# it and appended a limitations footnote, but the false claim stayed in the
+# narrative itself — the part an analyst under time pressure actually reads.
+# Mirrors _strip_fabricated_identification, which already does this for hashes
+# and sample names.
+
+class TestStripFabricatedPermissions(unittest.TestCase):
+
+    def test_removes_line_with_undeclared_qualified_permission(self):
+        from app.reports.graphrag import _strip_fabricated_permissions
+        narrative = (
+            "### Permissions\n"
+            "- The app requests android.permission.ACCESS_FINE_LOCATION for tracking.\n"
+            "- The app requests android.permission.INTERNET for network access.\n"
+        )
+        cleaned = _strip_fabricated_permissions(narrative, {"android.permission.INTERNET"})
+        self.assertNotIn("ACCESS_FINE_LOCATION", cleaned)
+        self.assertIn("INTERNET", cleaned)
+
+    def test_removes_line_with_undeclared_bare_permission(self):
+        from app.reports.graphrag import _strip_fabricated_permissions
+        narrative = "The app can use RECORD_AUDIO to capture microphone input.\n"
+        cleaned = _strip_fabricated_permissions(narrative, set())
+        self.assertNotIn("RECORD_AUDIO", cleaned)
+
+    def test_keeps_line_with_declared_permission(self):
+        from app.reports.graphrag import _strip_fabricated_permissions
+        narrative = "The app declares android.permission.SEND_SMS.\n"
+        cleaned = _strip_fabricated_permissions(narrative, {"android.permission.SEND_SMS"})
+        self.assertIn("SEND_SMS", cleaned)
+
+    def test_no_change_on_clean_narrative(self):
+        from app.reports.graphrag import _strip_fabricated_permissions
+        narrative = "### Verdict\nMalicious, score 73.7/100.\n"
+        cleaned = _strip_fabricated_permissions(narrative, set())
+        self.assertEqual(cleaned, narrative)
+
+
+# ─── Bug: unfilled template placeholder text left in the narrative ──────────
+# Observed live (2026-08-23): the model fell back to its own trained-in
+# "malware report" template and shipped "[Insert Current Date Here]" and
+# "[Insert Analyzer Version Here]" verbatim — neither a permission nor a
+# hash/sample-name, so no existing check caught it.
+
+class TestPlaceholderCheckLogic(unittest.TestCase):
+
+    def test_flags_insert_placeholder(self):
+        from app.reports.graphrag import _placeholder_check
+        result = _placeholder_check("Analysis Date: [Insert Current Date Here]")
+        self.assertTrue(any("Insert Current Date Here" in r for r in result))
+
+    def test_flags_tbd_placeholder(self):
+        from app.reports.graphrag import _placeholder_check
+        result = _placeholder_check("Analyzer Version: [TBD]")
+        self.assertTrue(result)
+
+    def test_no_flag_on_clean_narrative(self):
+        from app.reports.graphrag import _placeholder_check
+        result = _placeholder_check("### Key Evidence\nThe app requests SEND_SMS.\n")
+        self.assertEqual(result, [])
+
+    def test_no_false_positive_on_markdown_link(self):
+        from app.reports.graphrag import _placeholder_check
+        result = _placeholder_check("See [MITRE ATT&CK](https://attack.mitre.org).")
+        self.assertEqual(result, [])
+
+
+class TestStripPlaceholderText(unittest.TestCase):
+
+    def test_removes_line_with_placeholder(self):
+        from app.reports.graphrag import _strip_placeholder_text
+        narrative = (
+            "#### Sample Summary\n"
+            "- **Analysis Date:** [Insert Current Date Here]\n"
+            "- **Analyzer Version:** [Insert Analyzer Version Here]\n"
+            "\n"
+            "### Key Evidence\n"
+            "Real content here.\n"
+        )
+        cleaned = _strip_placeholder_text(narrative)
+        self.assertNotIn("Insert Current Date Here", cleaned)
+        self.assertNotIn("Insert Analyzer Version Here", cleaned)
+        self.assertIn("Real content here.", cleaned)
+
+    def test_no_change_on_clean_narrative(self):
+        from app.reports.graphrag import _strip_placeholder_text
+        narrative = "### Verdict\nMalicious, score 73.7/100.\n"
+        cleaned = _strip_placeholder_text(narrative)
         self.assertEqual(cleaned, narrative)
 
 

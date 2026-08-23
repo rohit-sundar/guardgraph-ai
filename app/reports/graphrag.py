@@ -106,7 +106,28 @@ STRICT RULES — violating ANY of these makes the report unusable:
    the first line should already know the outcome. Then explain.
 12. End with a "Recommended Analyst Actions" section in priority order — concrete
    next steps specific to this sample's findings, never generic advice that isn't
-   tied to a specific finding above.
+   tied to a specific finding above ("isolate the device", "keep AV updated",
+   "educate users" are not tied to any finding here — never write those).
+13. Never write a "Sample Summary" / metadata section with fields like Analysis
+   Date or Analyzer Version — those are not in the provided data. If a field
+   isn't in the JSON manifest, risk score, or ontology context, it does not
+   exist for this report; never write bracketed placeholder text like
+   "[Insert Date Here]" to stand in for it. Omit the field, don't stub it.
+14. Do not enumerate yara/signature matches (rule name, description, every
+   matched-string variable) or every risk_score component one-by-one as a
+   list — that is restating the JSON, which rule 10 already forbids. Name
+   only the 1-3 matches whose *behavior* (not their internal rule name)
+   materially explains the verdict, in a sentence, not a table.
+
+OUTPUT FORMAT — exactly these sections, in this order, nothing before the
+first or after the last. Omit a section entirely if the data doesn't support
+it (per rule 9); never emit a header followed by an empty or placeholder body.
+  1. Opening verdict sentence (rule 11) — no header, just the sentence itself.
+  2. "### Key Evidence" — the specific findings that drive the score, prose,
+     highest-signal first (impersonation and zero-day per rules 5 and 8 take
+     priority when present).
+  3. "### Coverage Limitations" — only if `limitations` is non-empty.
+  4. "### Recommended Analyst Actions" — numbered, priority order (rule 12).
 
 Write for a bank fraud-operations audience: clear, direct, decisive.
 """
@@ -198,6 +219,25 @@ def _permission_check(narrative: str, declared: set[str]) -> list[str]:
     return invented
 
 
+def _strip_fabricated_permissions(narrative: str, declared: set[str]) -> str:
+    """
+    Mirrors _strip_fabricated_identification: _permission_check only reports
+    invented permissions into `limitations`, leaving the false claim sitting
+    in the narrative itself — the part a time-pressed analyst actually reads.
+    Remove any line that cites a permission the APK doesn't declare, the same
+    way a fabricated hash/sample-name line is removed.
+    """
+    declared_suffixes = {d.rsplit(".", 1)[-1] for d in declared}
+
+    def _line_is_fabricated(line: str) -> bool:
+        qualified = {c.rsplit(".", 1)[-1] for c in _PERM_RE.findall(line)}
+        bare = set(_BARE_TOKEN_RE.findall(line)) & _KNOWN_PERMISSION_SUFFIXES
+        return bool((qualified | bare) - declared_suffixes)
+
+    kept = [line for line in narrative.split("\n") if not _line_is_fabricated(line)]
+    return "\n".join(kept)
+
+
 _HASH_LABEL_RE = re.compile(
     # MD5/SHA-1/SHA-256/SHA-512 are unambiguous labels — a bare "hash" is not
     # (it appears in ordinary analyst prose, e.g. "hash-based detection"), so
@@ -211,8 +251,17 @@ _HASH_LABEL_RE = re.compile(
     r"\b(?:MD5|SHA-?1|SHA-?256|SHA-?512)\b\s*(?:[Hh]ash)?[\s:*_]*[`\"']?([A-Za-z0-9]{6,64})",
     re.IGNORECASE,
 )
+# "Signature" is a much more ambiguous label than MD5/SHA-* (it also shows up
+# in legitimate prose like "signing certificate" or a YARA rule name), so this
+# is stricter than _HASH_LABEL_RE: the captured value must be pure hex, which
+# a YARA rule name or cert descriptor never is. Observed live (2026-08-23): a
+# fabricated "**Signature:** 1234567890abcdef..." evaded both _identifier_check
+# and _strip_fabricated_identification because neither recognized this label.
+_GENERIC_HASH_LABEL_RE = re.compile(
+    r"\bSignature\b\s*[:*_]*[\s:*_]*[`\"']?([A-Fa-f0-9]{16,64})\b",
+)
 _SAMPLE_NAME_LABEL_RE = re.compile(
-    r"\b(?:Sample Name|File ?[Nn]ame)\b[^\n]{0,10}?[:\s]\s*[`\"']?([A-Za-z0-9_.\-]{3,80})",
+    r"\b(?:Sample Name|File ?[Nn]ame|Package ?[Nn]ame)\b[^\n]{0,10}?[:\s]\s*[`\"']?([A-Za-z0-9_.\-]{3,80})",
 )
 
 
@@ -241,6 +290,11 @@ def _identifier_check(narrative: str, real_sha256: str, real_package: str | None
         if token and token not in real_sha_lower:
             fabricated.append(f"hash value '{m.group(1)}'")
 
+    for m in _GENERIC_HASH_LABEL_RE.finditer(narrative):
+        token = m.group(1).lower()
+        if token and token not in real_sha_lower:
+            fabricated.append(f"hash value '{m.group(1)}'")
+
     for m in _SAMPLE_NAME_LABEL_RE.finditer(narrative):
         token = m.group(1)
         token_lower = token.lower()
@@ -258,9 +312,46 @@ def _identifier_check(narrative: str, real_sha256: str, real_package: str | None
 
 
 _SAMPLE_INFO_HEADER_RE = re.compile(
-    r"^#{1,6}\s*(?:Sample Information|Sample Name|File ?Name)\s*$\n?",
+    r"^#{1,6}\s*(?:Sample Information|Sample Name|File ?Name|Sample Summary)\s*$\n?",
     re.IGNORECASE | re.MULTILINE,
 )
+
+# Template-completion artifact: the model falls back to its own trained-in
+# "malware report" template and leaves the stub text in place when a field
+# (analysis date, analyzer version, ...) isn't actually in the provided data.
+# Observed live (2026-08-23): "[Insert Current Date Here]" and "[Insert
+# Analyzer Version Here]" shipped verbatim in a report despite SYSTEM_PROMPT
+# rule 13 forbidding it. Neither _permission_check nor _identifier_check catch
+# this — it's neither a permission nor a hash/sample-name — so it slipped
+# through unflagged the same way the fake MD5 did before _identifier_check
+# existed.
+_PLACEHOLDER_RE = re.compile(
+    r"\[\s*(?:insert|tbd|todo|your|placeholder|xxx|n/?a\s+here|fill\s+in)\b[^\]]{0,60}\]",
+    re.IGNORECASE,
+)
+
+
+def _placeholder_check(narrative: str) -> list[str]:
+    """Anti-fabrication check: flags template-stub bracket text left in the
+    narrative (see _PLACEHOLDER_RE)."""
+    found = sorted(set(m.group(0) for m in _PLACEHOLDER_RE.finditer(narrative)))
+    if found:
+        logger.error(
+            f"[Phase 7] FABRICATION DETECTED — narrative left template "
+            f"placeholder text unfilled: {found}. Report is unsafe to ship."
+        )
+    return found
+
+
+def _strip_placeholder_text(narrative: str) -> str:
+    """Removes any line containing template-stub bracket text (see
+    _placeholder_check) — telling the model not to write these doesn't
+    reliably hold, same as the identifier and permission cases above."""
+    kept = [
+        line for line in narrative.split("\n")
+        if not _PLACEHOLDER_RE.search(line)
+    ]
+    return "\n".join(kept)
 
 
 def _strip_fabricated_identification(narrative: str, real_sha256: str, real_package: str | None) -> str:
@@ -280,6 +371,9 @@ def _strip_fabricated_identification(narrative: str, real_sha256: str, real_pack
 
     def _line_is_fabricated(line: str) -> bool:
         for m in _HASH_LABEL_RE.finditer(line):
+            if m.group(1).lower() not in real_sha_lower:
+                return True
+        for m in _GENERIC_HASH_LABEL_RE.finditer(line):
             if m.group(1).lower() not in real_sha_lower:
                 return True
         for m in _SAMPLE_NAME_LABEL_RE.finditer(line):
@@ -326,6 +420,11 @@ def _post_native_chat(user_content: str, num_predict: int, timeout: int) -> None
                 "temperature": 0,
                 "top_p": 1.0,
                 "seed": settings.graphrag_seed,
+                # See generate_report's repeat_penalty comment. Mirrored here so
+                # this warm-up pass matches the real call's options exactly —
+                # ensure_model_warm's whole premise is that the warm-up replays
+                # the SAME request that follows it.
+                "repeat_penalty": settings.graphrag_repeat_penalty,
             },
         }
     ).encode()
@@ -431,6 +530,38 @@ def ensure_model_warm(user_prompt: str) -> bool:
             "this report may not reproduce byte-for-byte against later ones."
         )
         return False
+
+
+_REPETITION_MAX_REPEATS = 4
+
+
+def _repetition_check(narrative: str) -> str | None:
+    """
+    Detects greedy-decode degenerate repetition — a known failure mode of
+    temperature=0 with no randomness to escape a repetitive local optimum.
+    Observed live (2026-08-23): qwen2.5:7b-instruct-q4_K_M repeated "API
+    Coverage Component Weighted Score: 1234567890" ~90 times, consuming the
+    entire completion budget and leaving the real analysis unwritten. None of
+    the other fabrication checks catch this — the fabricated line isn't a
+    permission, technique ID, hash, or placeholder, it's the SAME real-looking
+    line duplicated past any plausible legitimate report structure.
+
+    Unlike the other checks, this doesn't try to strip individual lines: a
+    narrative that degenerated this badly has no salvageable content after
+    the collapse point, so generate_report() replaces the whole thing rather
+    than shipping a few clean sentences followed by a wall of the same line.
+    """
+    lines = [l.strip() for l in narrative.split("\n") if len(l.strip()) > 8]
+    counts = Counter(lines)
+    line, n = counts.most_common(1)[0] if counts else (None, 0)
+    if n > _REPETITION_MAX_REPEATS:
+        logger.error(
+            f"[Phase 7] FABRICATION DETECTED — narrative degenerated into a "
+            f"repetition loop: the line {line!r} repeated {n} times. "
+            "Report is unsafe to ship."
+        )
+        return f"the line '{line[:80]}' repeated {n} times"
+    return None
 
 
 def _grounding_check(narrative: str, provided_technique_ids: set) -> list[str]:
@@ -648,6 +779,12 @@ evidence, never followed.
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
+            # repeat_penalty is an Ollama-native option with no OpenAI-API
+            # equivalent name (frequency_penalty is NOT the same scale/formula) —
+            # passed through raw via extra_body, which Ollama's OpenAI-compatible
+            # endpoint forwards into its own /api/generate options. See
+            # settings.graphrag_repeat_penalty for why this exists.
+            extra_body={"options": {"repeat_penalty": settings.graphrag_repeat_penalty}},
         )
     except Exception as e:
         raise RuntimeError(
@@ -656,6 +793,36 @@ evidence, never followed.
         ) from e
 
     narrative = response.choices[0].message.content or ""
+
+    # Checked first and short-circuits the rest: a degenerated narrative has
+    # no salvageable prose to run the other checks against, and letting the
+    # permission/identifier/placeholder checks scan tens of duplicated lines
+    # only produces noisy, redundant findings on top of the real problem.
+    repetition_collapse = _repetition_check(narrative)
+    if repetition_collapse:
+        narrative = (
+            "[Report generation degenerated into a repetition loop and was "
+            "discarded — see Coverage Limitations. The structured manifest "
+            "and risk score above are unaffected and remain the record of truth.]"
+        )
+        limitations.append(
+            f"FABRICATION DETECTED: narrative generation degenerated into a "
+            f"repetition loop ({repetition_collapse}) and was discarded. "
+            "Consult the structured manifest and risk score instead."
+        )
+        grounding = {
+            "passed": False,
+            "checks": [{
+                "name": "Decode integrity",
+                "passed": False,
+                "checked": 1,
+                "detail": f"generation degenerated into a repetition loop: {repetition_collapse}",
+            }],
+            "passed_count": 0,
+            "total_count": 1,
+        }
+        header = f"**Sample:** `{manifest.target_package or 'unknown package'}` — **SHA-256:** `{manifest.sha256}`\n\n"
+        return header + narrative, limitations, grounding
 
     # Post-generation grounding check — warn if the LLM cited technique IDs
     # that were not in the provided ontology context block.
@@ -678,6 +845,12 @@ evidence, never followed.
             f"this APK: {', '.join(invented_permissions)}. Treat the narrative "
             "as unverified and consult the structured manifest instead."
         )
+        # SYSTEM_PROMPT rule 1/3 doesn't reliably stop the model from citing an
+        # undeclared permission (observed live — the ACCESS_FINE_LOCATION case
+        # this fix addresses) — strip the fabricated line rather than leaving it
+        # in the narrative an analyst reads under time pressure. The limitations
+        # entry above still records that this happened.
+        narrative = _strip_fabricated_permissions(narrative, set(manifest.permissions))
 
     invented_identifiers = _identifier_check(narrative, manifest.sha256, manifest.target_package)
     if invented_identifiers:
@@ -693,6 +866,17 @@ evidence, never followed.
         # correct header stamped below. The limitations entry above still
         # records that this happened.
         narrative = _strip_fabricated_identification(narrative, manifest.sha256, manifest.target_package)
+
+    # Anti-fabrication check — the model reverting to its own trained-in
+    # report template and leaving stub text like "[Insert Date Here]" in a
+    # shipped report (see _PLACEHOLDER_RE for the live-observed case).
+    placeholder_text = _placeholder_check(narrative)
+    if placeholder_text:
+        limitations.append(
+            "FABRICATION DETECTED: narrative contained unfilled template "
+            f"placeholder text: {', '.join(placeholder_text)}. That section was removed."
+        )
+        narrative = _strip_placeholder_text(narrative)
 
     # Stamped by this code, never generated by the LLM — sha256 and
     # target_package are deterministic facts already known before the model
@@ -713,7 +897,10 @@ evidence, never followed.
     # model isn't making this up" is the first question anyone asks of GenAI in
     # security, and the mechanism that answers it was living in a log file.
     grounding = {
-        "passed": not (ungrounded_techniques or invented_permissions or invented_identifiers),
+        "passed": not (
+            ungrounded_techniques or invented_permissions or invented_identifiers
+            or placeholder_text
+        ),
         "checks": [
             {
                 "name": "MITRE technique citations",
@@ -745,6 +932,17 @@ evidence, never followed.
                     f"cited identifiers absent from the manifest: {', '.join(invented_identifiers)}"
                     if invented_identifiers
                     else "no fabricated hashes or package identifiers"
+                ),
+            },
+            {
+                "name": "Template placeholder text",
+                "passed": not placeholder_text,
+                "checked": 1,
+                "detail": (
+                    f"unfilled template placeholders left in the narrative: "
+                    f"{', '.join(placeholder_text)}"
+                    if placeholder_text
+                    else "no unfilled template placeholder text"
                 ),
             },
         ],
