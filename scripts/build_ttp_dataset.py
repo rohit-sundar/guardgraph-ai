@@ -378,6 +378,7 @@ def _resolve_stage_a_targets(
     max_per_family: int,
     auth_key: str,
     done_families: dict[str, dict] | None = None,
+    per_family_caps: dict[str, int] | None = None,
 ) -> tuple[dict[str, dict], dict[str, dict]]:
     """
     Ask MalwareBazaar which samples represent each ATT&CK software entry.
@@ -392,8 +393,18 @@ def _resolve_stage_a_targets(
 
     Families already marked resolved in `done_families` are skipped entirely; the
     sweep is the slow, flaky part of the download phase and is not worth repeating.
+    The exception: a family whose done_families count is already below its
+    per_family_caps target is retried anyway (only that name, at its own cap) —
+    this is what lets a top-up run raise an existing family's count without
+    --force-resolve re-sweeping all of software_map.
+
+    per_family_caps overrides max_per_family for named entries (see
+    scripts/family_targets.py, which computes this from per-class sample
+    targets). Unlisted names keep the flat max_per_family default —
+    passing None here is exactly today's behavior.
     """
     done_families = done_families or {}
+    per_family_caps = per_family_caps or {}
     label_set = set(TTP_LABELS)
     targets: dict[str, dict] = {}
     family_status: dict[str, dict] = {}
@@ -404,7 +415,9 @@ def _resolve_stage_a_targets(
         techniques = sorted({t for t in sw["technique_ids"] if t in label_set})
         if not techniques:
             continue
-        if done_families.get(name, {}).get("resolved"):
+        effective_cap = per_family_caps.get(name, max_per_family)
+        prior = done_families.get(name, {})
+        if prior.get("resolved") and prior.get("count", 0) >= effective_cap:
             skipped += 1
             continue
 
@@ -412,16 +425,16 @@ def _resolve_stage_a_targets(
         query_ok = True
         matched_sig = name
         for sig in _signature_variants(name, sw.get("aliases", [])):
-            found, ok = _mb_hashes_for_signature(sig, max_per_family, auth_key)
+            found, ok = _mb_hashes_for_signature(sig, effective_cap, auth_key)
             if found and not hashes:
                 matched_sig = sig
             hashes.extend(found)
             query_ok = query_ok and ok
-            if len(hashes) >= max_per_family:
+            if len(hashes) >= effective_cap:
                 break
             time.sleep(1)  # be polite to the API
 
-        wanted = list(dict.fromkeys(hashes))[:max_per_family]
+        wanted = list(dict.fromkeys(hashes))[:effective_cap]
         for h in wanted:
             targets.setdefault(h, {"family": name, "techniques": techniques})
         # Only call a family done when every query behind it actually answered.
@@ -449,6 +462,7 @@ def stage_a_download(
     download_workers: int,
     manifest_path: str,
     force_resolve: bool = False,
+    per_family_caps: dict[str, int] | None = None,
 ) -> dict[str, dict]:
     """
     Resolve every family's sample hashes, fetch the APKs, and persist the manifest.
@@ -458,6 +472,10 @@ def stage_a_download(
 
     Reruns are incremental — already-resolved families are not re-queried and existing
     APKs are not re-fetched. Pass force_resolve=True to sweep every family again.
+
+    per_family_caps (see --max-per-family-map) overrides max_per_family per named
+    entry — see _resolve_stage_a_targets for how a family under its cap is retried
+    without needing force_resolve.
     """
     if not os.path.exists(SOFTWARE_MAP_PATH):
         logger.error(f"[dataset] {SOFTWARE_MAP_PATH} missing — run scripts/build_ttp_label_space.py first.")
@@ -475,7 +493,8 @@ def stage_a_download(
     families: dict[str, dict] = dict(prior.get("families", {}))
 
     new_targets, new_status = _resolve_stage_a_targets(
-        software_map, max_per_family, auth_key, done_families=families
+        software_map, max_per_family, auth_key, done_families=families,
+        per_family_caps=per_family_caps,
     )
     targets.update(new_targets)
     families.update(new_status)
@@ -772,6 +791,14 @@ def main():
              "already-resolved markers (default: retry only families that errored).",
     )
     ap.add_argument(
+        "--max-per-family-map", default=None,
+        help="Path to a JSON {family_name: cap} file overriding --max-per-family "
+             "for named entries (default: None, every family uses the flat "
+             "--max-per-family value — today's behavior, unchanged). See "
+             "scripts/family_targets.py, which computes this file from per-class "
+             "sample targets against data/ontology/software_technique_map.json.",
+    )
+    ap.add_argument(
         "--overwrite", action="store_true",
         help="Discard an existing --out CSV and rebuild it from scratch (default: "
              "append, skipping samples already present).",
@@ -786,10 +813,16 @@ def main():
 
     manifest_path = _manifest_path(args.apk_dir, args.manifest)
 
+    per_family_caps = None
+    if args.max_per_family_map:
+        with open(args.max_per_family_map, "r", encoding="utf-8") as f:
+            per_family_caps = json.load(f)
+        logger.info(f"[dataset] loaded per-family caps for {len(per_family_caps)} names from {args.max_per_family_map}")
+
     if args.stage in ("a", "all") and args.phase in ("download", "both"):
         stage_a_download(
             args.max_per_family, args.apk_dir, args.download_workers, manifest_path,
-            force_resolve=args.force_resolve,
+            force_resolve=args.force_resolve, per_family_caps=per_family_caps,
         )
 
     if args.phase == "download":

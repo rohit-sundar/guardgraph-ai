@@ -455,7 +455,8 @@ def _grounding_check(narrative: str, provided_technique_ids: set) -> list[str]:
 def generate_report(
     manifest: AnalysisManifest,
     risk_score: RiskScoreBreakdown,
-) -> tuple[str, list[str], dict]:
+    skip_llm: bool = False,
+) -> tuple[str, list[str], dict | None]:
     """
     Returns (narrative_report_text, limitations_list, grounding_result).
 
@@ -480,16 +481,29 @@ def generate_report(
               VRAM, not merely the same code and inputs.
     Treat the narrative as advisory; the structured manifest and risk_score are
     the reproducible product of record.
-    """
-    technique_ids = list(manifest.predicted_ttps.keys())
-    ontology_context = get_technique_context(technique_ids) if technique_ids else []
 
+    skip_llm=True bypasses Ollama entirely (no warm-up, no chat call, no
+    ontology lookup) and returns a placeholder narrative instead. Bulk
+    population runs (populate.py) don't need per-APK prose, and the LLM call
+    is the ~60-200s-per-request cost that made them impractical at volume —
+    everything Neo4j needs (sha256, family, TTPs, risk_score) is written by
+    store_signature() independently of this function. Live/interactive
+    analysis (the default) is unaffected; this is opt-in.
+    """
     limitations = [manifest.obfuscation.coverage_note]
     if manifest.obfuscation.unresolved_reflection_targets > 0:
         limitations.append(
             f"{manifest.obfuscation.unresolved_reflection_targets} reflection-based "
             "API calls could not be statically resolved to their real target."
         )
+
+    if skip_llm:
+        # No narrative means the grounding checks never ran — None, not an empty
+        # pass. See AnalysisReport.grounding.
+        return "[Report generation skipped — bulk population run]", limitations, None
+
+    technique_ids = list(manifest.predicted_ttps.keys())
+    ontology_context = get_technique_context(technique_ids) if technique_ids else []
 
     # Provide only the fields the LLM needs for grounding.
     # Omitting internal numeric arrays (feature vectors, subgraph topology floats)

@@ -310,12 +310,14 @@ def _analyze_with_fallback(filepath: str, job_id: str | None = None) -> Analysis
 
 
 @router.post("/analyze", response_model=AnalysisReport)
-async def analyze(file: UploadFile = File(...)):
+async def analyze(file: UploadFile = File(...), skip_report: bool = False):
     """
-    Synchronous: blocks until the full report is ready. This is what curl, the
-    README's quickstart, and scripts/test_upload.py use — kept exactly as it was
-    for anything that isn't the browser UI. The UI itself uses /analyze/start +
-    /analyze/stream below, which is the same pipeline with real progress attached.
+    skip_report=true bypasses Phase 7's Ollama call (see generate_report's
+    docstring) — the "needed" case app/api/routes.py's original synchronous-
+    by-design note anticipated. Neo4j still gets the full sha256/family/TTPs/
+    risk_score write; only the narrative prose is skipped. Default False keeps
+    every existing caller (the web UI, curl, /analyze_sample) unaffected —
+    this is opt-in for bulk population runs (see populate.py).
     """
     if not file.filename.endswith(".apk"):
         raise HTTPException(400, "Only .apk files are supported in this prototype.")
@@ -326,11 +328,13 @@ async def analyze(file: UploadFile = File(...)):
     try:
         await _save_upload_bounded(file, tmp_path)
 
-        # _analyze_with_fallback is fully synchronous and takes minutes. Called
-        # directly inside `async def` it blocks the event loop for its whole
-        # duration — the server stops answering everything, /health included, so
-        # a second person uploading sees a dead application rather than a queue.
-        result = await run_in_threadpool(_analyze_with_fallback, tmp_path)
+        try:
+            result = _run_analysis(tmp_path, skip_report=skip_report)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.error(f"Unparseable APK fallback triggered: {exc}")
+            result = _unparseable_report(tmp_path, exc, skip_report=skip_report)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -477,7 +481,7 @@ async def analyze_stream(job_id: str):
     )
 
 
-def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
+def _unparseable_report(filepath: str, exc: BaseException, skip_report: bool = False) -> AnalysisReport:
     """
     Builds the verdict returned when static analysis cannot complete.
 
@@ -557,7 +561,7 @@ def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
     # Ollama itself is unreachable, so this never raises.
     from app.core.pipeline import AnalysisPipeline
     narrative, report_limitations, grounding = AnalysisPipeline.run_phase7_reporting(
-        manifest, risk_score
+        manifest, risk_score, skip_llm=skip_report
     )
     limitations = limitations + report_limitations
 
@@ -577,14 +581,9 @@ from app.core.pipeline import (
     TTP_PREDICT_THRESHOLD,
 )
 
-def _run_analysis(filepath: str, job_id: str | None = None) -> AnalysisReport:
-    """
-    job_id is optional and purely additive: when given, each phase boundary is
-    published via app.core.progress for /analyze/stream/{job_id} to relay over SSE.
-    None (the default) makes every progress.emit() call a no-op, so /analyze and
-    every test or script calling this directly are byte-for-byte unaffected — see
-    progress.py's module docstring for why.
-    """
+def _run_analysis(
+    filepath: str, skip_report: bool = False, job_id: str | None = None
+) -> AnalysisReport:
     # --- Phase 1: Ingestion & Metadata (+ Android malware static enrichments) ---
     progress.emit(job_id, 1, "APK Ingestion", "start")
     ingestion, apk_obj, dvm, analysis_obj, yara_targets = (
@@ -837,9 +836,13 @@ def _run_analysis(filepath: str, job_id: str | None = None) -> AnalysisReport:
     # --- Phase 7: Explainable Reporting ---
     progress.emit(job_id, 7, "GraphRAG Report Generation", "start")
     narrative, limitations, grounding = AnalysisPipeline.run_phase7_reporting(
-        manifest, risk_score
+        manifest, risk_score, skip_llm=skip_report
     )
-    progress.emit(job_id, 7, "GraphRAG Report Generation", "done")
+    progress.emit(
+        job_id, 7, "GraphRAG Report Generation",
+        "skipped" if skip_report else "done",
+        "narrative generation disabled for this run" if skip_report else "",
+    )
 
     if not classifier_evidence:
         limitations = list(limitations) + [NO_CLASSIFIER_EVIDENCE_NOTE]

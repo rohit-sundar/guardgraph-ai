@@ -784,21 +784,20 @@ class AnalysisPipeline:
 
     @staticmethod
     def run_phase7_reporting(
-        manifest: AnalysisManifest, risk_score: RiskScoreBreakdown
+        manifest: AnalysisManifest, risk_score: RiskScoreBreakdown, skip_llm: bool = False
     ) -> Tuple[str, List[str], Optional[dict]]:
         """Phase 7: Generate narrative analyst report via GraphRAG (local Ollama).
 
-        The third element is the grounding result — which post-generation
-        fabrication checks ran and whether they passed. `None` when the LLM call
-        itself failed: no narrative was produced, so there is nothing to have
-        checked, and reporting "passed" there would be the same lie as scoring an
-        unparseable APK as clean.
+        skip_llm forwards to generate_report() — see its docstring. Default
+        False preserves full report generation for every existing caller.
         """
         logger.info("[Phase 7] Starting GraphRAG Reporting...")
         start_time = time.time()
         grounding = None
         try:
-            narrative, limitations, grounding = generate_report(manifest, risk_score)
+            narrative, limitations, grounding = generate_report(
+                manifest, risk_score, skip_llm=skip_llm
+            )
         except (RuntimeError, openai.OpenAIError, Exception) as e:
             logger.error(f"[Phase 7] LLM report generation failed: {e}")
             narrative = f"[Report generation unavailable: {e}]"
