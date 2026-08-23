@@ -78,6 +78,19 @@
           </button>
         </div>
       </div>
+
+      <!-- Analysis History — every verdict this instance has ever reached,
+           reopenable without re-uploading. Backed by /analyses (Neo4j Sample
+           nodes), not tied to the current session. -->
+      <div class="glass-card history-card">
+        <div class="history-header">
+          <h4>Analysis History</h4>
+          <button type="button" class="btn btn-sm btn-control" id="btnRefreshHistory">🔄 Refresh</button>
+        </div>
+        <div class="history-list" id="historyList">
+          <div class="graph-placeholder-text">Loading&hellip;</div>
+        </div>
+      </div>
     </section>
 
     <!-- Pipeline Progress Visualizer — driven by real SSE events from
@@ -205,34 +218,34 @@
       <!-- Tabbed Detailed Findings Container -->
       <div class="glass-card tabs-card">
         <div class="tabs-header">
-          <button class="tab-btn active" onclick="switchTab('aiReport')">
+          <button class="tab-btn active" onclick="switchTab('aiReport', this)">
             GraphRAG AI Report
           </button>
-          <button class="tab-btn" onclick="switchTab('yaraRules')">
+          <button class="tab-btn" onclick="switchTab('yaraRules', this)">
             YARA Rule & Signature Detection (<span id="yaraCount">0</span>)
           </button>
-          <button class="tab-btn" onclick="switchTab('topology')">
+          <button class="tab-btn" onclick="switchTab('topology', this)">
             CFG Topology & Obfuscation
           </button>
-          <button class="tab-btn" onclick="switchTab('permissions')">
+          <button class="tab-btn" onclick="switchTab('permissions', this)">
             Permissions Matrix (<span id="permissionCount">0</span>)
           </button>
-          <button class="tab-btn" onclick="switchTab('riskBreakdown')">
+          <button class="tab-btn" onclick="switchTab('riskBreakdown', this)">
             Risk Scoring
           </button>
-          <button class="tab-btn" onclick="switchTab('reFindings')">
+          <button class="tab-btn" onclick="switchTab('reFindings', this)">
             Rev-Engg Indicators (<span id="reFindingsCount">0</span>)
           </button>
-          <button class="tab-btn" onclick="switchTab('appIdentity')">
+          <button class="tab-btn" onclick="switchTab('appIdentity', this)">
             App Identity (<span id="impersonationCount">0</span>)
           </button>
-          <button class="tab-btn" onclick="switchTab('mitreMapping')">
+          <button class="tab-btn" onclick="switchTab('mitreMapping', this)">
             MITRE ATT&CK Mapping (<span id="mitreCount">0</span>)
           </button>
-          <button class="tab-btn" onclick="switchTab('relatedSamples')">
+          <button class="tab-btn" onclick="switchTab('relatedSamples', this)">
             Correlated Samples (<span id="relatedCount">0</span>)
           </button>
-          <button class="tab-btn" onclick="switchTab('threatLandscape')">
+          <button class="tab-btn" onclick="switchTab('threatLandscape', this)">
             Threat Landscape
           </button>
         </div>
@@ -346,6 +359,22 @@
           <div class="tab-content" id="tabRiskBreakdown">
             <div class="breakdown-list" id="riskBreakdownList">
               <!-- Breakdown bars rendered here -->
+            </div>
+
+            <div class="model-accuracy-panel" id="modelAccuracyPanel">
+              <div class="model-accuracy-head">
+                <h5>MITRE TTP Classifier &mdash; Measured Accuracy</h5>
+                <span class="model-accuracy-loading" id="modelAccuracyStatus">Loading&hellip;</span>
+              </div>
+              <p class="model-accuracy-note">
+                Two numbers, on purpose. Every malware label in training comes from its
+                <em>family's</em> known ATT&amp;CK techniques, so a split that stratifies on labels
+                puts identical label vectors on both sides of the train/test line &mdash; that number
+                measures family recognition, not technique inference. The family-held-out column
+                holds whole families out of each fold, so it can only be scored on families the
+                model never saw. That's the one that means something about a real unseen sample.
+              </p>
+              <div class="model-accuracy-table" id="modelAccuracyTable"></div>
             </div>
           </div>
 

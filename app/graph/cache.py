@@ -64,6 +64,27 @@ _RECORD_FIELDS = (
     "c2_indicators",
     "cert_thumbprint",
     "package_name",
+    # Added after the first pass at this fix only covered score + YARA + basic
+    # fields — a cache hit on a sample analysed after THAT commit but before THIS
+    # one still went hollow on everything below, because these simply weren't in
+    # the persisted record at all. "Cache hit" has to mean the full report comes
+    # back, not "whatever subset happened to be covered when the fix was written."
+    #
+    # app_label/icon_phash/impersonation are deliberately NOT here: all three
+    # derive from nothing but the Phase 1 ingestion that already re-runs on every
+    # cache hit (to compute the sha256 for the lookup in the first place), so
+    # recomputing them fresh is free — and strictly better than caching them,
+    # since a fresh run picks up any update to the protected-brand reference
+    # table immediately instead of replaying whatever it said at analysis time.
+    # resolved_crypto/dcl/webview/native and grounding have no such shortcut —
+    # the first needs the full CFG (not rebuilt on a cache hit), the second needs
+    # an LLM call (which is the whole thing the cache exists to avoid) — so those
+    # two must come from here.
+    "resolved_crypto_configs",
+    "resolved_dcl_targets",
+    "resolved_webview_bridges",
+    "resolved_native_bridges",
+    "grounding",
 )
 
 
@@ -92,7 +113,7 @@ def _decode_record(raw, sha256: str) -> dict:
     return {k: v for k, v in decoded.items() if v is not None}
 
 
-def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None, *, signature_yara_data: dict | None = None, permissions: list[str] | None = None, risk_components: dict | None = None, obfuscation_data: dict | None = None, package_name: str | None = None, c2_indicators: list[str] | None = None, cert_thumbprint: str | None = None):
+def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None, *, signature_yara_data: dict | None = None, permissions: list[str] | None = None, risk_components: dict | None = None, obfuscation_data: dict | None = None, package_name: str | None = None, c2_indicators: list[str] | None = None, cert_thumbprint: str | None = None, resolved_crypto_configs: list[str] | None = None, resolved_dcl_targets: list[str] | None = None, resolved_webview_bridges: list[str] | None = None, resolved_native_bridges: list[str] | None = None, grounding: dict | None = None):
     """
     Call this after a cold-path analysis completes, so future uploads of
     the same sample (or re-uploads during a campaign) hit the fast path.
@@ -125,6 +146,11 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
         "package_name": package_name,
         "c2_indicators": c2_indicators or [],
         "cert_thumbprint": cert_thumbprint,
+        "resolved_crypto_configs": resolved_crypto_configs or [],
+        "resolved_dcl_targets": resolved_dcl_targets or [],
+        "resolved_webview_bridges": resolved_webview_bridges or [],
+        "resolved_native_bridges": resolved_native_bridges or [],
+        "grounding": grounding,
     }
 
     # Three separate statements rather than one query chaining UNWIND $ttps then
@@ -141,7 +167,13 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
         s.limitations = $limitations,
         s.app_name = $app_name,
         s.package_name = $package_name,
-        s.record_json = $record_json
+        s.record_json = $record_json,
+        // Re-stamped on every store, not just creation, so re-analysing an
+        // already-cached sample bumps it back to the top of the history list —
+        // "most recently touched", not "first ever seen". Neo4j's own
+        // timestamp() (epoch millis) rather than an app-side clock, so ordering
+        // stays correct regardless of which machine wrote the record.
+        s.analyzed_at = timestamp()
     MERGE (f:MalwareFamily {name: $family})
     MERGE (s)-[:CLASSIFIED_AS_FAMILY]->(f)
     """
@@ -195,6 +227,42 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
     except Exception:
         # Neo4j not reachable — skip Neo4j write silently rather than crashing.
         pass
+
+
+def list_recent_samples(limit: int = 30) -> list[dict]:
+    """
+    Summary rows for the Analysis History panel — most-recently-touched first.
+    Deliberately does NOT decode record_json here: this powers a list view where
+    the caller only needs sha256/name/family/score/band, and decoding every
+    row's full component breakdown just to throw it away would be wasted work
+    for what is meant to be a cheap listing query. Fetch the full record via
+    lookup_signature(sha256) once a specific row is opened.
+    """
+    query = """
+    MATCH (s:Sample)
+    OPTIONAL MATCH (s)-[:CLASSIFIED_AS_FAMILY]->(f:MalwareFamily)
+    WHERE s.risk_score IS NOT NULL
+    RETURN s.sha256 AS sha256,
+           s.app_name AS app_name,
+           s.package_name AS package_name,
+           f.name AS family,
+           s.risk_score AS risk_score,
+           s.analyzed_at AS analyzed_at
+    // Cypher orders null as the largest value, so a bare `DESC` here put every
+    // legacy record with no analyzed_at (bulk-seeded via populate.py, never
+    // stamped) ahead of every genuinely recent one — a fresh analysis could
+    // vanish past LIMIT behind hundreds of untimestamped rows. Sorting
+    // "has a timestamp" first pushes null-timestamp rows to the back instead,
+    // then DESC breaks ties among the ones that actually have a time.
+    ORDER BY s.analyzed_at IS NULL, s.analyzed_at DESC
+    LIMIT $limit
+    """
+    try:
+        rows = neo4j_client.run(query, limit=limit)
+    except Exception as e:
+        logger.warning(f"[cache] list_recent_samples failed: {e}")
+        return []
+    return [r for r in rows if r.get("sha256")]
 
 
 def find_related_samples(

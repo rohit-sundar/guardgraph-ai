@@ -81,9 +81,31 @@ _RE_RAW_IP = re.compile(
     r"(?:/[^\s\"'<>]*)?",
     re.IGNORECASE,
 )
-# Generic suspicious C2 URL paths commonly used by Android panels
+# Suspicious C2 URL paths commonly used by Android banking-trojan / botnet panels.
+# Widened from the original 4-pattern set (gate.php, panel/, api/bot, bot/gate) —
+# still anchored to a full http(s):// URL, not a bare keyword match, which is what
+# keeps this from flooding on ordinary app strings: a legitimate app essentially
+# never embeds a literal URL ending in "checkin.php" or "/c2/report", whereas a
+# bare keyword like "panel" or "report" appears constantly in benign UI strings.
+# Grouped by what real panel kits (Cerberus/Anubis/SpyNote-derived and similar)
+# consistently use for their check-in/command endpoints.
+#
+# Measured against 40 real F-Droid benign APKs (2026-08-23): 0/40 produced ANY
+# C2 indicator, panel_url or otherwise — the URL-anchoring is what makes that
+# possible despite the trigger-word list including things like "report" and
+# "admin" that are extremely common substrings in ordinary app UI strings.
+# Reproduce/extend with the malware side via scripts (data/ttp_apks) before
+# widening the trigger-word list further.
 _RE_PANEL_PATH = re.compile(
-    r"https?://[^\s\"'<>]+/(?:gate\.php|panel/|api/bot|bot/gate)[^\s\"'<>]*",
+    r"https?://[^\s\"'<>]+/(?:"
+    r"gate\.php|panel/|api/bot|bot/gate"                              # original set
+    r"|(?:admin|cmd|command|control|register|checkin|check_in"        # PHP C2 scripts
+    r"|beacon|heartbeat|report|upload|task|tasks|getcmd|getcommand"
+    r"|c2|cnc)\.php"
+    r"|(?:c2|cnc)/"                                                   # path segments
+    r"|api/v\d+/(?:bot|panel|report|checkin)"                         # versioned bot APIs
+    r"|bot/(?:report|task|cmd)"
+    r")[^\s\"'<>]*",
     re.IGNORECASE,
 )
 

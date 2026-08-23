@@ -3,7 +3,167 @@ let currentReportData = null;
 
 document.addEventListener('DOMContentLoaded', () => {
   setupUploadEvents();
+  loadModelAccuracy();
+  loadHistory();
+  const refreshBtn = document.getElementById('btnRefreshHistory');
+  if (refreshBtn) refreshBtn.addEventListener('click', loadHistory);
 });
+
+const HISTORY_BAND_VARS = {
+  low: '--band-low', medium: '--band-medium', suspicious: '--band-suspicious',
+  high: '--band-high', malicious: '--band-malicious',
+};
+
+// Every verdict this instance has ever reached, reopenable without
+// re-uploading the sample — backed by Neo4j Sample nodes (GET /analyses), not
+// tied to the current browser session.
+async function loadHistory() {
+  const listEl = document.getElementById('historyList');
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="graph-placeholder-text">Loading&hellip;</div>';
+
+  let rows;
+  try {
+    const resp = await fetch('/analyses?limit=30');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    rows = await resp.json();
+  } catch (err) {
+    listEl.innerHTML = '<div class="graph-placeholder-text">Could not load history (is Neo4j running?).</div>';
+    return;
+  }
+
+  if (!rows.length) {
+    listEl.innerHTML = '<div class="graph-placeholder-text">No analyses yet — upload an APK to get started.</div>';
+    return;
+  }
+
+  listEl.innerHTML = '';
+  rows.forEach(r => {
+    const row = document.createElement('div');
+    row.className = 'history-row';
+    row.setAttribute('role', 'button');
+    row.setAttribute('tabindex', '0');
+
+    const name = document.createElement('span');
+    name.className = 'history-name';
+    name.textContent = r.app_name || r.sha256;   // sample-derived — textContent only
+    name.title = r.sha256;
+
+    const family = document.createElement('span');
+    family.className = 'history-family';
+    family.textContent = r.family || 'Unclassified';
+
+    const score = document.createElement('span');
+    score.className = 'history-score';
+    if (r.risk_score !== null && r.risk_score !== undefined) {
+      score.textContent = r.risk_score.toFixed(1);
+      const varName = HISTORY_BAND_VARS[r.verdict_band] || '--band-unknown';
+      score.style.color = `var(${varName})`;
+    } else {
+      score.textContent = '—';
+    }
+
+    const time = document.createElement('span');
+    time.className = 'history-time';
+    time.textContent = r.analyzed_at ? new Date(r.analyzed_at).toLocaleString() : '';
+
+    row.appendChild(name);
+    row.appendChild(family);
+    row.appendChild(score);
+    row.appendChild(time);
+
+    const open = () => openHistoricalAnalysis(r.sha256);
+    row.addEventListener('click', open);
+    row.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+
+    listEl.appendChild(row);
+  });
+}
+
+async function openHistoricalAnalysis(sha256) {
+  try {
+    const resp = await fetch(`/analyses/${encodeURIComponent(sha256)}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    document.getElementById('uploadSection').classList.add('hidden');
+    document.getElementById('progressSection').classList.add('hidden');
+    renderResults(data);
+  } catch (err) {
+    alert('Could not load that analysis: ' + err.message);
+  }
+}
+
+// Model accuracy is a property of the currently-loaded classifier bundle, not of
+// any single analysis — fetched once at page load rather than per-report.
+async function loadModelAccuracy() {
+  const statusEl = document.getElementById('modelAccuracyStatus');
+  const tableEl = document.getElementById('modelAccuracyTable');
+  if (!statusEl || !tableEl) return;
+
+  let data;
+  try {
+    const resp = await fetch('/model/metrics');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    data = await resp.json();
+  } catch (err) {
+    statusEl.textContent = 'Unavailable';
+    tableEl.innerHTML = '<span class="model-accuracy-untrained">Could not reach /model/metrics.</span>';
+    return;
+  }
+
+  if (!data.trained) {
+    statusEl.textContent = 'Not trained';
+    tableEl.innerHTML = '<span class="model-accuracy-untrained">' +
+      'No trained TTP bundle found — classifier_confidence and ttp_severity read 0 until ' +
+      '<code>python scripts/train_model.py --target ttp</code> runs.</span>';
+    return;
+  }
+
+  const strat = data.stratified || {};
+  const honest = data.family_held_out;
+
+  if (!honest) {
+    statusEl.textContent = `${data.trained_labels} labels trained`;
+    const reason = data.family_held_out_error || 'not enough malware family groups to evaluate';
+    tableEl.innerHTML = `<span class="model-accuracy-untrained">Family-held-out evaluation did not run (${esc(reason)}) — only the stratified (family-leaky) numbers below are available.</span>`;
+    return;
+  }
+
+  statusEl.textContent = `${data.trained_labels} labels &middot; ${data.n_samples} training rows &middot; ${honest.n_family_groups} malware families`
+    .replace('&middot;', '·');
+
+  const rows = [
+    ['micro_f1', 'micro-F1'],
+    ['jaccard_samples', 'Jaccard (per-sample)'],
+    ['macro_f1', 'macro-F1'],
+    ['hamming_loss', 'Hamming loss'],
+  ];
+
+  tableEl.innerHTML = `
+    <div class="model-accuracy-row" style="font-weight:600; color:var(--text-muted); font-size:0.72rem;">
+      <span></span><span>Stratified (leaky)</span><span>Family-held-out (honest)</span><span></span>
+    </div>
+    ${rows.map(([key, label]) => {
+      const s = strat[key];
+      const h = honest[key];
+      if (s === undefined || h === undefined) return '';
+      const delta = h - s;
+      const lowerIsBetter = key === 'hamming_loss';
+      const worse = lowerIsBetter ? delta > 0 : delta < 0;
+      return `
+        <div class="model-accuracy-row">
+          <span class="metric-name">${esc(label)}</span>
+          <span class="metric-strat">${s.toFixed(3)}</span>
+          <span class="metric-honest">${h.toFixed(3)}</span>
+          <span class="metric-delta">${worse ? '↓' : ''} ${worse ? Math.abs(delta).toFixed(3) : ''}</span>
+        </div>`;
+    }).join('')}
+    <div class="model-accuracy-legend">
+      <span>${honest.n_splits}-fold GroupKFold, whole families held out per fold</span>
+      <span>quote the honest column</span>
+    </div>
+  `;
+}
 
 // Everything an analysed APK contains is attacker-controlled: package and
 // permission names, YARA rule names, extracted C2 strings, certificate fields, and
@@ -336,7 +496,7 @@ function renderResults(data) {
   }
 
   // 0. Grounding — did the narrative cite anything it wasn't given?
-  renderGrounding(data.grounding);
+  renderGrounding(data.grounding, data.narrative_report);
 
   // 1. AI Report Markdown
   const markdownText = data.narrative_report || 'No report generated.';
@@ -511,47 +671,142 @@ function renderResults(data) {
   }
 
   // 5. Risk Score Breakdown (use real API values)
+  renderRiskBreakdown(manifest, risk);
+}
+
+// Click-to-reveal evidence: what specifically produced this component's number.
+// Every fact quoted here already flows in `manifest` — this is a UI feature, not
+// a new analysis; it just surfaces evidence the response already carries instead
+// of leaving a bare percentage bar for an analyst to take on faith.
+function _componentEvidence(key, manifest, risk) {
+  const perms = manifest.permissions || [];
+  const matrixFlags = manifest.permission_matrix_flags || [];
+  const subgraphs = manifest.behavioral_subgraphs || [];
+  const sigYara = manifest.signature_yara || null;
+
+  switch (key) {
+    case 'classifier_confidence':
+    case 'ttp_severity': {
+      const ttps = (manifest.ttp_context || []).filter(t => (t.probability || 0) >= (t.threshold ?? 0.5));
+      if (ttps.length === 0) {
+        return ['No technique cleared its calibrated decision threshold — the classifier had no vote (see the "no evidence" note in Limitations) or the model is untrained.'];
+      }
+      return ttps.slice(0, 8).map(t =>
+        `${t.technique_id} ${t.name || ''} — ${(t.probability * 100).toFixed(0)}% (threshold ${(((t.threshold ?? 0.5)) * 100).toFixed(0)}%), tactic ${t.tactic || 'unknown'}`
+      );
+    }
+    case 'permission_api': {
+      const dangerous = perms.filter(p => /SMS|CAMERA|ACCESSIBILITY|STORAGE|CONTACTS|PHONE|LOCATION/i.test(p));
+      const lines = [];
+      if (matrixFlags.length) lines.push(`Permission-combination patterns: ${matrixFlags.join(', ')}`);
+      if (dangerous.length) lines.push(`Dangerous individual permissions: ${dangerous.map(p => p.replace('android.permission.', '')).join(', ')}`);
+      return lines.length ? lines : ['No dangerous permissions or matrix patterns matched.'];
+    }
+    case 'forensic_anchor': {
+      const counts = {};
+      subgraphs.forEach(s => { counts[s.primary_behavior_flag] = (counts[s.primary_behavior_flag] || 0) + 1; });
+      const behaviors = Object.entries(counts);
+      if (behaviors.length === 0) return ['No forensic-dictionary behavior anchors matched in the recovered code.'];
+      return behaviors.map(([flag, n]) => `${flag} — matched in ${n} method${n === 1 ? '' : 's'}`);
+    }
+    case 'obfuscation': {
+      const obf = manifest.obfuscation || {};
+      const lines = [];
+      if (obf.manifest_parse_failed) lines.push('AndroidManifest.xml failed to parse — treated as evasion, not absence of evidence.');
+      if (obf.dex_method_count !== null && obf.dex_method_count !== undefined &&
+          obf.declared_component_count !== null && obf.declared_component_count !== undefined) {
+        lines.push(`${obf.dex_method_count} DEX methods recovered for ${obf.declared_component_count} declared components.`);
+      }
+      lines.push(obf.coverage_note || 'No coverage note recorded.');
+      return lines;
+    }
+    case 'reputation': {
+      if (manifest.cache_hit) return ['Hot-path cache hit — reputation carried over from this SHA-256\'s prior analysis.'];
+      const vt = (sigYara?.signature_matches || []).find(s => s.source === 'VirusTotal' && s.detection_ratio);
+      return vt ? [`VirusTotal: ${vt.detection_ratio} engines flagged this hash.`] : ['No VirusTotal signature match (online lookups may be disabled, or the hash is unseen).'];
+    }
+    case 'ioc': {
+      const lines = [];
+      if ((manifest.c2_indicators || []).length) lines.push(`Extracted C2 endpoints: ${manifest.c2_indicators.join(', ')}`);
+      if ((manifest.cert_anomalies || []).length) lines.push(`Certificate anomalies: ${manifest.cert_anomalies.join(', ')}`);
+      if (manifest.secondary_dex_count) lines.push(`${manifest.secondary_dex_count} secondary/hidden DEX payload(s).`);
+      if ((manifest.dropper_signals || []).length) lines.push(`Dropper signals: ${manifest.dropper_signals.join(', ')}`);
+      const yaraCount = (sigYara?.yara_matches || []).length;
+      if (yaraCount) lines.push(`${yaraCount} YARA rule match${yaraCount === 1 ? '' : 'es'}.`);
+      return lines.length ? lines : ['No IoC signals matched.'];
+    }
+    default:
+      return [];
+  }
+}
+
+function renderRiskBreakdown(manifest, risk) {
   const breakdownContainer = document.getElementById('riskBreakdownList');
   breakdownContainer.innerHTML = '';
   // Caps must match the weights in app/reports/scoring.py's compute_risk_score
   // (classifier*25, permission*20, ttp*15, anchor*15, obfuscation*15, reputation*5, ioc*5 — sums to 100).
   const components = [
-    { name: 'Permission & API Analysis', score: risk.permission_api_component, max: 20 },
-    { name: 'Forensic Anchor Matching', score: risk.forensic_anchor_component, max: 15 },
-    { name: 'Obfuscation Signals', score: risk.obfuscation_component, max: 15 },
-    { name: 'Reputation & VT Engine Hits', score: risk.reputation_component, max: 5 },
-    { name: 'IoC Match Component', score: risk.ioc_component, max: 5 },
-    { name: 'TTP Severity', score: risk.ttp_severity_component, max: 15 },
-    { name: 'Classifier Confidence', score: risk.classifier_confidence_component, max: 25 },
+    { key: 'permission_api', name: 'Permission & API Analysis', score: risk.permission_api_component, max: 20 },
+    { key: 'forensic_anchor', name: 'Forensic Anchor Matching', score: risk.forensic_anchor_component, max: 15 },
+    { key: 'obfuscation', name: 'Obfuscation Signals', score: risk.obfuscation_component, max: 15 },
+    { key: 'reputation', name: 'Reputation & VT Engine Hits', score: risk.reputation_component, max: 5 },
+    { key: 'ioc', name: 'IoC Match Component', score: risk.ioc_component, max: 5 },
+    { key: 'ttp_severity', name: 'TTP Severity', score: risk.ttp_severity_component, max: 15 },
+    { key: 'classifier_confidence', name: 'Classifier Confidence', score: risk.classifier_confidence_component, max: 25 },
   ];
 
   components.forEach(c => {
     const scoreVal = c.score !== null && c.score !== undefined ? c.score : null;
     const item = document.createElement('div');
-    item.className = 'spec-item';
+    item.className = 'spec-item explain-item';
+
+    const detail = document.createElement('div');
+    detail.className = 'explain-detail hidden';
+    const facts = _componentEvidence(c.key, manifest, risk);
+    facts.forEach(fact => {
+      const line = document.createElement('div');
+      line.className = 'explain-fact';
+      line.textContent = fact; // fact strings are built from esc()-free concatenation
+                                // of attacker-influenced values above — textContent
+                                // is the sink, so no innerHTML risk regardless.
+      detail.appendChild(line);
+    });
+
+    const header = document.createElement('div');
+    header.className = 'explain-header';
+    header.setAttribute('role', 'button');
+    header.setAttribute('tabindex', '0');
+    header.title = 'Click to see what evidence produced this number';
+    const toggle = () => detail.classList.toggle('hidden');
+    header.addEventListener('click', toggle);
+    header.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
+
     if (scoreVal === null) {
-      item.innerHTML = `
-        <div style="display:flex; justify-content:space-between; margin-bottom:0.3rem;">
-          <span class="spec-label">${c.name}</span>
-          <span class="spec-value code" style="opacity:0.4;">N/A</span>
-        </div>
-        <div class="progress-bar-container" style="height:6px;">
-          <div class="progress-bar-fill" style="width: 0%; opacity: 0.3;"></div>
-        </div>
+      header.innerHTML = `
+        <span class="spec-label">${esc(c.name)} <span class="explain-caret">▸</span></span>
+        <span class="spec-value code" style="opacity:0.4;">N/A</span>
       `;
+      item.appendChild(header);
+      const bar = document.createElement('div');
+      bar.className = 'progress-bar-container';
+      bar.style.height = '6px';
+      bar.innerHTML = '<div class="progress-bar-fill" style="width: 0%; opacity: 0.3;"></div>';
+      item.appendChild(bar);
     } else {
       const pct = Math.min(100, (scoreVal / c.max) * 100);
       const barColor = pct > 66 ? '#ff4444' : pct > 33 ? '#ff8800' : '#22c55e';
-      item.innerHTML = `
-        <div style="display:flex; justify-content:space-between; margin-bottom:0.3rem;">
-          <span class="spec-label">${c.name}</span>
-          <span class="spec-value code">${scoreVal.toFixed(2)} / ${c.max}</span>
-        </div>
-        <div class="progress-bar-container" style="height:6px;">
-          <div class="progress-bar-fill" style="width: ${pct}%; background: ${barColor};"></div>
-        </div>
+      header.innerHTML = `
+        <span class="spec-label">${esc(c.name)} <span class="explain-caret">▸</span></span>
+        <span class="spec-value code">${scoreVal.toFixed(2)} / ${c.max}</span>
       `;
+      item.appendChild(header);
+      const bar = document.createElement('div');
+      bar.className = 'progress-bar-container';
+      bar.style.height = '6px';
+      bar.innerHTML = `<div class="progress-bar-fill" style="width: ${pct}%; background: ${barColor};"></div>`;
+      item.appendChild(bar);
     }
+    item.appendChild(detail);
     breakdownContainer.appendChild(item);
   });
 }
@@ -589,7 +844,7 @@ function renderReFindings(manifest) {
   if (countEl) countEl.textContent = total;
 }
 
-function renderGrounding(grounding) {
+function renderGrounding(grounding, narrativeText) {
   const panel = document.getElementById('groundingPanel');
   const pill = document.getElementById('groundingPill');
   const list = document.getElementById('groundingChecks');
@@ -598,14 +853,25 @@ function renderGrounding(grounding) {
   list.innerHTML = '';
   panel.classList.remove('hidden');
 
-  // No grounding object means no narrative was generated, so no check ran. That
-  // is NOT a pass, and must not render as one.
+  // A missing grounding object is NOT a pass, and must not render as one — but
+  // it has two different honest explanations depending on whether a narrative
+  // actually exists:
+  //   - no narrative at all: the LLM call itself failed, so no check ran because
+  //     there was nothing to check.
+  //   - a narrative IS present but grounding is still missing: this is a cache
+  //     hit on a record written before grounding results were persisted
+  //     (app/graph/cache.py's _RECORD_FIELDS) — the checks DID run once, at
+  //     generation time, but that result wasn't saved for this older record.
+  // Conflating these ("no narrative was generated") was wrong for the second
+  // case: a narrative visibly renders below this panel in exactly that scenario.
   if (!grounding) {
     pill.textContent = 'NOT CHECKED';
     pill.className = 'grounding-pill grounding-none';
     const row = document.createElement('div');
     row.className = 'grounding-check';
-    row.textContent = 'No narrative was generated, so the fabrication checks did not run.';
+    row.textContent = (narrativeText && narrativeText.trim())
+      ? 'This is a cached result from before grounding checks were persisted — the checks ran once at generation time, but that result was not saved for this record. Re-upload the sample to get a checked report.'
+      : 'No narrative was generated, so the fabrication checks did not run.';
     list.appendChild(row);
     return;
   }
@@ -765,6 +1031,12 @@ function renderMitreMapping(manifest) {
 
   ttps.forEach(t => {
     const pct = ((t.probability || 0) * 100).toFixed(1);
+    // Per-technique calibrated threshold (0.10-0.90 across the trained labels —
+    // see app/api/routes.py:_build_ttp_context). Without this a 0.98 that cleared
+    // a 0.10 bar and a 0.98 that cleared a 0.90 bar render as the identical bar;
+    // the tick mark shows the boundary this specific row actually had to pass.
+    const threshold = (typeof t.threshold === 'number') ? t.threshold : 0.5;
+    const thresholdPct = (threshold * 100).toFixed(1);
     const barColor = t.probability > 0.66 ? '#ff4444' : t.probability > 0.33 ? '#ff8800' : '#22c55e';
     const item = document.createElement('div');
     item.className = 'mitre-item';
@@ -774,11 +1046,12 @@ function renderMitreMapping(manifest) {
         <span class="mitre-name">${esc(t.name || 'Unknown Technique')}</span>
         <span class="mitre-tactic">${esc(t.tactic || 'Unknown Tactic')}</span>
       </div>
-      <div class="progress-bar-container" style="height:6px; margin: 0.4rem 0;">
+      <div class="progress-bar-container mitre-bar-container" style="height:6px; margin: 0.4rem 0;" title="Decision threshold for this technique: ${thresholdPct}%">
         <div class="progress-bar-fill" style="width: ${pct}%; background: ${barColor};"></div>
+        <div class="threshold-tick" style="left: ${thresholdPct}%;"></div>
       </div>
       <div class="mitre-item-footer">
-        <span class="spec-value code">${pct}% confidence</span>
+        <span class="spec-value code">${pct}% confidence <span class="threshold-label">&middot; threshold ${thresholdPct}%</span></span>
         ${t.description ? `<p class="mitre-description">${esc(t.description)}</p>` : ''}
       </div>
     `;
@@ -1131,11 +1404,17 @@ function relayoutGraph(layoutName) {
   }
 }
 
-function switchTab(tabId) {
+function switchTab(tabId, btnEl) {
   document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
 
-  event.currentTarget.classList.add('active');
+  // btnEl is passed explicitly from each onclick="switchTab('x', this)" rather
+  // than read off the implicit global `event` object — that global is
+  // non-standard outside legacy IE/Chrome inline-handler contexts, undefined
+  // under strict mode, and one refactor (e.g. wiring this up via
+  // addEventListener instead of an inline attribute) away from silently
+  // breaking tab highlighting.
+  if (btnEl) btnEl.classList.add('active');
   const targetId = 'tab' + tabId.charAt(0).toUpperCase() + tabId.slice(1);
   const targetEl = document.getElementById(targetId);
   if (targetEl) targetEl.classList.add('active');

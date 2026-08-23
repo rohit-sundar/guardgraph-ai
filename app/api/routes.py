@@ -32,8 +32,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
-from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape
+from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape, list_recent_samples
 from app.graph.ontology import get_technique_context
+from app.ml.classifier import ttp_classifier
 from app.reports.scoring import compute_risk_score, _band_for
 from app.core import progress
 from app.core.config import settings
@@ -42,18 +43,46 @@ from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal
 router = APIRouter()
 
 
+def _ttp_thresholds() -> dict[str, float]:
+    """
+    The trained bundle's per-label decision thresholds (0.10-0.90, calibrated per
+    technique on the validation split — see train_model.py). Read here rather than
+    only inside scoring so the MITRE tab can show the SAME boundary the score was
+    computed against, instead of rendering every prediction as if it cleared a
+    flat 0.5 cut. {} for an untrained bundle; callers fall back to the global
+    default per-technique in that case.
+    """
+    try:
+        return ttp_classifier.thresholds()
+    except (FileNotFoundError, KeyError, Exception) as e:
+        logger.warning(f"Per-label TTP thresholds unavailable for the UI: {e}")
+        return {}
+
+
 def _build_ttp_context(predicted_ttps: dict[str, float]) -> list[dict]:
     """
     Merges predicted_ttps (technique_id -> probability) with MITRE ATT&CK Mobile
     ontology facts (name/tactic/description) via the same get_technique_context()
     GraphRAG grounds its narrative in — so the UI can never show a technique name
     the LLM wasn't also given. Sorted by probability descending.
+
+    Also carries each technique's own decision threshold, so the MITRE tab can
+    draw a tick mark on the confidence bar at the boundary that ACTUALLY governed
+    whether this row surfaced — prevalence across the 32 trained labels ranges
+    0.10-0.90 (train_model.py's THRESHOLD_GRID), so a 0.98 on a 0.10-threshold
+    label and a 0.98 on a 0.90-threshold one are not the same margin of evidence,
+    even though both currently render as an identical percentage bar.
     """
     if not predicted_ttps:
         return []
     context = get_technique_context(list(predicted_ttps.keys()))
+    thresholds = _ttp_thresholds()
     rows = [
-        {**ctx, "probability": predicted_ttps.get(ctx["technique_id"], 0.0)}
+        {
+            **ctx,
+            "probability": predicted_ttps.get(ctx["technique_id"], 0.0),
+            "threshold": thresholds.get(ctx["technique_id"], TTP_PREDICT_THRESHOLD),
+        }
         for ctx in context
     ]
     rows.sort(key=lambda r: r["probability"], reverse=True)
@@ -108,6 +137,161 @@ async def graph_landscape(limit: int = 30):
     Landscape" tab — not tied to any single analysis run.
     """
     return get_threat_landscape(limit=limit)
+
+
+_TTP_METRICS_PATH = "data/models/ttp_metrics.json"
+
+
+@router.get("/model/metrics")
+async def model_metrics():
+    """
+    Serves the TTP classifier's own training-time evaluation, not tied to any
+    analysis run — this is what backs the "Model Accuracy" panel on the Risk
+    Scoring tab.
+
+    Deliberately surfaces BOTH numbers side by side rather than only the
+    flattering one: `stratified` is comparable to what most published
+    DroidTTP-style multi-label malware papers report, but on this dataset it is
+    measuring family memorisation — every malware row's label comes from its
+    family's ATT&CK software entry, so a split stratified on labels puts
+    identical label vectors on both sides of the train/test boundary by
+    construction. `family_held_out` is a GroupKFold evaluation where every fold
+    holds a whole family out, so it can only be measured on families the model
+    never trained on — that is the number that means something about a real
+    unseen sample, and it is honestly much lower (see train_model.py's
+    FAMILY_CV_SPLITS docstring for the full derivation).
+
+    Returns {"trained": false} rather than 404/500 when the bundle hasn't been
+    trained yet — this is a status the UI renders a message for, not an error.
+    """
+    if not os.path.exists(_TTP_METRICS_PATH):
+        return {"trained": False}
+
+    try:
+        with open(_TTP_METRICS_PATH, encoding="utf-8") as f:
+            m = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning(f"ttp_metrics.json unreadable: {e}")
+        return {"trained": False}
+
+    family_held_out = m.get("family_held_out") or {}
+    return {
+        "trained": True,
+        "n_samples": m.get("n_samples"),
+        "n_labels": m.get("n_labels"),
+        "trained_labels": len(m.get("trained_labels") or []),
+        "dropped_labels": len(m.get("dropped_labels") or []),
+        "stratified": m.get("binary_relevance"),
+        "family_held_out": (
+            {k: v for k, v in family_held_out.items() if k != "folds"}
+            if "error" not in family_held_out else None
+        ),
+        "family_held_out_error": family_held_out.get("error"),
+    }
+
+
+@router.get("/analyses")
+async def list_analyses(limit: int = 30):
+    """
+    Summary rows for the Analysis History panel — every sample this instance has
+    ever produced a verdict for, most-recently-touched first. Backed entirely by
+    Neo4j Sample nodes; no APK needs to still exist on disk.
+    """
+    rows = list_recent_samples(limit=limit)
+    return [
+        {
+            "sha256": r["sha256"],
+            "app_name": r.get("app_name") or r.get("package_name") or r["sha256"],
+            "family": r.get("family") or None,
+            "risk_score": r.get("risk_score"),
+            "verdict_band": _band_for(r["risk_score"]) if r.get("risk_score") is not None else None,
+            "analyzed_at": r.get("analyzed_at"),
+        }
+        for r in rows
+    ]
+
+
+@router.get("/analyses/{sha256}", response_model=AnalysisReport)
+async def get_analysis(sha256: str):
+    """
+    Reconstructs a past verdict from Neo4j ALONE — unlike the hot-path cache hit
+    inside _run_analysis, there is no uploaded file here to re-ingest, so the
+    manifest fields that only ever came from re-parsing the APK (cert_anomalies,
+    accessibility_flags, exported_risks, payload_assets, dropper_signals,
+    resolved_*, app_label/icon_phash, impersonation) are not recoverable and are
+    left empty rather than guessed. The limitations list says so explicitly, the
+    same honesty policy the unparseable-APK path already follows: a field reading
+    empty here means "not available for a historical record", not "not present
+    in the sample".
+    """
+    cached = lookup_signature(sha256)
+    if cached is None:
+        raise HTTPException(404, f"No stored analysis for {sha256}.")
+
+    cached_score = cached.get("base_score")
+    cached_ttps = cached.get("ttps") or {}
+    total_score = cached_score if cached_score is not None else 0.0
+
+    rc = cached.get("risk_components") or {}
+    risk_score = RiskScoreBreakdown(
+        classifier_confidence_component=rc.get("classifier_confidence_component"),
+        permission_api_component=rc.get("permission_api_component"),
+        ttp_severity_component=rc.get("ttp_severity_component"),
+        forensic_anchor_component=rc.get("forensic_anchor_component"),
+        obfuscation_component=rc.get("obfuscation_component"),
+        reputation_component=rc.get("reputation_component"),
+        ioc_component=rc.get("ioc_component"),
+        total_score=total_score,
+        verdict_band=_band_for(total_score),
+        zero_day_indicator=rc.get("zero_day_indicator", False),
+        impersonation_floor_applied=rc.get("impersonation_floor_applied", False),
+        weighted_score=rc.get("weighted_score"),
+    )
+
+    cached_obf_data = cached.get("obfuscation_data")
+    obfuscation = ObfuscationSignal(**cached_obf_data) if cached_obf_data else _empty_obfuscation_signal()
+
+    cached_sig_yara_data = cached.get("signature_yara_data")
+    signature_yara = SignatureYaraResult(**cached_sig_yara_data) if cached_sig_yara_data else None
+
+    manifest = AnalysisManifest(
+        target_package=cached.get("package_name"),
+        sha256=sha256,
+        cache_hit=True,
+        total_nodes_parsed=0,
+        graph_density=0.0,
+        behavioral_subgraphs=[],
+        obfuscation=obfuscation,
+        predicted_ttps=cached_ttps,
+        predicted_family=cached.get("family") or None,
+        family_confidence=None,
+        ttp_context=_build_ttp_context(cached_ttps),
+        related_samples=find_related_samples(
+            list(cached_ttps.keys()), cached.get("c2_indicators") or [],
+            exclude_sha256=sha256,
+            cert_thumbprint=cached.get("cert_thumbprint"),
+        ),
+        signature_yara=signature_yara,
+        permissions=cached.get("permissions") or [],
+        c2_indicators=cached.get("c2_indicators") or [],
+    )
+
+    narrative = cached.get("narrative") or "[No narrative stored for this sample.]"
+    limitations = list(cached.get("limitations") or []) + [
+        "HISTORICAL RECORD: reconstructed from the stored verdict, not the original "
+        "APK — fields that only ever came from re-parsing the file (certificate "
+        "anomalies, accessibility flags, exported components, payload assets, "
+        "dropper signals, resolved crypto/DCL/WebView/native findings, brand "
+        "impersonation, app identity) are not recoverable and read empty here "
+        "rather than being guessed. Re-upload the sample for a full current analysis."
+    ]
+
+    return AnalysisReport(
+        manifest=manifest,
+        risk_score=risk_score,
+        narrative_report=narrative,
+        limitations=limitations,
+    )
 
 
 def _analyze_with_fallback(filepath: str, job_id: str | None = None) -> AnalysisReport:
@@ -390,6 +574,7 @@ from app.core.pipeline import (
     AnalysisPipeline,
     has_deterministic_evidence,
     NO_CLASSIFIER_EVIDENCE_NOTE,
+    TTP_PREDICT_THRESHOLD,
 )
 
 def _run_analysis(filepath: str, job_id: str | None = None) -> AnalysisReport:
@@ -440,6 +625,8 @@ def _run_analysis(filepath: str, job_id: str | None = None) -> AnalysisReport:
             total_score=total_score,
             verdict_band=_band_for(total_score),
             zero_day_indicator=rc.get("zero_day_indicator", False),
+            impersonation_floor_applied=rc.get("impersonation_floor_applied", False),
+            weighted_score=rc.get("weighted_score"),
         )
 
         # Reconstruct signature_yara from cache if available
@@ -458,6 +645,14 @@ def _run_analysis(filepath: str, job_id: str | None = None) -> AnalysisReport:
 
         # Use cached permissions, falling back to ingestion
         cached_permissions = cached.get("permissions") or ingestion.permissions
+
+        # Free on a cache hit: both derive from nothing but the Phase 1 ingestion
+        # that already re-runs on every request (cert_anomalies/permission_matrix_
+        # flags/etc. below are the same pattern). Running this fresh rather than
+        # caching it also means an update to the protected-brand reference table
+        # takes effect on the very next request for an already-cached sample,
+        # instead of waiting for someone to re-upload it.
+        impersonation = AnalysisPipeline.run_phase5b_impersonation(ingestion)
 
         manifest = AnalysisManifest(
             target_package=ingestion.package_name,
@@ -486,12 +681,40 @@ def _run_analysis(filepath: str, job_id: str | None = None) -> AnalysisReport:
             exported_risks=ingestion.exported_risks,
             payload_assets=ingestion.payload_assets,
             dropper_signals=ingestion.dropper_signals,
+            # The four resolved_* lists genuinely cannot be cheaply recomputed on
+            # a cache hit — they need the full CFG, which is not rebuilt here —
+            # so unlike everything above them, these come from the persisted
+            # record rather than a fresh ingestion field. Records cached before
+            # this fix existed have none of these keys; cached.get(...) then
+            # returns None -> `or []` reads as "not recovered", not "checked,
+            # found nothing", which is the same honest-gap convention the rest
+            # of this file already uses for a hollow cache record.
+            resolved_crypto_configs=cached.get("resolved_crypto_configs") or [],
+            resolved_dcl_targets=cached.get("resolved_dcl_targets") or [],
+            resolved_webview_bridges=cached.get("resolved_webview_bridges") or [],
+            resolved_native_bridges=cached.get("resolved_native_bridges") or [],
+            app_label=ingestion.app_label,
+            icon_phash=ingestion.icon_phash,
+            impersonation=impersonation,
         )
         narrative = cached.get("narrative", "")
         limitations = cached.get("limitations", [])
+        grounding = cached.get("grounding")
 
         if cached_score is None:
             limitations = limitations + ["cache hit had no stored score — reporting 0/low"]
+        if cached_score is not None and "resolved_crypto_configs" not in cached:
+            limitations = limitations + [
+                "cache hit predates reverse-engineering persistence — resolved "
+                "crypto/DCL/WebView/native findings are not recoverable for this "
+                "record without a fresh upload"
+            ]
+        if cached_score is not None and grounding is None:
+            limitations = limitations + [
+                "cache hit predates grounding-check persistence — the narrative's "
+                "fabrication checks cannot be shown for this record without a "
+                "fresh upload"
+            ]
         if not narrative:
             narrative = "[Narrative not found in cache. Cached score only.]"
             limitations = limitations + ["analysis skipped — known sample (cache hit)"]
@@ -501,6 +724,7 @@ def _run_analysis(filepath: str, job_id: str | None = None) -> AnalysisReport:
             risk_score=risk_score,
             narrative_report=narrative,
             limitations=limitations,
+            grounding=grounding,
         )
 
     # --- Phase 1.5: Signature Detection & YARA (APK + uncompressed DEX/assets) ---
@@ -639,6 +863,11 @@ def _run_analysis(filepath: str, job_id: str | None = None) -> AnalysisReport:
             package_name=ingestion.package_name,
             c2_indicators=ingestion.c2_indicators,
             cert_thumbprint=ingestion.cert_thumbprint,
+            resolved_crypto_configs=resolved_crypto,
+            resolved_dcl_targets=resolved_dcl,
+            resolved_webview_bridges=resolved_webview,
+            resolved_native_bridges=resolved_native,
+            grounding=grounding,
         )
 
     return AnalysisReport(

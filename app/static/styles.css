@@ -1208,3 +1208,178 @@ body {
 .grounding-check.ok .mark { color: #4ade80; }
 .grounding-check.bad .mark { color: #f87171; }
 .grounding-check .detail { color: #94a3b8; }
+
+/* ── MITRE per-technique threshold tick ───────────────────────────────────── */
+.mitre-bar-container { position: relative; overflow: visible; }
+.threshold-tick {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 3px rgba(0, 0, 0, 0.6);
+  transform: translateX(-1px);
+  pointer-events: none;
+}
+.threshold-label {
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 0.78em;
+}
+
+/* ── Model accuracy panel (Risk Scoring tab) ──────────────────────────────── */
+.model-accuracy-panel {
+  margin-top: 1.5rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid var(--border-card);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.model-accuracy-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.model-accuracy-head h5 { font-size: 0.85rem; color: var(--text-main); margin: 0; }
+.model-accuracy-loading,
+.model-accuracy-untrained {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+.model-accuracy-note {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  line-height: 1.5;
+  margin: 0.6rem 0 0.9rem;
+}
+.model-accuracy-table {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.model-accuracy-row {
+  display: grid;
+  grid-template-columns: 8rem 1fr 1fr auto;
+  align-items: center;
+  gap: 0.6rem;
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+}
+.model-accuracy-row .metric-name { color: var(--text-muted); }
+.model-accuracy-row .metric-strat { color: #94a3b8; }
+.model-accuracy-row .metric-honest { color: var(--text-main); font-weight: 600; }
+.model-accuracy-row .metric-delta { color: #f87171; font-size: 0.75rem; }
+.model-accuracy-legend {
+  display: flex;
+  gap: 1.2rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-top: 0.5rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border-card);
+}
+
+/* ── "Explain this score" (Risk Scoring tab) ──────────────────────────────── */
+.explain-item { cursor: default; }
+.explain-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.3rem;
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 0.15rem 0.3rem;
+  margin-left: -0.3rem;
+  margin-right: -0.3rem;
+  transition: background 0.15s ease;
+}
+.explain-header:hover { background: rgba(255, 255, 255, 0.05); }
+.explain-header:focus-visible { outline: 2px solid var(--primary); outline-offset: 1px; }
+.explain-caret {
+  display: inline-block;
+  font-size: 0.7em;
+  color: var(--text-muted);
+  transition: transform 0.15s ease;
+  margin-left: 0.3em;
+}
+.explain-detail:not(.hidden) ~ .explain-caret,
+.explain-item:has(.explain-detail:not(.hidden)) .explain-caret {
+  transform: rotate(90deg);
+}
+.explain-detail {
+  margin-top: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  background: rgba(0, 0, 0, 0.2);
+  border-left: 2px solid var(--primary);
+  border-radius: 0 6px 6px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.explain-fact {
+  font-size: 0.78rem;
+  color: #cbd5e1;
+  font-family: var(--font-mono);
+  line-height: 1.4;
+}
+
+/* ── Analysis History panel (upload screen) ───────────────────────────────── */
+.history-card { margin-top: 1.5rem; }
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+.history-header h4 {
+  font-size: 0.85rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+.history-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--border-card);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.history-row:hover { background: rgba(255, 255, 255, 0.04); border-color: rgba(255, 255, 255, 0.18); }
+.history-row .history-name {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-row .history-family {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--border-card);
+  border-radius: 999px;
+}
+.history-row .history-score {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+.history-row .history-time {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}

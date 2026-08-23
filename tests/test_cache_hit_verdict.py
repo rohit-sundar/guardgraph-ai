@@ -35,6 +35,14 @@ class TestCacheHitPreservesVerdict(unittest.TestCase):
             mp.run_phase1_ingestion.return_value = (
                 ingestion, MagicMock(), MagicMock(), MagicMock(), MagicMock()
             )
+            # The cache-hit path now runs impersonation checks fresh (cheap —
+            # Phase 1 ingestion alone is enough) rather than relying on a
+            # possibly-absent cached copy; the mocked AnalysisPipeline needs a
+            # real dict here or AnalysisManifest's validation rejects the bare
+            # MagicMock.
+            mp.run_phase5b_impersonation.return_value = {
+                "findings": [], "coverage": [], "brands_checked": 0, "max_severity": 0.0,
+            }
 
             from app.api.routes import _run_analysis
             return _run_analysis("/fake/test.apk")
@@ -168,3 +176,112 @@ class TestCachedRecordSurvivesRestart(unittest.TestCase):
         )
         self.assertIn("permissions", decoded)
         self.assertNotIn("risk_components", decoded)
+
+
+class TestCacheHitCompletenessSecondPass(unittest.TestCase):
+    """
+    N15 — the first "hollow cache-hit" fix (record_json persistence) only covered
+    the fields that existed in the manifest at the time it was written: risk
+    components, obfuscation, permissions, YARA/signature, C2, cert. Everything
+    ADDED after that commit — resolved crypto/DCL/WebView/native findings, the
+    grounding result, brand impersonation, app identity — still went hollow on a
+    cache hit, because "cache hit" was never re-audited against the full current
+    manifest shape, just against what _RECORD_FIELDS happened to list.
+
+    Found live: a real cached sample rendered N/A across every risk component,
+    0 YARA matches, and "no narrative was generated" (false — a cached narrative
+    was displayed) on the Risk Scoring and GraphRAG tabs simultaneously. All three
+    traced to the same root cause under different labels — this class asserts the
+    fix at the two different sources of truth those symptoms actually come from:
+    persisted record_json (crypto/DCL/WebView/native, grounding) and fresh
+    Phase 1 re-ingestion (impersonation, app_label, icon_phash).
+    """
+
+    def _run_hot_path(self, cached_row, ingestion=None):
+        from app.core.schemas import IngestionResult
+
+        if ingestion is None:
+            ingestion = IngestionResult(
+                sha256="dd" * 32, package_name="com.nexus.pay", permissions=[],
+                app_label="Nexus Pay", icon_phash="abc123",
+            )
+
+        with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.lookup_signature", return_value=cached_row):
+            mp.run_phase1_ingestion.return_value = (
+                ingestion, MagicMock(), MagicMock(), MagicMock(), MagicMock()
+            )
+            mp.run_phase5b_impersonation.return_value = {
+                "findings": [{"kind": "certificate_mismatch", "brand": "TestBank"}],
+                "coverage": [], "brands_checked": 12, "max_severity": 1.0,
+            }
+            from app.api.routes import _run_analysis
+            return _run_analysis("/fake/test.apk")
+
+    def test_resolved_findings_survive_a_cache_hit_when_persisted(self):
+        cached_row = {
+            "sha256": "dd" * 32, "family": "banker", "base_score": 70.0,
+            "narrative": "n", "limitations": [], "ttps": {},
+            "resolved_crypto_configs": ["AES/ECB/NoPadding [WEAK: no IV]"],
+            "resolved_dcl_targets": ["/data/data/com.x/payload.dex"],
+            "resolved_webview_bridges": ["JSBridge.exec"],
+            "resolved_native_bridges": ["libnative.so::doEvil"],
+            "grounding": {"passed": True, "passed_count": 3, "total_count": 3, "checks": []},
+        }
+        result = self._run_hot_path(cached_row)
+
+        self.assertEqual(result.manifest.resolved_crypto_configs, ["AES/ECB/NoPadding [WEAK: no IV]"])
+        self.assertEqual(result.manifest.resolved_dcl_targets, ["/data/data/com.x/payload.dex"])
+        self.assertEqual(result.manifest.resolved_webview_bridges, ["JSBridge.exec"])
+        self.assertEqual(result.manifest.resolved_native_bridges, ["libnative.so::doEvil"])
+        self.assertIsNotNone(result.grounding)
+        self.assertTrue(result.grounding["passed"])
+
+    def test_older_records_read_empty_not_absent_and_are_flagged(self):
+        """A record cached before this fix has none of these keys at all — the
+        response must still validate (empty lists, grounding=None) AND say so in
+        limitations, rather than silently rendering as "checked, found nothing"."""
+        cached_row = {
+            "sha256": "dd" * 32, "family": "banker", "base_score": 70.0,
+            "narrative": "a real cached narrative", "limitations": [], "ttps": {},
+        }
+        result = self._run_hot_path(cached_row)
+
+        self.assertEqual(result.manifest.resolved_crypto_configs, [])
+        self.assertIsNone(result.grounding)
+        joined = " ".join(result.limitations)
+        self.assertIn("predates reverse-engineering persistence", joined)
+        self.assertIn("predates grounding-check persistence", joined)
+
+    def test_impersonation_runs_fresh_on_every_cache_hit(self):
+        """Unlike the resolved_* fields, impersonation/app_label/icon_phash are
+        NOT read from the cache at all — they come from Phase 1 ingestion, which
+        already re-runs on every request. A finding must appear even though
+        nothing about it was ever stored in cached_row."""
+        cached_row = {
+            "sha256": "dd" * 32, "family": "banker", "base_score": 70.0,
+            "narrative": "n", "limitations": [], "ttps": {},
+        }
+        result = self._run_hot_path(cached_row)
+
+        self.assertEqual(result.manifest.app_label, "Nexus Pay")
+        self.assertEqual(result.manifest.icon_phash, "abc123")
+        self.assertIsNotNone(result.manifest.impersonation)
+        self.assertEqual(
+            result.manifest.impersonation["findings"][0]["kind"], "certificate_mismatch"
+        )
+
+    def test_no_stale_gap_limitations_when_the_record_is_fully_populated(self):
+        """The two honesty notes are additive, not unconditional — a fully
+        populated cache hit must not carry warnings about gaps it doesn't have."""
+        cached_row = {
+            "sha256": "dd" * 32, "family": "banker", "base_score": 70.0,
+            "narrative": "n", "limitations": [], "ttps": {},
+            "resolved_crypto_configs": [], "resolved_dcl_targets": [],
+            "resolved_webview_bridges": [], "resolved_native_bridges": [],
+            "grounding": {"passed": True, "passed_count": 1, "total_count": 1, "checks": []},
+        }
+        result = self._run_hot_path(cached_row)
+        joined = " ".join(result.limitations)
+        self.assertNotIn("predates reverse-engineering persistence", joined)
+        self.assertNotIn("predates grounding-check persistence", joined)
