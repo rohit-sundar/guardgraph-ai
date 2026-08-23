@@ -108,8 +108,110 @@ class TestCacheHitPreservesVerdict(unittest.TestCase):
             self.assertEqual(result.risk_score.verdict_band, expected_band)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
+class TestColdAndHotPathAgreeOnFamily(unittest.TestCase):
+    """
+    The family shown on a first analysis must be the family shown when the same
+    APK is re-uploaded.
+
+    The auxiliary family classifier is usually untrained, so the cold path's
+    `predicted_family` is None — but a third-party signature lookup often names
+    the family outright, and that name is what gets persisted. Deciding the
+    family only at the cache write left the cold path reporting "unclassified"
+    for a sample that came back as "Cerberus" on the very next upload, since the
+    hot path reads the stored value.
+
+    Fully offline — no Neo4j, no Ollama, no APK.
+    """
+
+    def _run_cold_path(self, signature_family, classifier_family=None):
+        """Runs _run_analysis on a cache miss, returning (report, stored_family)."""
+        from app.core.schemas import (
+            IngestionResult, ObfuscationSignal, RiskScoreBreakdown,
+            SignatureMatch, SignatureYaraResult,
+        )
+
+        ingestion = IngestionResult(
+            sha256="ee" * 32, package_name="com.nexus.pay", permissions=[]
+        )
+        sig_yara = SignatureYaraResult(
+            signature_matches=[SignatureMatch(
+                match_type="sha256", matched_value="ee" * 32, family=signature_family,
+                severity=0.95, source="MalwareBazaar", description="hit",
+            )],
+            yara_matches=[], is_known_malware=True, combined_severity=0.95,
+            yara_scan_targets=[],
+        )
+        obfuscation = ObfuscationSignal(
+            string_entropy_score=0.0, flattening_suspected=False,
+            flattening_outlier_nodes=[], reflection_call_count=0,
+            unresolved_reflection_targets=0, method_parse_failure_rate=0.0,
+            coverage_note="none",
+        )
+        risk = RiskScoreBreakdown(
+            total_score=70.0, verdict_band="high", zero_day_indicator=False
+        )
+
+        with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.lookup_signature", return_value=None), \
+             patch("app.api.routes.find_related_samples", return_value=[]), \
+             patch("app.api.routes._build_ttp_context", return_value=[]), \
+             patch("app.api.routes.store_signature") as store:
+            mp.run_phase1_ingestion.return_value = (
+                ingestion, MagicMock(), MagicMock(), MagicMock(), []
+            )
+            mp.run_phase1b_signature_yara.return_value = sig_yara
+            mp.run_phase2_graph_construction.return_value = ({}, 0.0)
+            mp.run_phase3_forensic_matching.return_value = ({}, [], [])
+            mp.merge_c2_from_strings.return_value = ingestion
+            mp.run_phase3b_re_deepdive.return_value = ([], [], [], [])
+            mp.run_phase4_feature_engineering.return_value = (
+                obfuscation, [], [], 0.0, 0
+            )
+            # The classifier's own answer — None whenever it is untrained.
+            mp.run_phase5_ml_classification.return_value = ({}, classifier_family, None)
+            mp.run_phase5b_impersonation.return_value = {
+                "findings": [], "coverage": [], "brands_checked": 0, "max_severity": 0.0,
+            }
+            mp.run_phase6_risk_scoring.return_value = risk
+            mp.run_phase7_reporting.return_value = ("narrative", [], None)
+
+            from app.api.routes import _run_analysis
+            report = _run_analysis("/fake/test.apk")
+
+        self.assertTrue(store.called, "cold path must persist the verdict")
+        return report, store.call_args.kwargs["family"]
+
+    def test_signature_family_reaches_the_manifest_not_just_the_cache(self):
+        """The regression: manifest said None while the cache stored 'Cerberus'."""
+        report, stored = self._run_cold_path(signature_family="Cerberus")
+
+        self.assertEqual(report.manifest.predicted_family, "Cerberus")
+        self.assertEqual(stored, "Cerberus")
+        # A hash match is not a probability — the classifier's confidence field
+        # must not be borrowed to describe it.
+        self.assertIsNone(report.manifest.family_confidence)
+
+    def test_signature_family_is_normalised_before_use(self):
+        """A VirusTotal detection label must not reach the graph verbatim."""
+        report, stored = self._run_cold_path(signature_family="trojan.sharkbot/andr")
+
+        self.assertEqual(report.manifest.predicted_family, "sharkbot")
+        self.assertEqual(stored, "sharkbot")
+
+    def test_placeholder_family_does_not_displace_the_classifier(self):
+        """'unknown' names no family, so the classifier's answer still stands."""
+        report, stored = self._run_cold_path(
+            signature_family="unknown", classifier_family="banker"
+        )
+
+        self.assertEqual(report.manifest.predicted_family, "banker")
+        self.assertEqual(stored, "banker")
+
+    def test_no_family_anywhere_stores_empty_not_a_placeholder(self):
+        report, stored = self._run_cold_path(signature_family="unknown")
+
+        self.assertIsNone(report.manifest.predicted_family)
+        self.assertEqual(stored, "")
 
 
 class TestCachedRecordSurvivesRestart(unittest.TestCase):
@@ -285,3 +387,7 @@ class TestCacheHitCompletenessSecondPass(unittest.TestCase):
         joined = " ".join(result.limitations)
         self.assertNotIn("predates reverse-engineering persistence", joined)
         self.assertNotIn("predates grounding-check persistence", joined)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

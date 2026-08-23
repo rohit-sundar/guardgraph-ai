@@ -32,6 +32,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
+from app.analysis.signatures import deterministic_family
 from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape, list_recent_samples
 from app.graph.ontology import get_technique_context
 from app.ml.classifier import ttp_classifier
@@ -786,6 +787,27 @@ def _run_analysis(
     impersonation = AnalysisPipeline.run_phase5b_impersonation(ingestion)
     progress.emit(job_id, 5.5, "Brand Impersonation Checks", "done")
 
+    # Family attribution, resolved ONCE for both the manifest and the cache write
+    # below. A third-party signature hit names the family from a lookup of this
+    # sample's own hash — deterministic evidence — so it takes precedence over the
+    # auxiliary classifier's guess.
+    #
+    # Resolving it here rather than only at the store_signature call is what keeps
+    # a first analysis and a later cache hit of the same APK reporting the same
+    # family: the hot path reads the stored value, so deciding the family at the
+    # write and leaving the manifest on the classifier's answer made the cold path
+    # report "unclassified" for a sample that reads "Cerberus" on re-upload.
+    #
+    # family_confidence stays None whenever the name came from a signature: that
+    # field is the classifier's probability, and a hash match has no probability
+    # to report. Provenance is not lost — signature_yara carries the source, and
+    # the report prompt already separates deterministic findings from predictions.
+    signature_family = deterministic_family(
+        sig_yara.signature_matches if sig_yara else None
+    )
+    if signature_family:
+        predicted_family, family_confidence = signature_family, None
+
     manifest = AnalysisManifest(
         target_package=ingestion.package_name,
         sha256=ingestion.sha256,
@@ -848,9 +870,14 @@ def _run_analysis(
         limitations = list(limitations) + [NO_CLASSIFIER_EVIDENCE_NOTE]
 
     # Always persist after a cold-path run so the hot path fires on the next
-    # request for the same SHA-256. predicted_family may be None when the
-    # auxiliary family classifier is untrained — that's fine, store "" and
-    # let lookup_signature gate on SHA-256 presence instead of family.
+    # request for the same SHA-256. The family may be "" — the auxiliary
+    # classifier is often untrained — and that's fine, lookup_signature gates on
+    # SHA-256 presence, not family.
+    #
+    # `predicted_family` already carries the deterministic signature family where
+    # one was available (resolved above the manifest, so both agree). See
+    # scripts/backfill_families.py, which repaired the records written before
+    # that preference existed.
     if not cache_hit:
         store_signature(
             sha256=ingestion.sha256,

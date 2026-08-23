@@ -9,7 +9,9 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.analysis.signatures import match_signatures, reset_signature_db
+from app.analysis.signatures import (
+    match_signatures, reset_signature_db, normalize_family_name, deterministic_family,
+)
 from app.analysis.yara_engine import compile_rules, scan_bytes, reset_compiled_rules, YARA_AVAILABLE
 from app.ml.features import build_feature_vector, FEATURE_NAMES
 from app.reports.scoring import compute_risk_score
@@ -262,6 +264,57 @@ def test_risk_scoring_with_signatures_and_yara():
     assert score_yara.ioc_component > score_clean.ioc_component
 
 
+def test_normalize_family_name():
+    """
+    The family a scanner reports is what a bank analyst reads as the attribution,
+    so a placeholder or a bucket id must not reach the graph dressed as a family.
+    Every input below was observed in the real corpus.
+    """
+    # Real names pass through untouched — casing is the vendors' own.
+    for name in ("GodFather", "SpyNote", "AndroRAT", "BRATA", "TrickMo"):
+        assert normalize_family_name(name) == name
+
+    # VirusTotal's "<category>.<family>/<platform>" reduces to the family.
+    assert normalize_family_name("trojan.sharkbot/andr") == "sharkbot"
+    assert normalize_family_name("trojan.hqwar") == "hqwar"
+    assert normalize_family_name("  Cerberus  ") == "Cerberus"
+
+    # Nothing that names no family may become a MalwareFamily node.
+    for empty in ("trojan.", "dropper.", "unknown", "", "   ", None, "-"):
+        assert normalize_family_name(empty) is None, f"{empty!r} should yield no family"
+
+    # VT cluster ids arrive in the same field as real names and must be rejected;
+    # "trojan.ag1594795/adlibrary" is a bucket number, not an attribution.
+    assert normalize_family_name("trojan.ag1594795/adlibrary") is None
+
+    # A family whose own name contains a dot keeps it — only a leading *category*
+    # token is stripped.
+    assert normalize_family_name("not.acategory") == "not.acategory"
+    print("OK: family-name normalisation rejects placeholders and cluster ids")
+
+
+def test_deterministic_family_prefers_the_first_real_attribution():
+    """
+    match_signatures returns MalwareBazaar before VirusTotal, and MalwareBazaar
+    reports a clean family name where VirusTotal reports a full detection label —
+    but a MalwareBazaar "unknown" must not shadow a usable VirusTotal answer.
+    """
+    assert deterministic_family([
+        {"source": "MalwareBazaar", "family": "Cerberus"},
+        {"source": "VirusTotal", "family": "trojan.anubis/andr"},
+    ]) == "Cerberus"
+
+    assert deterministic_family([
+        {"source": "MalwareBazaar", "family": "unknown"},
+        {"source": "VirusTotal", "family": "trojan.sharkbot/andr"},
+    ]) == "sharkbot"
+
+    assert deterministic_family([{"family": "unknown"}, {"family": "trojan."}]) is None
+    assert deterministic_family([]) is None
+    assert deterministic_family(None) is None
+    print("OK: deterministic family picks the first real attribution, else None")
+
+
 if __name__ == "__main__":
     test_local_signature_matching()
     test_online_signature_matching_vt()
@@ -269,4 +322,6 @@ if __name__ == "__main__":
     test_yara_rule_scanning()
     test_feature_vector_33_features()
     test_risk_scoring_with_signatures_and_yara()
+    test_normalize_family_name()
+    test_deterministic_family_prefers_the_first_real_attribution()
     print("All signature/YARA tests passed successfully!")

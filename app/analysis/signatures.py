@@ -9,6 +9,7 @@ intelligence), the sample is flagged immediately. Results feed into the risk
 score's IOC component and are surfaced in the GraphRAG report.
 """
 import json
+import re
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -197,6 +198,96 @@ def _lookup_malwarebazaar(sha256: str, api_key: str) -> Optional[dict]:
     except Exception as e:
         logger.error(f"MalwareBazaar API query failed: {e}")
 
+    return None
+
+
+# Detection-category prefixes the scanners prepend to a family name. VirusTotal's
+# `suggested_threat_label` arrives as "<category>.<family>/<platform>" — e.g.
+# "trojan.sharkbot/andr" — and the family is the only part that identifies the
+# threat; the category duplicates what the risk score already says, and the
+# platform is always Android here.
+_DETECTION_CATEGORY_PREFIXES = {
+    "trojan", "adware", "spyware", "backdoor", "ransom", "ransomware", "virus",
+    "worm", "dropper", "downloader", "pua", "pup", "riskware", "hacktool",
+    "exploit", "rootkit", "banker", "clicker", "sms", "malware",
+}
+
+# Placeholders the lookups substitute when the scanner returned no family at all —
+# _lookup_malwarebazaar falls back to `family or clamav or "unknown"`. Storing one
+# as a family name creates a MalwareFamily node that asserts something false about
+# every sample under it.
+_NON_FAMILY_VALUES = {"unknown", "unknownn", "none", "null", "n/a", "-"}
+
+# VirusTotal emits auto-generated cluster ids in the same field as real family
+# names — "trojan.ag1594795/adlibrary" is a bucket number, not an attribution.
+# Named families do not carry long digit runs (Cerberus, SharkBot, FluBot,
+# TrickMo, GodFather, Crocodilus, AndroRAT...), so a run of four or more digits
+# separates the two reliably without a maintained allowlist.
+_CLUSTER_ID_RE = re.compile(r"\d{4,}")
+
+
+def normalize_family_name(raw: Optional[str]) -> Optional[str]:
+    """
+    Reduces a scanner-reported family string to the family itself, or None when
+    the string names no family.
+
+    Returns None rather than a placeholder so callers can skip writing a
+    MalwareFamily edge entirely — "we do not know this sample's family" and
+    "this sample belongs to the family Unknown" are different claims, and only
+    the first one is true.
+
+        "GodFather"              -> "GodFather"
+        "trojan.sharkbot/andr"        -> "sharkbot"
+        "trojan.hqwar"                -> "hqwar"
+        "trojan."                     -> None
+        "unknown"                     -> None
+        "trojan.ag1594795/adlibrary"  -> None   (cluster id, not a family)
+
+    Casing is deliberately preserved rather than folded: "SpyNote" and "AndroRAT"
+    are how the vendors write them, and title-casing would mangle both. Callers
+    that need to merge case variants (e.g. TangleBot / Tanglebot) should key on
+    `.casefold()` and choose a display form themselves.
+    """
+    if not raw:
+        return None
+
+    name = str(raw).strip()
+    # "<family>/<platform>" — drop the platform.
+    name = name.split("/", 1)[0].strip()
+
+    # "<category>.<family>" — drop the category, but only if the leading token
+    # really is a category. A family whose own name contains a dot keeps it.
+    if "." in name:
+        head, _, tail = name.partition(".")
+        if head.casefold() in _DETECTION_CATEGORY_PREFIXES:
+            name = tail
+
+    name = name.strip(" .-_")
+    if not name or name.casefold() in _NON_FAMILY_VALUES:
+        return None
+    if _CLUSTER_ID_RE.search(name):
+        return None
+    return name
+
+
+def deterministic_family(signature_matches: Optional[list]) -> Optional[str]:
+    """
+    The family named by a third-party signature hit, if any.
+
+    This is *deterministic* attribution — a hash that VirusTotal or MalwareBazaar
+    has already identified — as opposed to the auxiliary family classifier's
+    guess. Matches are consulted in the order match_signatures returns them
+    (MalwareBazaar before VirusTotal), and the first that yields a real family
+    after normalisation wins; MalwareBazaar reports a clean family name where
+    VirusTotal reports a full detection label.
+
+    Accepts either dicts or SignatureMatch models.
+    """
+    for match in signature_matches or []:
+        raw = match.get("family") if isinstance(match, dict) else getattr(match, "family", None)
+        family = normalize_family_name(raw)
+        if family:
+            return family
     return None
 
 

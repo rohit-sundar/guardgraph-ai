@@ -174,8 +174,16 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
         // timestamp() (epoch millis) rather than an app-side clock, so ordering
         // stays correct regardless of which machine wrote the record.
         s.analyzed_at = timestamp()
-    MERGE (f:MalwareFamily {name: $family})
-    MERGE (s)-[:CLASSIFIED_AS_FAMILY]->(f)
+    // Only attach a family when one is actually known. This MERGE used to run
+    // unconditionally, so an unknown family created a MalwareFamily node named
+    // "" that every unattributed sample then hung off — a node asserting a
+    // shared classification that does not exist. FOREACH is the idiomatic Cypher
+    // conditional-write: the list is empty when $family is blank, so the body
+    // never executes.
+    FOREACH (_ IN CASE WHEN $family IS NULL OR trim($family) = '' THEN [] ELSE [1] END |
+        MERGE (f:MalwareFamily {name: $family})
+        MERGE (s)-[:CLASSIFIED_AS_FAMILY]->(f)
+    )
     """
     ttps_query = """
     MATCH (s:Sample {sha256: $sha256})
