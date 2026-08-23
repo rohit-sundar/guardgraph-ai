@@ -286,6 +286,14 @@ async def get_analysis(sha256: str):
         "impersonation, app identity) are not recoverable and read empty here "
         "rather than being guessed. Re-upload the sample for a full current analysis."
     ]
+    if not cached.get("narrative"):
+        limitations.append(
+            "This sample was analysed with report generation disabled, so no "
+            "narrative was ever produced for it. Run "
+            f"`python scripts/clear_sample.py {sha256}` and upload the APK again "
+            "to generate one — a narrative needs the control-flow graph, which a "
+            "stored record does not carry."
+        )
 
     return AnalysisReport(
         manifest=manifest,
@@ -709,15 +717,28 @@ def _run_analysis(
                 "crypto/DCL/WebView/native findings are not recoverable for this "
                 "record without a fresh upload"
             ]
-        if cached_score is not None and grounding is None:
+        # Gated on the narrative existing: with no narrative there is nothing for
+        # the fabrication checks to have run against, so a missing `grounding` is
+        # expected rather than evidence of an old record. Reporting it as
+        # "predates persistence" here diagnosed the wrong problem — see the
+        # no-narrative branch below for what is actually true of such a record.
+        if cached_score is not None and grounding is None and narrative:
             limitations = limitations + [
                 "cache hit predates grounding-check persistence — the narrative's "
                 "fabrication checks cannot be shown for this record without a "
                 "fresh upload"
             ]
         if not narrative:
-            narrative = "[Narrative not found in cache. Cached score only.]"
-            limitations = limitations + ["analysis skipped — known sample (cache hit)"]
+            narrative = "[No narrative was generated for this sample.]"
+            limitations = limitations + [
+                "This sample was analysed with report generation disabled, so it has "
+                "no narrative and no fabrication-check results — the verdict, score "
+                "and manifest above are unaffected. A narrative cannot be produced "
+                "from a cache hit: it needs the control-flow graph, which is only "
+                "built on a full analysis. To generate one, run "
+                f"`python scripts/clear_sample.py {ingestion.sha256}` and upload the "
+                "APK again."
+            ]
 
         return AnalysisReport(
             manifest=manifest,
@@ -878,13 +899,23 @@ def _run_analysis(
     # one was available (resolved above the manifest, so both agree). See
     # scripts/backfill_families.py, which repaired the records written before
     # that preference existed.
+    #
+    # A skipped report is persisted as an EMPTY narrative, not as the placeholder
+    # string generate_report returns. The placeholder is truthy, so storing it put
+    # a record in the cache that every later reader treated as a real narrative —
+    # the hot path's `if not narrative` guard never fired, and the analyst was
+    # shown "[Report generation skipped - bulk population run]" in the report tab
+    # with nothing to indicate it was recoverable. store_signature only runs on a
+    # cache MISS, so that text then stuck to the sample permanently. Empty is the
+    # truth ("no narrative exists for this record") and every consumer already
+    # handles it.
     if not cache_hit:
         store_signature(
             sha256=ingestion.sha256,
             family=predicted_family or "",
             risk_score=risk_score.total_score,
             ttps=predicted_ttps,
-            narrative=narrative,
+            narrative="" if skip_report else narrative,
             limitations=limitations,
             signature_yara_data=sig_yara.model_dump() if sig_yara else None,
             permissions=ingestion.permissions,

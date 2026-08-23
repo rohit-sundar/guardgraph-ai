@@ -214,6 +214,138 @@ class TestColdAndHotPathAgreeOnFamily(unittest.TestCase):
         self.assertEqual(stored, "")
 
 
+class TestSkippedReportDoesNotPoisonTheCache(unittest.TestCase):
+    """
+    `skip_report=true` bypasses the ~2-minute LLM call for bulk population runs.
+    generate_report returns a placeholder string in that case, and storing it put
+    a TRUTHY narrative in the cache: the hot path's `if not narrative` guard never
+    fired, so every later upload of that sample rendered
+    "[Report generation skipped ...]" in the report tab as though it were the
+    analyst report. store_signature only runs on a cache MISS, so the text stuck
+    permanently — re-uploading could not fix it.
+
+    An empty narrative is the truthful record, and every consumer already handles
+    it. Regenerating on the hot path is NOT the answer: the cache-hit manifest
+    carries total_nodes_parsed=0 and behavioral_subgraphs=[] because the CFG is
+    never rebuilt there, so a narrative written from it would state that no
+    behavioral subgraphs were observed for a sample that had hundreds.
+    """
+
+    def _cold_path_with_skip(self, skip_report):
+        from app.core.schemas import (
+            IngestionResult, ObfuscationSignal, RiskScoreBreakdown,
+        )
+
+        ingestion = IngestionResult(
+            sha256="ab" * 32, package_name="com.nexus.pay", permissions=[]
+        )
+        obfuscation = ObfuscationSignal(
+            string_entropy_score=0.0, flattening_suspected=False,
+            flattening_outlier_nodes=[], reflection_call_count=0,
+            unresolved_reflection_targets=0, method_parse_failure_rate=0.0,
+            coverage_note="none",
+        )
+        risk = RiskScoreBreakdown(
+            total_score=70.0, verdict_band="high", zero_day_indicator=False
+        )
+        placeholder = "[Report generation skipped — bulk population run]"
+
+        with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.lookup_signature", return_value=None), \
+             patch("app.api.routes.find_related_samples", return_value=[]), \
+             patch("app.api.routes._build_ttp_context", return_value=[]), \
+             patch("app.api.routes.store_signature") as store:
+            mp.run_phase1_ingestion.return_value = (
+                ingestion, MagicMock(), MagicMock(), MagicMock(), []
+            )
+            mp.run_phase1b_signature_yara.return_value = None
+            mp.run_phase2_graph_construction.return_value = ({}, 0.0)
+            mp.run_phase3_forensic_matching.return_value = ({}, [], [])
+            mp.merge_c2_from_strings.return_value = ingestion
+            mp.run_phase3b_re_deepdive.return_value = ([], [], [], [])
+            mp.run_phase4_feature_engineering.return_value = (
+                obfuscation, [], [], 0.0, 0
+            )
+            mp.run_phase5_ml_classification.return_value = ({}, None, None)
+            mp.run_phase5b_impersonation.return_value = {
+                "findings": [], "coverage": [], "brands_checked": 0, "max_severity": 0.0,
+            }
+            mp.run_phase6_risk_scoring.return_value = risk
+            mp.run_phase7_reporting.return_value = (
+                (placeholder, [], None) if skip_report else ("Real prose.", [], {"passed": True})
+            )
+
+            from app.api.routes import _run_analysis
+            report = _run_analysis("/fake/test.apk", skip_report=skip_report)
+
+        return report, store.call_args.kwargs["narrative"]
+
+    def test_skipped_report_is_stored_as_empty_not_a_placeholder(self):
+        report, stored = self._cold_path_with_skip(skip_report=True)
+
+        self.assertEqual(stored, "", "the placeholder must not enter the cache")
+        # The immediate response still says so plainly — the caller asked for it.
+        self.assertIn("skipped", report.narrative_report.lower())
+
+    def test_a_real_narrative_is_stored_verbatim(self):
+        report, stored = self._cold_path_with_skip(skip_report=False)
+
+        self.assertEqual(stored, "Real prose.")
+        self.assertEqual(report.narrative_report, "Real prose.")
+
+    def test_cache_hit_without_a_narrative_says_how_to_get_one(self):
+        """
+        The analyst must be told the report is obtainable, and how. A cache hit
+        cannot generate it — only a fresh cold path can.
+        """
+        cached_row = {
+            "sha256": "dd" * 32, "family": "Cerberus", "base_score": 70.0,
+            "narrative": "", "limitations": [], "ttps": {},
+            "resolved_crypto_configs": [],
+        }
+        with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.lookup_signature", return_value=cached_row):
+            from app.core.schemas import IngestionResult
+            mp.run_phase1_ingestion.return_value = (
+                IngestionResult(sha256="dd" * 32, package_name="com.a", permissions=[]),
+                MagicMock(), MagicMock(), MagicMock(), MagicMock(),
+            )
+            mp.run_phase5b_impersonation.return_value = {
+                "findings": [], "coverage": [], "brands_checked": 0, "max_severity": 0.0,
+            }
+            from app.api.routes import _run_analysis
+            result = _run_analysis("/fake/test.apk")
+
+        joined = " ".join(result.limitations)
+        self.assertIn("clear_sample.py", joined)
+        self.assertIn("report generation disabled", joined)
+        # The grounding-persistence line diagnoses a DIFFERENT problem (an old
+        # record) and must not fire when the record simply has no narrative.
+        self.assertNotIn("predates grounding-check persistence", joined)
+
+    def test_grounding_persistence_note_still_fires_for_a_real_old_record(self):
+        """The gate added above must not silence the case it was written for."""
+        cached_row = {
+            "sha256": "dd" * 32, "family": "Cerberus", "base_score": 70.0,
+            "narrative": "An older narrative with no stored grounding.",
+            "limitations": [], "ttps": {}, "resolved_crypto_configs": [],
+        }
+        with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.lookup_signature", return_value=cached_row):
+            from app.core.schemas import IngestionResult
+            mp.run_phase1_ingestion.return_value = (
+                IngestionResult(sha256="dd" * 32, package_name="com.a", permissions=[]),
+                MagicMock(), MagicMock(), MagicMock(), MagicMock(),
+            )
+            mp.run_phase5b_impersonation.return_value = {
+                "findings": [], "coverage": [], "brands_checked": 0, "max_severity": 0.0,
+            }
+            from app.api.routes import _run_analysis
+            result = _run_analysis("/fake/test.apk")
+
+        self.assertIn("predates grounding-check persistence", " ".join(result.limitations))
+
+
 class TestCachedRecordSurvivesRestart(unittest.TestCase):
     """
     N12: store_signature wrote eleven fields to _MEMORY_CACHE but only five to Neo4j.
