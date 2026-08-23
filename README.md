@@ -85,10 +85,14 @@ python scripts/download_yara_rules.py
 uvicorn app.main:app --reload --port 8000
 ```
 
-Then upload an APK — your sample lives at `data/samples/test.apk`:
+Then upload an APK. A sample ships with the repository:
 ```bash
-curl -X POST http://localhost:8000/analyze -F "file=@data/samples/test.apk"
+curl -X POST http://localhost:8000/analyze -F "file=@guardgraph_test/guardgraph_test.apk"
 ```
+The first analysis of a given file takes roughly two to three minutes, almost all of it
+Phase 7's local LLM call — append `?skip_report=true` to get the verdict, score and full
+manifest without the narrative. Upload the same file again and it returns from the Neo4j
+cache instead of re-analysing.
 
 ## What's real vs stubbed right now
 
