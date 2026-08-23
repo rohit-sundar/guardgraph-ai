@@ -38,6 +38,10 @@ logs/*
 # Corpus score dumps (scripts/score_corpus.py) — measurement output, regeneratable
 data/corpus_scores*.json
 
+# Per-family download caps (scripts/family_targets.py) — derived from the current
+# manifest state each run, regeneratable
+data/family_caps.json
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HACKATHON ARRANGEMENT — revert after the event.
 #

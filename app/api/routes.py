@@ -77,7 +77,15 @@ async def graph_landscape(limit: int = 30):
 
 
 @router.post("/analyze", response_model=AnalysisReport)
-async def analyze(file: UploadFile = File(...)):
+async def analyze(file: UploadFile = File(...), skip_report: bool = False):
+    """
+    skip_report=true bypasses Phase 7's Ollama call (see generate_report's
+    docstring) — the "needed" case app/api/routes.py's original synchronous-
+    by-design note anticipated. Neo4j still gets the full sha256/family/TTPs/
+    risk_score write; only the narrative prose is skipped. Default False keeps
+    every existing caller (the web UI, curl, /analyze_sample) unaffected —
+    this is opt-in for bulk population runs (see populate.py).
+    """
     if not file.filename.endswith(".apk"):
         raise HTTPException(400, "Only .apk files are supported in this prototype.")
 
@@ -90,12 +98,12 @@ async def analyze(file: UploadFile = File(...)):
             f.write(content)
 
         try:
-            result = _run_analysis(tmp_path)
+            result = _run_analysis(tmp_path, skip_report=skip_report)
         except HTTPException:
             raise
         except Exception as exc:
             logger.error(f"Unparseable APK fallback triggered: {exc}")
-            result = _unparseable_report(tmp_path, exc)
+            result = _unparseable_report(tmp_path, exc, skip_report=skip_report)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -110,7 +118,7 @@ async def analyze_sample():
     return _run_analysis(sample_path)
 
 
-def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
+def _unparseable_report(filepath: str, exc: BaseException, skip_report: bool = False) -> AnalysisReport:
     """
     Builds the verdict returned when static analysis cannot complete.
 
@@ -189,7 +197,9 @@ def _unparseable_report(filepath: str, exc: BaseException) -> AnalysisReport:
     # a dead end. run_phase7_reporting already has its own fallback if
     # Ollama itself is unreachable, so this never raises.
     from app.core.pipeline import AnalysisPipeline
-    narrative, report_limitations = AnalysisPipeline.run_phase7_reporting(manifest, risk_score)
+    narrative, report_limitations = AnalysisPipeline.run_phase7_reporting(
+        manifest, risk_score, skip_llm=skip_report
+    )
     limitations = limitations + report_limitations
 
     return AnalysisReport(
@@ -206,7 +216,7 @@ from app.core.pipeline import (
     NO_CLASSIFIER_EVIDENCE_NOTE,
 )
 
-def _run_analysis(filepath: str) -> AnalysisReport:
+def _run_analysis(filepath: str, skip_report: bool = False) -> AnalysisReport:
     # --- Phase 1: Ingestion & Metadata (+ Android malware static enrichments) ---
     ingestion, apk_obj, dvm, analysis_obj, yara_targets = (
         AnalysisPipeline.run_phase1_ingestion(filepath)
@@ -396,7 +406,9 @@ def _run_analysis(filepath: str) -> AnalysisReport:
     )
 
     # --- Phase 7: Explainable Reporting ---
-    narrative, limitations = AnalysisPipeline.run_phase7_reporting(manifest, risk_score)
+    narrative, limitations = AnalysisPipeline.run_phase7_reporting(
+        manifest, risk_score, skip_llm=skip_report
+    )
 
     if not classifier_evidence:
         limitations = list(limitations) + [NO_CLASSIFIER_EVIDENCE_NOTE]
