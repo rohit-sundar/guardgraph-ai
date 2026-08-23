@@ -142,9 +142,7 @@ async def analyze(file: UploadFile = File(...), skip_report: bool = False):
     tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}.apk")
 
     try:
-        content = await file.read()
-        with open(tmp_path, "wb") as f:
-            f.write(content)
+        await _save_upload_bounded(file, tmp_path)
 
         try:
             result = _run_analysis(tmp_path, skip_report=skip_report)
@@ -378,7 +376,7 @@ def _unparseable_report(filepath: str, exc: BaseException, skip_report: bool = F
     # a dead end. run_phase7_reporting already has its own fallback if
     # Ollama itself is unreachable, so this never raises.
     from app.core.pipeline import AnalysisPipeline
-    narrative, report_limitations = AnalysisPipeline.run_phase7_reporting(
+    narrative, report_limitations, grounding = AnalysisPipeline.run_phase7_reporting(
         manifest, risk_score, skip_llm=skip_report
     )
     limitations = limitations + report_limitations
@@ -398,7 +396,9 @@ from app.core.pipeline import (
     NO_CLASSIFIER_EVIDENCE_NOTE,
 )
 
-def _run_analysis(filepath: str, skip_report: bool = False) -> AnalysisReport:
+def _run_analysis(
+    filepath: str, skip_report: bool = False, job_id: str | None = None
+) -> AnalysisReport:
     # --- Phase 1: Ingestion & Metadata (+ Android malware static enrichments) ---
     progress.emit(job_id, 1, "APK Ingestion", "start")
     ingestion, apk_obj, dvm, analysis_obj, yara_targets = (
@@ -610,8 +610,14 @@ def _run_analysis(filepath: str, skip_report: bool = False) -> AnalysisReport:
     progress.emit(job_id, 6, "Risk Scoring", "done")
 
     # --- Phase 7: Explainable Reporting ---
-    narrative, limitations = AnalysisPipeline.run_phase7_reporting(
+    progress.emit(job_id, 7, "GraphRAG Report Generation", "start")
+    narrative, limitations, grounding = AnalysisPipeline.run_phase7_reporting(
         manifest, risk_score, skip_llm=skip_report
+    )
+    progress.emit(
+        job_id, 7, "GraphRAG Report Generation",
+        "skipped" if skip_report else "done",
+        "narrative generation disabled for this run" if skip_report else "",
     )
 
     if not classifier_evidence:

@@ -84,7 +84,7 @@ def main():
     print("Ensure Ollama is running (`ollama serve`)!\n")
 
     try:
-        narrative, limitations = generate_report(manifest=mock_manifest, risk_score=mock_risk_score)
+        narrative, limitations, _grounding = generate_report(manifest=mock_manifest, risk_score=mock_risk_score)
         
         print("================ REPORT GENERATED ================\n")
         print(narrative)

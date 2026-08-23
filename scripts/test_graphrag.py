@@ -66,7 +66,7 @@ def main():
     
     print("Calling generate_report using local Ollama model...")
     try:
-        narrative, limitations = generate_report(manifest, risk_score)
+        narrative, limitations, _grounding = generate_report(manifest, risk_score)
         print("\n=== REPORT GENERATION SUCCESSFUL ===")
         print(f"Limitations: {limitations}")
         print("\n=== NARRATIVE REPORT ===")

@@ -785,7 +785,7 @@ class AnalysisPipeline:
     @staticmethod
     def run_phase7_reporting(
         manifest: AnalysisManifest, risk_score: RiskScoreBreakdown, skip_llm: bool = False
-    ) -> Tuple[str, List[str]]:
+    ) -> Tuple[str, List[str], Optional[dict]]:
         """Phase 7: Generate narrative analyst report via GraphRAG (local Ollama).
 
         skip_llm forwards to generate_report() — see its docstring. Default
@@ -795,7 +795,9 @@ class AnalysisPipeline:
         start_time = time.time()
         grounding = None
         try:
-            narrative, limitations = generate_report(manifest, risk_score, skip_llm=skip_llm)
+            narrative, limitations, grounding = generate_report(
+                manifest, risk_score, skip_llm=skip_llm
+            )
         except (RuntimeError, openai.OpenAIError, Exception) as e:
             logger.error(f"[Phase 7] LLM report generation failed: {e}")
             narrative = f"[Report generation unavailable: {e}]"

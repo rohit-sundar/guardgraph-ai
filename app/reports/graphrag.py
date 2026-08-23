@@ -456,7 +456,7 @@ def generate_report(
     manifest: AnalysisManifest,
     risk_score: RiskScoreBreakdown,
     skip_llm: bool = False,
-) -> tuple[str, list[str]]:
+) -> tuple[str, list[str], dict | None]:
     """
     Returns (narrative_report_text, limitations_list, grounding_result).
 
@@ -498,7 +498,9 @@ def generate_report(
         )
 
     if skip_llm:
-        return "[Report generation skipped — bulk population run]", limitations
+        # No narrative means the grounding checks never ran — None, not an empty
+        # pass. See AnalysisReport.grounding.
+        return "[Report generation skipped — bulk population run]", limitations, None
 
     technique_ids = list(manifest.predicted_ttps.keys())
     ontology_context = get_technique_context(technique_ids) if technique_ids else []
