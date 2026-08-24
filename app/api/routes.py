@@ -37,7 +37,9 @@ from app.analysis.signatures import deterministic_family
 from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape, list_recent_samples
 from app.graph.ontology import get_technique_context
 from app.ml.classifier import ttp_classifier
-from app.reports.scoring import compute_risk_score, _band_for, IMPERSONATION_SCORE_FLOOR
+from app.reports.scoring import (
+    compute_risk_score, dynamic_confirmation_floor, _band_for, IMPERSONATION_SCORE_FLOOR,
+)
 from app.core import progress
 from app.core.config import settings
 from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown, SignatureYaraResult
@@ -247,6 +249,7 @@ async def get_analysis(sha256: str):
         verdict_band=_band_for(total_score),
         zero_day_indicator=rc.get("zero_day_indicator", False),
         impersonation_floor_applied=rc.get("impersonation_floor_applied", False),
+        dynamic_confirmation_floor_applied=rc.get("dynamic_confirmation_floor_applied", False),
         weighted_score=rc.get("weighted_score"),
     )
 
@@ -276,6 +279,11 @@ async def get_analysis(sha256: str):
         signature_yara=signature_yara,
         permissions=cached.get("permissions") or [],
         c2_indicators=cached.get("c2_indicators") or [],
+        # Persisted opportunistically whenever a dynamic pass actually ran
+        # (see store_signature's dynamic_verification param) — None for any
+        # record predating this, same honest-gap convention as everything
+        # else on this historical-reconstruction path.
+        dynamic_verification=cached.get("dynamic_verification"),
     )
 
     narrative = cached.get("narrative") or "[No narrative stored for this sample.]"
@@ -304,7 +312,9 @@ async def get_analysis(sha256: str):
     )
 
 
-def _analyze_with_fallback(filepath: str, job_id: str | None = None) -> AnalysisReport:
+def _analyze_with_fallback(
+    filepath: str, job_id: str | None = None, enable_dynamic: bool = False
+) -> AnalysisReport:
     """
     Shared body of both analysis entry points: run the pipeline, and if the APK
     defeats it entirely, fall back to the mid-band "look at this by hand" report
@@ -313,14 +323,14 @@ def _analyze_with_fallback(filepath: str, job_id: str | None = None) -> Analysis
     background thread for the SSE job path; see /analyze/start below).
     """
     try:
-        return _run_analysis(filepath, job_id=job_id)
+        return _run_analysis(filepath, job_id=job_id, enable_dynamic=enable_dynamic)
     except Exception as exc:
         logger.error(f"Unparseable APK fallback triggered: {exc}")
         return _unparseable_report(filepath, exc)
 
 
 @router.post("/analyze", response_model=AnalysisReport)
-async def analyze(file: UploadFile = File(...), skip_report: bool = False):
+async def analyze(file: UploadFile = File(...), skip_report: bool = False, enable_dynamic: bool = False):
     """
     skip_report=true bypasses Phase 7's Ollama call (see generate_report's
     docstring) — the "needed" case app/api/routes.py's original synchronous-
@@ -328,6 +338,11 @@ async def analyze(file: UploadFile = File(...), skip_report: bool = False):
     risk_score write; only the narrative prose is skipped. Default False keeps
     every existing caller (the web UI, curl, /analyze_sample) unaffected —
     this is opt-in for bulk population runs (see populate.py).
+
+    enable_dynamic=true opts into Phase 8 (see dynamic_verification.py) — also
+    gated on settings.dynamic_analysis_enabled, so a deployment with no AVD
+    behind it can't have this accidentally triggered by a request flag alone.
+    Off by default: it needs a booted AVD and adds tens of seconds per run.
     """
     if not file.filename.endswith(".apk"):
         raise HTTPException(400, "Only .apk files are supported in this prototype.")
@@ -339,7 +354,18 @@ async def analyze(file: UploadFile = File(...), skip_report: bool = False):
         await _save_upload_bounded(file, tmp_path)
 
         try:
-            result = _run_analysis(tmp_path, skip_report=skip_report)
+            # Genuinely blocking (APK parsing, CFG construction, LLM calls,
+            # and — worse, when enable_dynamic — an adb/Frida round trip that
+            # can run 30-90+ seconds). Without run_in_threadpool, calling
+            # this directly inside `async def` starves the single asyncio
+            # event loop for the whole duration — confirmed live: the entire
+            # server, including /health, went fully unresponsive during a
+            # dynamic-verification request before this fix. The docstring
+            # above already claimed this happened; the code just never
+            # actually did it.
+            result = await run_in_threadpool(
+                _run_analysis, tmp_path, skip_report=skip_report, enable_dynamic=enable_dynamic
+            )
         except HTTPException:
             raise
         except Exception as exc:
@@ -381,7 +407,9 @@ _JOBS: dict[str, dict] = {}
 _JOBS_LOCK = threading.Lock()
 
 
-def _run_background_job(tmp_dir: str, tmp_path: str, job_id: str) -> None:
+def _run_background_job(
+    tmp_dir: str, tmp_path: str, job_id: str, enable_dynamic: bool = False
+) -> None:
     """
     Runs on a plain threading.Thread (not run_in_threadpool/anyio) because nothing
     here is awaiting the result inside the request that started it — the request
@@ -389,7 +417,7 @@ def _run_background_job(tmp_dir: str, tmp_path: str, job_id: str) -> None:
     request handler will run after this point.
     """
     try:
-        report = _analyze_with_fallback(tmp_path, job_id=job_id)
+        report = _analyze_with_fallback(tmp_path, job_id=job_id, enable_dynamic=enable_dynamic)
         with _JOBS_LOCK:
             _JOBS[job_id] = {"status": "complete", "result": report.model_dump(mode="json")}
         progress.emit_final(job_id, "complete")
@@ -403,7 +431,7 @@ def _run_background_job(tmp_dir: str, tmp_path: str, job_id: str) -> None:
 
 
 @router.post("/analyze/start")
-async def analyze_start(file: UploadFile = File(...)):
+async def analyze_start(file: UploadFile = File(...), enable_dynamic: bool = False):
     if not file.filename.endswith(".apk"):
         raise HTTPException(400, "Only .apk files are supported in this prototype.")
 
@@ -421,7 +449,7 @@ async def analyze_start(file: UploadFile = File(...)):
         _JOBS[job_id] = {"status": "running", "result": None}
 
     threading.Thread(
-        target=_run_background_job, args=(tmp_dir, tmp_path, job_id),
+        target=_run_background_job, args=(tmp_dir, tmp_path, job_id, enable_dynamic),
         name=f"analyze-{job_id[:8]}", daemon=True,
     ).start()
 
@@ -591,7 +619,10 @@ from app.core.pipeline import (
 )
 
 def _run_analysis(
-    filepath: str, skip_report: bool = False, job_id: str | None = None
+    filepath: str,
+    skip_report: bool = False,
+    job_id: str | None = None,
+    enable_dynamic: bool = False,
 ) -> AnalysisReport:
     # --- Hot path: hash, then look up, THEN parse ---
     # Order matters. The cache is keyed on the SHA-256 of the raw bytes, which
@@ -621,7 +652,13 @@ def _run_analysis(
     if cache_hit:
         # Phases 1.5-7 never run on this path — say so once rather than emitting
         # nine individual "skipped" events for the UI to collapse itself.
+        # Dynamic verification (5.7) is the one exception — handled explicitly
+        # below, since it's a runtime property of THIS request, not something
+        # a static-analysis cache hit should silently skip just because the
+        # SHA-256 was seen before.
         for phase, name in progress.PHASES[1:]:
+            if phase == 5.7:
+                continue
             progress.emit(job_id, phase, name, "skipped", "known sample — cache hit")
         # A cache hit means "we already reached a verdict on this SHA-256" —
         # return that verdict, not one recomputed from emptied inputs. A prior
@@ -675,7 +712,12 @@ def _run_analysis(
             total_score=total_score,
             verdict_band=_band_for(total_score),
             zero_day_indicator=rc.get("zero_day_indicator", False),
+            # Recomputed above, not read from the cached record: a brand added to the
+            # reference table after this sample was cached must be able to raise the
+            # verdict on the very next request. Reading rc here would make the fresh
+            # Phase 5.5 run decorative.
             impersonation_floor_applied=floor_applied,
+            dynamic_confirmation_floor_applied=rc.get("dynamic_confirmation_floor_applied", False),
             weighted_score=rc.get("weighted_score"),
         )
 
@@ -695,6 +737,52 @@ def _run_analysis(
 
         # Use cached permissions, falling back to ingestion
         cached_permissions = cached.get("permissions") or ingestion.permissions
+
+        # Dynamic verification, requested explicitly on this request despite
+        # the cache hit. Uses the cached resolved_dcl_targets/native_bridges
+        # as the static predictions to diff against — the full CFG rebuild
+        # the cold path uses to derive those is exactly what the cache hit
+        # exists to avoid, so a record cached before RE-deep-dive persistence
+        # existed diffs against fewer predictions, not zero.
+        #
+        # c2_indicators is the UNION of the cached (complete, cold-path) set
+        # and the fresh ingestion-only set — NOT ingestion-only alone. Phase 1
+        # ingestion only scans APK assets; merge_c2_from_strings (the deeper
+        # CFG-string-literal scan) is Phase 3+, skipped entirely on this fast
+        # path. Confirmed live: a sample whose only C2 indicator came from a
+        # DEX string literal (not an asset) re-ran with ingestion.c2_indicators
+        # alone and silently lost that indicator — the dynamically_confirmed
+        # Neo4j write below then never touched the real relationship at all,
+        # leaving it permanently null no matter how many times you retried.
+        # Reassigning `ingestion` itself (rather than a separately-named
+        # variable) so every downstream use below — the manifest's
+        # c2_indicators field, find_related_samples, and the static
+        # predictions run_phase8_dynamic_verification diffs against —
+        # consistently sees the complete set for free, not just the
+        # store_signature call at the end of this branch.
+        ingestion = ingestion.model_copy(update={
+            "c2_indicators": sorted(set(cached.get("c2_indicators") or []) | set(ingestion.c2_indicators))
+        })
+        dynamic_enabled = enable_dynamic and settings.dynamic_analysis_enabled
+        progress.emit(job_id, 5.7, "Dynamic Verification", "start")
+        dynamic_result = AnalysisPipeline.run_phase8_dynamic_verification(
+            filepath, ingestion, cached.get("resolved_dcl_targets") or [], enabled=dynamic_enabled,
+            resolved_native_targets=cached.get("resolved_native_bridges") or [],
+        )
+        progress.emit(
+            job_id, 5.7, "Dynamic Verification",
+            "done" if dynamic_enabled else "skipped",
+            "" if dynamic_enabled else "dynamic analysis disabled for this run",
+        )
+        if dynamic_enabled:
+            floor = dynamic_confirmation_floor(dynamic_result)
+            if floor > total_score:
+                total_score = floor
+                risk_score = risk_score.model_copy(update={
+                    "total_score": round(total_score, 2),
+                    "verdict_band": _band_for(total_score),
+                    "dynamic_confirmation_floor_applied": True,
+                })
 
         manifest = AnalysisManifest(
             target_package=ingestion.package_name,
@@ -738,6 +826,12 @@ def _run_analysis(
             app_label=ingestion.app_label,
             icon_phash=ingestion.icon_phash,
             impersonation=impersonation,
+            # Fresh if this request explicitly asked for it; otherwise fall
+            # back to whatever was last persisted (see the opportunistic
+            # store_signature call below) rather than always reading None —
+            # a prior dynamic pass on this sample shouldn't vanish just
+            # because THIS particular request didn't re-run it.
+            dynamic_verification=dynamic_result if dynamic_enabled else cached.get("dynamic_verification"),
         )
         narrative = cached.get("narrative", "")
         limitations = cached.get("limitations", [])
@@ -762,6 +856,42 @@ def _run_analysis(
                 "fabrication checks cannot be shown for this record without a "
                 "fresh upload"
             ]
+        if dynamic_enabled:
+            limitations = limitations + [
+                "DYNAMIC VERIFICATION ran fresh for this request (see the Dynamic "
+                "Verification tab and the risk score above, both current), but the "
+                "narrative text below is the cached historical report and does not "
+                "mention these fresh runtime findings — re-upload for a narrative "
+                "that discusses them."
+            ]
+            # Opportunistic persistence: a dynamic pass just ran fresh against
+            # an already-cached sample — without this, that finding is thrown
+            # away the moment this response is sent, and a later historical
+            # lookup (or the next cache hit without enable_dynamic) can never
+            # show it. Re-stores the same static fields already in `cached`
+            # (store_signature MERGEs on sha256, so this doesn't duplicate the
+            # Sample node) purely to attach the fresh dynamic_verification.
+            store_signature(
+                sha256=ingestion.sha256,
+                family=cached.get("family") or "",
+                risk_score=risk_score.total_score,
+                ttps=cached_ttps,
+                narrative=narrative,
+                limitations=limitations,
+                signature_yara_data=cached.get("signature_yara_data"),
+                permissions=cached_permissions,
+                risk_components=risk_score.model_dump(),
+                obfuscation_data=obfuscation.model_dump(),
+                package_name=ingestion.package_name,
+                c2_indicators=ingestion.c2_indicators,
+                cert_thumbprint=ingestion.cert_thumbprint,
+                resolved_crypto_configs=cached.get("resolved_crypto_configs") or [],
+                resolved_dcl_targets=cached.get("resolved_dcl_targets") or [],
+                resolved_webview_bridges=cached.get("resolved_webview_bridges") or [],
+                resolved_native_bridges=cached.get("resolved_native_bridges") or [],
+                grounding=grounding,
+                dynamic_verification=dynamic_result,
+            )
         if not narrative:
             narrative = "[No narrative was generated for this sample.]"
             limitations = limitations + [
@@ -863,6 +993,24 @@ def _run_analysis(
     if signature_family:
         predicted_family, family_confidence = signature_family, None
 
+    # --- Phase 8: Dynamic Verification (opt-in — see dynamic_verification.py) ---
+    # Placed here, before Phase 6, rather than after it: its inputs
+    # (ingestion.c2_indicators, resolved_dcl) are already available, and this
+    # lets its confirmations feed compute_risk_score in one pass — the same
+    # floor pattern impersonation_findings already uses — instead of scoring
+    # twice.
+    dynamic_enabled = enable_dynamic and settings.dynamic_analysis_enabled
+    progress.emit(job_id, 5.7, "Dynamic Verification", "start")
+    dynamic_result = AnalysisPipeline.run_phase8_dynamic_verification(
+        filepath, ingestion, resolved_dcl, enabled=dynamic_enabled,
+        resolved_native_targets=resolved_native,
+    )
+    progress.emit(
+        job_id, 5.7, "Dynamic Verification",
+        "done" if dynamic_enabled else "skipped",
+        "" if dynamic_enabled else "dynamic analysis disabled for this run",
+    )
+
     manifest = AnalysisManifest(
         target_package=ingestion.package_name,
         sha256=ingestion.sha256,
@@ -897,6 +1045,7 @@ def _run_analysis(
         app_label=ingestion.app_label,
         icon_phash=ingestion.icon_phash,
         impersonation=impersonation,
+        dynamic_verification=dynamic_result if dynamic_enabled else None,
     )
 
     # --- Phase 6: Risk Scoring (includes static malware anchors) ---
@@ -907,6 +1056,7 @@ def _run_analysis(
         ingestion=ingestion,
         classifier_evidence_present=classifier_evidence,
         impersonation=impersonation,
+        dynamic_verification=dynamic_result if dynamic_enabled else None,
     )
     progress.emit(job_id, 6, "Risk Scoring", "done")
 
@@ -963,6 +1113,7 @@ def _run_analysis(
             resolved_webview_bridges=resolved_webview,
             resolved_native_bridges=resolved_native,
             grounding=grounding,
+            dynamic_verification=dynamic_result if dynamic_enabled else None,
         )
 
     return AnalysisReport(

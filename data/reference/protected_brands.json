@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "description": "Protected brands for app/analysis/impersonation.py. Each entry names an app that fraudsters clone; the module flags APKs that wear a brand's package name, display name, or icon without being that brand's app.",
-  "status": "15 of 15 brands carry a signing certificate read from a real APK, so the certificate check runs for them; 6 also carry a launcher icon hash. The remainder ship adaptive (XML) icons, which have no pixels to hash \u2014 that is a permanent property of those apps, not work left undone.",
-  "how_to_extend": "Do not hand-write icon_phash or cert_sha256 \u2014 both must come from a genuine APK obtained from the official listing, which is what scripts/build_brand_reference.py does. Adding a brand by package name alone still powers the typosquat and label checks.",
+  "status": "15 of 66 brands carry a signing certificate read from a real APK, so the certificate check runs for them; 6 also carry a launcher icon hash. The remainder are package/label entries verified against a live store listing.",
+  "how_to_extend": "Do not hand-write icon_phash or cert_sha256 — both must come from a genuine APK obtained from the official listing, which is what scripts/build_brand_reference.py does. Adding a brand by package name alone still powers the typosquat and label checks.",
   "warning": "A WRONG package name here creates a false positive on the real app: the genuine bank APK would read as a typosquat of a package that does not exist. Verify each entry against the official store listing before relying on this table in a deployment. SECOND RULE, equally load-bearing: once a brand has ANY cert_sha256 recorded, EVERY package listed under it is certificate-checked against that list, so a package whose own signing key has not been recorded will make the genuine app on it read as a clone. Only list packages you have verified.",
   "brands": [
     {
@@ -162,6 +162,220 @@
       "verified": true
     },
     {
+      "brand": "Roblox",
+      "category": "gaming",
+      "packages": [
+        "com.roblox.client"
+      ],
+      "labels": [
+        "Roblox"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "PNB ONE",
+      "category": "bank",
+      "packages": [
+        "com.Version1"
+      ],
+      "labels": [
+        "PNB ONE"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Union Bank of India",
+      "category": "bank",
+      "packages": [
+        "com.infrasoft.uboi"
+      ],
+      "labels": [
+        "Vyom",
+        "Union Ease"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Canara Bank",
+      "category": "bank",
+      "packages": [
+        "com.canarabank.mobility"
+      ],
+      "labels": [
+        "Canara ai1"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "IDFC FIRST Bank",
+      "category": "bank",
+      "packages": [
+        "com.idfcfirstbank.optimus"
+      ],
+      "labels": [
+        "IDFC FIRST Bank"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "IndusInd Bank",
+      "category": "bank",
+      "packages": [
+        "com.indusind.indie"
+      ],
+      "labels": [
+        "INDIE",
+        "IndusInd Bank"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Federal Bank",
+      "category": "bank",
+      "packages": [
+        "com.fedmobile"
+      ],
+      "labels": [
+        "FedMobile"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "RBL Bank",
+      "category": "bank",
+      "packages": [
+        "com.rblbank.mobank"
+      ],
+      "labels": [
+        "RBL MyBank",
+        "RBL MoBank"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Airtel Thanks",
+      "category": "fintech",
+      "packages": [
+        "com.myairtelapp"
+      ],
+      "labels": [
+        "Airtel Thanks"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "CRED",
+      "category": "fintech",
+      "packages": [
+        "com.dreamplug.androidapp"
+      ],
+      "labels": [
+        "CRED"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Truecaller",
+      "category": "utility",
+      "packages": [
+        "com.truecaller"
+      ],
+      "labels": [
+        "Truecaller"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Instagram",
+      "category": "social",
+      "packages": [
+        "com.instagram.android"
+      ],
+      "labels": [
+        "Instagram"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Facebook",
+      "category": "social",
+      "packages": [
+        "com.facebook.katana"
+      ],
+      "labels": [
+        "Facebook"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Telegram",
+      "category": "messaging",
+      "packages": [
+        "org.telegram.messenger"
+      ],
+      "labels": [
+        "Telegram"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [
+        "49c1522548ebacd46ce322b6fd47f6092bb745d0f88082145caf35e14dcc38e1"
+      ],
+      "verified": true
+    },
+    {
+      "brand": "Google Play Store",
+      "category": "utility",
+      "packages": [
+        "com.android.vending"
+      ],
+      "labels": [
+        "Google Play Store",
+        "Play Store"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Flipkart",
+      "category": "commerce",
+      "packages": [
+        "com.flipkart.android"
+      ],
+      "labels": [
+        "Flipkart"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
       "brand": "WhatsApp",
       "category": "messaging",
       "packages": [
@@ -193,6 +407,35 @@
       "verified": true
     },
     {
+      "brand": "RBI MANI",
+      "category": "government",
+      "packages": [
+        "com.rbi.mani"
+      ],
+      "labels": [
+        "MANI",
+        "RBI MANI"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Indian Bank",
+      "category": "bank",
+      "packages": [
+        "com.IndianBank.IndOASIS",
+        "com.iexceed.ib.digitalbankingprod"
+      ],
+      "labels": [
+        "IndOASIS",
+        "IndSMART"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
       "brand": "Bank of India",
       "category": "bank",
       "packages": [
@@ -205,27 +448,460 @@
         "BOI Omni Neo",
         "Bank of India Digital Rupee"
       ],
+      "icon_phash": "999c66f1c91322cf",
       "cert_sha256": [
         "018672474e1b89cfcef70ffd3f96ef40c2502ec7564213a072b62d7aabb962f9",
         "cccc85792ea739ae3ce0a47014edaae12b9a1b59e45aaec3c2e75ab775d8db94"
       ],
-      "icon_phash": "999c66f1c91322cf",
       "verified": true
     },
     {
-      "brand": "Telegram",
-      "category": "messaging",
+      "brand": "Central Bank of India",
+      "category": "bank",
       "packages": [
-        "org.telegram.messenger"
+        "com.infrasofttech.CentralBank"
       ],
       "labels": [
-        "Telegram"
-      ],
-      "cert_sha256": [
-        "49c1522548ebacd46ce322b6fd47f6092bb745d0f88082145caf35e14dcc38e1"
+        "Cent Mobile"
       ],
       "icon_phash": null,
-      "verified": true
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "UCO Bank",
+      "category": "bank",
+      "packages": [
+        "com.lcode.ucomobilebanking"
+      ],
+      "labels": [
+        "UCO mBanking Plus"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Bank of Maharashtra",
+      "category": "bank",
+      "packages": [
+        "com.kiya.mahaplus"
+      ],
+      "labels": [
+        "Mahamobile Plus"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Punjab & Sind Bank",
+      "category": "bank",
+      "packages": [
+        "com.psb.omniretail"
+      ],
+      "labels": [
+        "PSB UnIC"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "IDBI Bank",
+      "category": "bank",
+      "packages": [
+        "com.snapwork.IDBI"
+      ],
+      "labels": [
+        "IDBI Bank GO Mobile+"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Yes Bank",
+      "category": "bank",
+      "packages": [
+        "in.irisbyyes.app"
+      ],
+      "labels": [
+        "IRIS by YES BANK",
+        "YES BANK"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "India Post Payments Bank",
+      "category": "bank",
+      "packages": [
+        "com.iexceed.appzillon.ippbMB"
+      ],
+      "labels": [
+        "IPPB Mobile Banking"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Yono Lite SBI",
+      "category": "bank",
+      "packages": [
+        "com.sbi.SBIFreedomPlus"
+      ],
+      "labels": [
+        "Yono Lite SBI"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Jio",
+      "category": "utility",
+      "packages": [
+        "com.jio.myjio"
+      ],
+      "labels": [
+        "MyJio"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "LIC",
+      "category": "insurance",
+      "packages": [
+        "com.lic.liccustomer"
+      ],
+      "labels": [
+        "LIC Digital"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "DigiLocker",
+      "category": "government",
+      "packages": [
+        "com.digilocker.android"
+      ],
+      "labels": [
+        "DigiLocker"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "mAadhaar",
+      "category": "government",
+      "packages": [
+        "in.gov.uidai.mAadhaarPlus"
+      ],
+      "labels": [
+        "mAadhaar"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Swiggy",
+      "category": "commerce",
+      "packages": [
+        "in.swiggy.android"
+      ],
+      "labels": [
+        "Swiggy"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Zomato",
+      "category": "commerce",
+      "packages": [
+        "com.application.zomato"
+      ],
+      "labels": [
+        "Zomato"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Ola",
+      "category": "utility",
+      "packages": [
+        "com.olacabs.customer"
+      ],
+      "labels": [
+        "Ola"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Uber",
+      "category": "utility",
+      "packages": [
+        "com.ubercab"
+      ],
+      "labels": [
+        "Uber"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Myntra",
+      "category": "commerce",
+      "packages": [
+        "com.myntra.android"
+      ],
+      "labels": [
+        "Myntra"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Meesho",
+      "category": "commerce",
+      "packages": [
+        "com.meesho.supply"
+      ],
+      "labels": [
+        "Meesho"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Groww",
+      "category": "fintech",
+      "packages": [
+        "com.nextbillion.groww"
+      ],
+      "labels": [
+        "Groww"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Zerodha Kite",
+      "category": "fintech",
+      "packages": [
+        "com.zerodha.kite3"
+      ],
+      "labels": [
+        "Zerodha Kite",
+        "Kite"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Slice",
+      "category": "fintech",
+      "packages": [
+        "indwin.c3.shareapp"
+      ],
+      "labels": [
+        "slice"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Snapdeal",
+      "category": "commerce",
+      "packages": [
+        "com.snapdeal.main"
+      ],
+      "labels": [
+        "Snapdeal"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "SBI Card",
+      "category": "bank",
+      "packages": [
+        "com.ge.capital.konysbiapp"
+      ],
+      "labels": [
+        "SBI Card"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "HDFC PayZapp",
+      "category": "bank",
+      "packages": [
+        "com.hdfcbank.payzapp"
+      ],
+      "labels": [
+        "PayZapp"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Income Tax Department",
+      "category": "government",
+      "packages": [
+        "in.gov.incometaxindia.android",
+        "io.lntinfotech.AIStaxpayer"
+      ],
+      "labels": [
+        "My I-tax",
+        "AIS for Taxpayer"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "UMANG",
+      "category": "government",
+      "packages": [
+        "in.gov.umang.negd.g2c"
+      ],
+      "labels": [
+        "UMANG"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "MobiKwik",
+      "category": "fintech",
+      "packages": [
+        "com.mobikwik_new"
+      ],
+      "labels": [
+        "MobiKwik"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Dhani",
+      "category": "fintech",
+      "packages": [
+        "com.indiaBulls"
+      ],
+      "labels": [
+        "Dhani"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "KreditBee",
+      "category": "fintech",
+      "packages": [
+        "com.kreditbee.android"
+      ],
+      "labels": [
+        "KreditBee"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "BGMI",
+      "category": "gaming",
+      "packages": [
+        "com.pubg.imobile"
+      ],
+      "labels": [
+        "Battlegrounds Mobile India",
+        "BGMI"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Free Fire MAX",
+      "category": "gaming",
+      "packages": [
+        "com.dts.freefiremax"
+      ],
+      "labels": [
+        "Free Fire MAX"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Netflix",
+      "category": "streaming",
+      "packages": [
+        "com.netflix.mediaclient"
+      ],
+      "labels": [
+        "Netflix"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "JioHotstar",
+      "category": "streaming",
+      "packages": [
+        "in.startv.hotstar"
+      ],
+      "labels": [
+        "JioHotstar",
+        "Disney+ Hotstar"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
+    },
+    {
+      "brand": "Spotify",
+      "category": "streaming",
+      "packages": [
+        "com.spotify.music"
+      ],
+      "labels": [
+        "Spotify"
+      ],
+      "icon_phash": null,
+      "cert_sha256": [],
+      "verified": false
     },
     {
       "brand": "Google Fit",

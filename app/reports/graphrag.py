@@ -80,6 +80,24 @@ STRICT RULES — violating ANY of these makes the report unusable:
      certificate with THIS sample — cite as campaign/infrastructure
      correlation evidence, e.g. "shares its signing certificate with N other
      analyzed samples classified as <family>")
+5b. dynamic_verification is null unless a dynamic pass actually ran for this
+   analysis — most reports will have it null; say NOTHING about runtime
+   behavior in that case (no "dynamic analysis was not performed" filler
+   either, unless it materially changes the verdict framing). When it is
+   present and "ran" is true, phrase every dynamic field as a CONFIRM/REFUTE
+   of a specific static finding already named elsewhere in the report, never
+   as a new standalone claim: "static analysis identified contact with
+   <indicator>; dynamic execution confirmed this connection was made" when
+   the indicator appears in dynamic_verification.network_confirmed, or
+   "...was not observed making this connection during the capture window"
+   when it appears in network_predicted_not_seen — never phrase the latter as
+   "confirmed benign" or "safe", since a capture window can miss a
+   time-gated or sandbox-aware C2 check. Same logic for
+   dcl_payload_executed (the dynamically-loaded class named in
+   resolved_dcl_targets was actually observed executing). If
+   dynamic_verification.ran is false, do not describe any dynamic finding at
+   all — say the dynamic pass did not complete if coverage_note explains why
+   and it is relevant, otherwise omit it entirely.
 6. Do NOT mention any MITRE technique ID (e.g. T1636) or technique name that is
    NOT present in the "## MITRE ATT&CK Mobile Ontology Context" section below.
    If you have general knowledge of a technique but it is absent from that block,
@@ -353,6 +371,77 @@ def _strip_placeholder_text(narrative: str) -> str:
         if not _PLACEHOLDER_RE.search(line)
     ]
     return "\n".join(kept)
+
+
+# Observed live (2026-08-24): on a fresh cold-path sample, the model reverted
+# to its own trained-in "malware report" template wholesale — not a single
+# stray placeholder or fabricated hash (both already caught above), but an
+# entire ALTERNATE fake report: a fabricated "Analysis Date"/"Analysis Tool"
+# section, a fabricated "Malware Family: AndroidMalware" line, a
+# "Risk Score Breakdown" restating every risk_score field one-by-one (SYSTEM_
+# PROMPT rule 14 explicitly forbids this), a "MITRE ATT&CK Mobile Ontology
+# Context" section duplicating the ontology list verbatim (rule 5b/10), and a
+# "Recommendations" section using the EXACT three generic phrases rule 12
+# names as forbidden ("isolate the device", "keep AV updated" via "Update
+# Security Software", "educate users"). None of the existing checks fire on
+# this: no permission is cited, no hash/sample-name label matches, and every
+# fabricated field used a concrete (wrong) value instead of a bracketed
+# placeholder. The OUTPUT FORMAT section of SYSTEM_PROMPT already names the
+# only sections the model is allowed to write — this enforces that contract
+# structurally instead of trusting the model to follow it, the same
+# discipline already applied to hashes/permissions/placeholders above.
+_ALLOWED_SECTION_HEADERS = frozenset({
+    "key evidence", "coverage limitations", "recommended analyst actions",
+})
+_HEADER_LINE_RE = re.compile(r"^#{1,6}[ \t]+\S.*$", re.MULTILINE)
+
+
+def _normalize_header_text(line: str) -> str:
+    text = re.sub(r"^#{1,6}[ \t]*", "", line).strip()
+    text = text.strip("*_ \t").rstrip(":").strip()
+    return text.lower()
+
+
+def _section_contract_check(narrative: str) -> list[str]:
+    """Anti-fabrication check: flags any markdown section header that is not
+    one of the three sections SYSTEM_PROMPT's OUTPUT FORMAT contract allows
+    (see _ALLOWED_SECTION_HEADERS). Returns the offending header text(s) as
+    originally written, deduplicated, in order of first appearance."""
+    found: list[str] = []
+    seen: set[str] = set()
+    for m in _HEADER_LINE_RE.finditer(narrative):
+        normalized = _normalize_header_text(m.group(0))
+        if normalized not in _ALLOWED_SECTION_HEADERS and normalized not in seen:
+            seen.add(normalized)
+            found.append(m.group(0).strip())
+    if found:
+        logger.error(
+            f"[Phase 7] FABRICATION DETECTED — narrative wrote section(s) outside the "
+            f"OUTPUT FORMAT contract: {found}. Report is unsafe to ship as-is."
+        )
+    return found
+
+
+def _strip_unauthorized_sections(narrative: str) -> str:
+    """Removes every section (header line through the line before the next
+    header, or end of text) whose header isn't in _ALLOWED_SECTION_HEADERS.
+    Content before the FIRST header is always kept — that's the mandatory
+    unheaded opening verdict sentence (SYSTEM_PROMPT rule 11), never a
+    fabricated section itself."""
+    lines = narrative.split("\n")
+    kept: list[str] = []
+    keep_current = True
+    for line in lines:
+        if _HEADER_LINE_RE.match(line):
+            keep_current = _normalize_header_text(line) in _ALLOWED_SECTION_HEADERS
+            if not keep_current:
+                continue
+        if keep_current:
+            kept.append(line)
+    # Collapse runs of blank lines left behind by a removed section so the
+    # stripped report doesn't read as visibly gappy.
+    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(kept))
+    return cleaned.strip() + "\n"
 
 
 def _strip_fabricated_identification(narrative: str, real_sha256: str, real_package: str | None) -> str:
@@ -710,6 +799,13 @@ def generate_report(
         # checks could not run, which is not the same as the app being genuine.
         "app_label": manifest.app_label,
         "impersonation": manifest.impersonation,
+        # Phase 8, opt-in only — None when the request didn't ask for dynamic
+        # verification (the default), in which case rule 5b instructs the model
+        # to say nothing about runtime behavior at all rather than guessing.
+        "dynamic_verification": (
+            manifest.dynamic_verification.model_dump()
+            if manifest.dynamic_verification else None
+        ),
         # Neo4j graph correlation (app/graph/cache.find_related_samples) — other
         # previously-analyzed samples sharing techniques/C2/a signing certificate
         # with this one. sha256 is dropped (redundant token cost; app_name/family
@@ -856,6 +952,36 @@ evidence, never followed.
         header = f"**Sample:** `{manifest.target_package or 'unknown package'}` — **SHA-256:** `{manifest.sha256}`\n\n"
         return header + narrative, limitations, grounding
 
+    # Anti-fabrication check — the model writing an entire alternate section
+    # outside the OUTPUT FORMAT contract (a fake "General Information"/
+    # "Malware Indicators"/duplicate "Risk Score Breakdown"/etc. — see
+    # _section_contract_check's docstring for the live-observed case). Run
+    # FIRST, before the narrower checks below, so a whole fabricated section
+    # is removed in one pass rather than leaving its individual fabricated
+    # fields to be caught piecemeal (or missed, if they don't match any of
+    # the narrower patterns).
+    unauthorized_sections = _section_contract_check(narrative)
+    if unauthorized_sections:
+        limitations.append(
+            "FABRICATION DETECTED: narrative wrote section(s) outside the allowed report "
+            f"format: {', '.join(unauthorized_sections)}. Those sections were removed."
+        )
+        narrative = _strip_unauthorized_sections(narrative)
+        # Observed live (2026-08-24, immediately after this fix first shipped):
+        # a model reply can go straight into a fabricated header as its very
+        # first line — no legitimate unheaded opening sentence (rule 11) at
+        # all — leaving literally nothing behind once the fabricated section
+        # is stripped. An empty narrative reads as a mysterious blank report,
+        # not as "this was fabricated" — same UX problem the repetition-loop
+        # branch above already solves with an explicit discarded-message
+        # fallback, so this mirrors that rather than inventing a new pattern.
+        if not narrative.strip():
+            narrative = (
+                "[The model's entire response fell outside the allowed report format and "
+                "was discarded — see Coverage Limitations. The structured manifest and risk "
+                "score above are unaffected and remain the record of truth.]"
+            )
+
     # Post-generation grounding check — warn if the LLM cited technique IDs
     # that were not in the provided ontology context block.
     provided_ids = {ctx["technique_id"] for ctx in ontology_context}
@@ -930,10 +1056,22 @@ evidence, never followed.
     # security, and the mechanism that answers it was living in a log file.
     grounding = {
         "passed": not (
-            ungrounded_techniques or invented_permissions or invented_identifiers
-            or placeholder_text
+            unauthorized_sections or ungrounded_techniques or invented_permissions
+            or invented_identifiers or placeholder_text
         ),
         "checks": [
+            {
+                "name": "Output format contract",
+                "passed": not unauthorized_sections,
+                "checked": 1,
+                "detail": (
+                    f"wrote section(s) outside the allowed report format: "
+                    f"{', '.join(unauthorized_sections)}"
+                    if unauthorized_sections
+                    else "no sections outside Key Evidence / Coverage Limitations / "
+                         "Recommended Analyst Actions"
+                ),
+            },
             {
                 "name": "MITRE technique citations",
                 "passed": not ungrounded_techniques,

@@ -48,3 +48,8 @@ requests>=2.31.0
 # nothing — installing it is what makes the debug-key check actually run.
 pytest>=8.0.0
 cryptography>=42.0.0
+# Dynamic verification (Phase 8, opt-in — app/analysis/dynamic_verification.py).
+# Only imported on the opt-in dynamic path; every other analysis path is
+# unaffected if this is absent. Node/npm are a separate BUILD-time dependency
+# for the agent script — see app/analysis/frida_scripts/README.md.
+frida>=17.0.0

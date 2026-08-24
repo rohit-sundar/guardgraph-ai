@@ -406,6 +406,12 @@ body {
   gap: 0.65rem 0.4rem;
 }
 
+.pipeline-steps-11 {
+  grid-template-columns: repeat(6, 1fr);
+  grid-template-rows: repeat(2, auto);
+  gap: 0.65rem 0.4rem;
+}
+
 .step-item {
   display: flex;
   flex-direction: column;
@@ -981,6 +987,31 @@ body {
   border-left: 3px solid var(--primary);
   font-size: 0.85rem;
   color: var(--text-muted);
+}
+
+.limitations-card {
+  margin-top: 1.5rem;
+}
+
+.limitations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.limitation-item {
+  padding: 0.75rem 1rem;
+  background: rgba(234, 179, 8, 0.06);
+  border-radius: 8px;
+  border-left: 3px solid #eab308;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.limitation-item.historical-record {
+  background: rgba(59, 130, 246, 0.06);
+  border-left-color: var(--primary);
 }
 
 /* Reverse Engineering Findings tab */

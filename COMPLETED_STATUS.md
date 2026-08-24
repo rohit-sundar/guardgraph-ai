@@ -2,11 +2,14 @@
 
 This document provides a comprehensive summary of the current architecture, implementation status, and recent changes in **GuardGraph AI** for LLMs (like Claude) picking up work on this codebase.
 
-> **This file predates 2026-08-22.** For the reverse-engineering deep dive (reflection/crypto/DCL/
-> WebView/native resolution), manifest/ZIP anti-analysis resilience, Neo4j graph correlation (MITRE
-> mapping / correlated samples / certificate reuse / live Threat Landscape view), and GraphRAG
-> anti-fabrication hardening added since — including what does and doesn't actually work, verified
-> live — see **`TEAM_CONTEXT.md`'s "Session 12"** entry, the current source of truth.
+> **This file predates 2026-08-22** and its "static-analysis-only" framing (Section 1) is now out of
+> date. For the reverse-engineering deep dive (reflection/crypto/DCL/WebView/native resolution),
+> manifest/ZIP anti-analysis resilience, Neo4j graph correlation (MITRE mapping / correlated samples /
+> certificate reuse / live Threat Landscape view), GraphRAG anti-fabrication hardening, several small
+> committed fixes, and — as of 2026-08-24 — a full opt-in **dynamic analysis** pass (Android emulator +
+> Frida, confirming/refuting static predictions at runtime) — see **`TEAM_CONTEXT.md`'s "Session 12",
+> "Session 13", and "Session 14"** entries, in that order, the current source of truth. Session 14's
+> work is uncommitted on this machine as of this writing — check `git status`.
 
 ---
 

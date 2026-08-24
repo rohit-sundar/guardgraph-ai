@@ -20,6 +20,11 @@ def _log_filter(record: dict) -> bool:
 
 logger.remove()
 logger.add(sys.stderr, filter=_log_filter, level="DEBUG")
+# Also to a file — the terminal running uvicorn is the only place these lines
+# otherwise exist, which made a live Phase 8 (dynamic verification) result
+# unrecoverable after the fact when debugging a specific request. Rotated so
+# a long-running dev server doesn't grow this unbounded.
+logger.add("logs/guardgraph.log", filter=_log_filter, level="DEBUG", rotation="20 MB", retention=3)
 
 import os
 import threading
