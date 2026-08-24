@@ -55,6 +55,65 @@ def test_ttp_feature_vector_length():
     print(f"OK: TTP feature vector length {len(populated)} matches TTP_FEATURE_NAMES ({len(TTP_FEATURE_NAMES)})")
 
 
+def test_ttp_label_space_is_57():
+    """
+    The label space is the third length invariant, and the only one not asserted
+    until now (35 and 181 both are).
+
+    It matters for the same reason as the other two: TTP_LABELS is what the
+    multi-label model's output columns are read against, so adding or removing a
+    technique silently re-indexes every prediction. It is also the denominator the
+    README and the model-accuracy panel both quote ("34 of 57 trained, 23 dropped"),
+    so a change here falsifies published numbers as well as predictions.
+    """
+    from app.ml.labels import TTP_LABELS
+
+    assert len(TTP_LABELS) == 57, (
+        f"TTP label space changed: {len(TTP_LABELS)} != 57. If this is intentional, "
+        "retrain (scripts/train_model.py --target ttp) and update the 'of 57' figures "
+        "in README.md — they are not derived at runtime."
+    )
+    assert len(set(TTP_LABELS)) == len(TTP_LABELS), "duplicate technique IDs in TTP_LABELS"
+    print(f"OK: TTP label space is {len(TTP_LABELS)} techniques")
+
+
+def test_shipped_metrics_partition_the_label_space():
+    """
+    The shipped model's trained + dropped labels must together be exactly TTP_LABELS.
+
+    This is the D1 failure mode applied to labels rather than features: an artifact
+    that disagrees with the code's label list produces confident, wrongly-indexed
+    output with no error. Skipped rather than failed when the metrics file is absent,
+    since a fresh clone has no trained artifact yet.
+    """
+    import json
+    import os
+
+    from app.ml.labels import TTP_LABELS
+
+    path = os.path.join(os.path.dirname(__file__), "..", "data", "models", "ttp_metrics.json")
+    if not os.path.exists(path):
+        print("SKIP: no ttp_metrics.json — nothing trained yet")
+        return
+
+    with open(path, encoding="utf-8") as fh:
+        metrics = json.load(fh)
+
+    trained = set(metrics.get("trained_labels") or [])
+    dropped = set(metrics.get("dropped_labels") or [])
+
+    assert not (trained & dropped), f"labels both trained and dropped: {sorted(trained & dropped)}"
+
+    covered = trained | dropped
+    expected = set(TTP_LABELS)
+    assert covered == expected, (
+        f"shipped metrics do not partition TTP_LABELS — "
+        f"missing from artifact: {sorted(expected - covered)}, "
+        f"unknown to the code: {sorted(covered - expected)}"
+    )
+    print(f"OK: {len(trained)} trained + {len(dropped)} dropped == {len(expected)} TTP_LABELS")
+
+
 def test_behavior_features_cover_the_forensic_dictionary():
     """
     Every behavior Phase 3 can match must reach the feature vectors.

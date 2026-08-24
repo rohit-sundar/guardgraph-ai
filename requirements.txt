@@ -8,10 +8,13 @@ numpy>=1.26.4
 scikit-learn==1.5.2
 neo4j==5.24.0
 openai>=1.35.0
-pydantic
-pydantic-settings
+pydantic>=2.13.4
+pydantic-settings>=2.14.2
 python-dotenv==1.0.1
-pandas
+# Pinned, not floating: the TTP bundle in data/models/ is a joblib pickle carrying
+# scikit-learn estimators, and loading one across a pandas/sklearn major version is
+# not guaranteed. These are the versions the shipped artifact was trained under.
+pandas==3.0.3
 yara-python>=4.5.0
 loguru>=0.7.2
 iterative-stratification>=0.1.7
@@ -20,3 +23,28 @@ pyelftools>=0.31
 # Launcher-icon decoding for brand-impersonation detection
 # (app/analysis/impersonation.py). Was only present transitively before N11.
 Pillow>=10.0.0
+
+# ── Declared because they are load-bearing, not because pip needs telling ──────
+# All three below already arrive transitively today, which is exactly the problem:
+# a resolver change upstream removes them silently and the failure is quiet, not loud.
+#
+# asn1crypto — certificate anomaly analysis (app/analysis/apk_static.py). Arrives via
+# androguard. If it is absent, ASN1_AVAILABLE is False and analyze_certificate_anomalies
+# returns [] for every APK: cert_anomalies empties, ioc_component loses its cert term,
+# and nothing reports an error. A scoring input disappears silently.
+asn1crypto>=1.5.1
+# joblib — loads data/models/guardgraph_ttp_br_v1.joblib, i.e. the primary TTP model
+# (app/ml/classifier.py). Arrives via scikit-learn.
+joblib>=1.5.3
+# requests — populate.py and scripts/refresh_stale_samples.py. Neither runs without it,
+# and it has never been declared.
+requests>=2.31.0
+
+# ── Test-only ─────────────────────────────────────────────────────────────────
+# pytest runs the suite. cryptography is used by tests/test_apk_static.py *only*, to
+# generate a debug-signed DER fixture; the app itself parses certificates with
+# asn1crypto and never imports cryptography. Note that the test soft-returns on
+# ImportError, so while cryptography is absent that test reports green having asserted
+# nothing — installing it is what makes the debug-key check actually run.
+pytest>=8.0.0
+cryptography>=42.0.0
