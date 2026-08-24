@@ -93,7 +93,12 @@ class TestStoreSigAlwaysCalledAfterColdPath(unittest.TestCase):
         # Pydantic validates signature_yara strictly — pass a real schema instance.
         real_sig_yara = SignatureYaraResult()
 
+        # _run_analysis hashes the file before deciding whether to parse it,
+        # so the hash is its own dependency now, not something the mocked
+        # pipeline supplies. The value does not matter (lookup_signature is
+        # patched) but the read is real, and /fake/test.apk does not exist.
         with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.compute_sha256", return_value="dd" * 32), \
              patch("app.api.routes.lookup_signature", return_value=None), \
              patch("app.api.routes.store_signature") as mock_store, \
              patch("app.api.routes.compute_risk_score", return_value=mock_risk):

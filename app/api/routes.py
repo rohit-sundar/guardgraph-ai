@@ -32,11 +32,12 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
+from app.analysis.ingest import compute_sha256
 from app.analysis.signatures import deterministic_family
 from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape, list_recent_samples
 from app.graph.ontology import get_technique_context
 from app.ml.classifier import ttp_classifier
-from app.reports.scoring import compute_risk_score, _band_for
+from app.reports.scoring import compute_risk_score, _band_for, IMPERSONATION_SCORE_FLOOR
 from app.core import progress
 from app.core.config import settings
 from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown, SignatureYaraResult
@@ -500,7 +501,6 @@ def _unparseable_report(filepath: str, exc: BaseException, skip_report: bool = F
     parse failure is a property of this analyzer, not a verdict worth replaying on
     the hot path after the underlying cause is fixed.
     """
-    from app.analysis.ingest import compute_sha256
     from app.analysis.failure_diagnostics import probable_cause
 
     try:
@@ -593,16 +593,30 @@ from app.core.pipeline import (
 def _run_analysis(
     filepath: str, skip_report: bool = False, job_id: str | None = None
 ) -> AnalysisReport:
+    # --- Hot path: hash, then look up, THEN parse ---
+    # Order matters. The cache is keyed on the SHA-256 of the raw bytes, which
+    # needs no parsing at all, but the lookup used to sit behind a full Androguard
+    # pass — so a "known sample, answered from cache" response still paid the
+    # entire cost of analysing it. Measured on a 7.5 MB APK: the DEX
+    # cross-reference build is 13.42s of a 13.6s ingestion, against 0.013s to hash
+    # and 0.006s to query Neo4j against a warm driver.
+    #
+    # A hit still parses the manifest (~0.12s, no DEX pass — see ingest_apk's
+    # skip_dex_analysis) rather than answering from the record alone. That is
+    # deliberate: the impersonation check below re-runs on every hit so an updated
+    # brand table applies to already-cached samples without re-analysis, and it
+    # needs the app label, launcher icon hash and signing certificate, none of
+    # which the cached record carries.
+    sha256 = compute_sha256(filepath)
+    cached = lookup_signature(sha256)
+    cache_hit = cached is not None
+
     # --- Phase 1: Ingestion & Metadata (+ Android malware static enrichments) ---
     progress.emit(job_id, 1, "APK Ingestion", "start")
     ingestion, apk_obj, dvm, analysis_obj, yara_targets = (
-        AnalysisPipeline.run_phase1_ingestion(filepath)
+        AnalysisPipeline.run_phase1_ingestion(filepath, skip_dex_analysis=cache_hit)
     )
     progress.emit(job_id, 1, "APK Ingestion", "done")
-
-    # --- Hot path: cache lookup ---
-    cached = lookup_signature(ingestion.sha256)
-    cache_hit = cached is not None
 
     if cache_hit:
         # Phases 1.5-7 never run on this path — say so once rather than emitting
@@ -620,8 +634,36 @@ def _run_analysis(
         cached_ttps = cached.get("ttps") or {}
         total_score = cached_score if cached_score is not None else 0.0
 
-        # Reconstruct risk score — use cached component breakdown if available
+        # Free on a cache hit: derives from nothing but the Phase 1 ingestion that
+        # already re-runs on every request (cert_anomalies/permission_matrix_flags/etc.
+        # below are the same pattern). Running this fresh rather than caching it means
+        # an update to the protected-brand reference table takes effect on the very
+        # next request for an already-cached sample, instead of waiting for someone to
+        # re-upload it.
+        impersonation = AnalysisPipeline.run_phase5b_impersonation(ingestion)
+
+        # Computed before the score, because the floor has to be re-applied here too.
+        # Running the check fresh but scoring from the cached components meant a newly
+        # added brand produced a finding in the App Identity tab while the verdict
+        # underneath it still read whatever was cached — the tab said "impersonates
+        # Bank of India" next to a `medium`. The floor is the whole mechanism by which
+        # impersonation reaches a verdict, so re-running the check without re-applying
+        # it makes the fresh run decorative.
+        #
+        # It can only ever raise the cached score, never lower it: a floor that is
+        # already below the cached total changes nothing.
         rc = cached.get("risk_components") or {}
+        impersonation_floor = 0.0
+        for finding in (impersonation or {}).get("findings") or []:
+            impersonation_floor = max(
+                impersonation_floor,
+                IMPERSONATION_SCORE_FLOOR.get(finding.get("kind", ""), 0.0),
+            )
+        floor_applied = rc.get("impersonation_floor_applied", False)
+        if impersonation_floor > total_score:
+            total_score = impersonation_floor
+            floor_applied = True
+
         risk_score = RiskScoreBreakdown(
             classifier_confidence_component=rc.get("classifier_confidence_component"),
             permission_api_component=rc.get("permission_api_component"),
@@ -633,7 +675,7 @@ def _run_analysis(
             total_score=total_score,
             verdict_band=_band_for(total_score),
             zero_day_indicator=rc.get("zero_day_indicator", False),
-            impersonation_floor_applied=rc.get("impersonation_floor_applied", False),
+            impersonation_floor_applied=floor_applied,
             weighted_score=rc.get("weighted_score"),
         )
 
@@ -653,14 +695,6 @@ def _run_analysis(
 
         # Use cached permissions, falling back to ingestion
         cached_permissions = cached.get("permissions") or ingestion.permissions
-
-        # Free on a cache hit: both derive from nothing but the Phase 1 ingestion
-        # that already re-runs on every request (cert_anomalies/permission_matrix_
-        # flags/etc. below are the same pattern). Running this fresh rather than
-        # caching it also means an update to the protected-brand reference table
-        # takes effect on the very next request for an already-cached sample,
-        # instead of waiting for someone to re-upload it.
-        impersonation = AnalysisPipeline.run_phase5b_impersonation(ingestion)
 
         manifest = AnalysisManifest(
             target_package=ingestion.package_name,

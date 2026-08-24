@@ -248,12 +248,20 @@ def _select_topology_subgraphs(
 class AnalysisPipeline:
     @staticmethod
     def run_phase1_ingestion(
-        filepath: str,
+        filepath: str, skip_dex_analysis: bool = False
     ) -> Tuple[IngestionResult, Any, Any, Any, List[Tuple[str, bytes]]]:
-        """Phase 1: Hashing, cert, structure, and Android malware static enrichments."""
+        """
+        Phase 1: Hashing, cert, structure, and Android malware static enrichments.
+
+        `skip_dex_analysis` is for the hot path only — see ingest_apk. It returns
+        no DalvikVMFormat/Analysis object, so a caller that goes on to build a CFG
+        must not use it.
+        """
         logger.info("[Phase 1] Starting Ingestion & Metadata Extraction...")
         start_time = time.time()
-        ingestion, apk_obj, dvm, analysis_obj, yara_targets = ingest_apk(filepath)
+        ingestion, apk_obj, dvm, analysis_obj, yara_targets = ingest_apk(
+            filepath, skip_dex_analysis=skip_dex_analysis
+        )
         duration = time.time() - start_time
         logger.info(
             f"[Phase 1] Completed in {duration:.3f}s. Package: {ingestion.package_name} | "

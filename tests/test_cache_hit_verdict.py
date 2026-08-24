@@ -30,7 +30,12 @@ class TestCacheHitPreservesVerdict(unittest.TestCase):
             sha256="dd" * 32, package_name="com.nexus.pay", permissions=[]
         )
 
+        # _run_analysis hashes the file before deciding whether to parse it,
+        # so the hash is its own dependency now, not something the mocked
+        # pipeline supplies. The value does not matter (lookup_signature is
+        # patched) but the read is real, and /fake/test.apk does not exist.
         with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.compute_sha256", return_value="dd" * 32), \
              patch("app.api.routes.lookup_signature", return_value=cached_row):
             mp.run_phase1_ingestion.return_value = (
                 ingestion, MagicMock(), MagicMock(), MagicMock(), MagicMock()
@@ -151,7 +156,12 @@ class TestColdAndHotPathAgreeOnFamily(unittest.TestCase):
             total_score=70.0, verdict_band="high", zero_day_indicator=False
         )
 
+        # _run_analysis hashes the file before deciding whether to parse it,
+        # so the hash is its own dependency now, not something the mocked
+        # pipeline supplies. The value does not matter (lookup_signature is
+        # patched) but the read is real, and /fake/test.apk does not exist.
         with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.compute_sha256", return_value="dd" * 32), \
              patch("app.api.routes.lookup_signature", return_value=None), \
              patch("app.api.routes.find_related_samples", return_value=[]), \
              patch("app.api.routes._build_ttp_context", return_value=[]), \
@@ -250,7 +260,12 @@ class TestSkippedReportDoesNotPoisonTheCache(unittest.TestCase):
         )
         placeholder = "[Report generation skipped — bulk population run]"
 
+        # _run_analysis hashes the file before deciding whether to parse it,
+        # so the hash is its own dependency now, not something the mocked
+        # pipeline supplies. The value does not matter (lookup_signature is
+        # patched) but the read is real, and /fake/test.apk does not exist.
         with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.compute_sha256", return_value="dd" * 32), \
              patch("app.api.routes.lookup_signature", return_value=None), \
              patch("app.api.routes.find_related_samples", return_value=[]), \
              patch("app.api.routes._build_ttp_context", return_value=[]), \
@@ -303,7 +318,12 @@ class TestSkippedReportDoesNotPoisonTheCache(unittest.TestCase):
             "narrative": "", "limitations": [], "ttps": {},
             "resolved_crypto_configs": [],
         }
+        # _run_analysis hashes the file before deciding whether to parse it,
+        # so the hash is its own dependency now, not something the mocked
+        # pipeline supplies. The value does not matter (lookup_signature is
+        # patched) but the read is real, and /fake/test.apk does not exist.
         with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.compute_sha256", return_value="dd" * 32), \
              patch("app.api.routes.lookup_signature", return_value=cached_row):
             from app.core.schemas import IngestionResult
             mp.run_phase1_ingestion.return_value = (
@@ -330,7 +350,12 @@ class TestSkippedReportDoesNotPoisonTheCache(unittest.TestCase):
             "narrative": "An older narrative with no stored grounding.",
             "limitations": [], "ttps": {}, "resolved_crypto_configs": [],
         }
+        # _run_analysis hashes the file before deciding whether to parse it,
+        # so the hash is its own dependency now, not something the mocked
+        # pipeline supplies. The value does not matter (lookup_signature is
+        # patched) but the read is real, and /fake/test.apk does not exist.
         with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.compute_sha256", return_value="dd" * 32), \
              patch("app.api.routes.lookup_signature", return_value=cached_row):
             from app.core.schemas import IngestionResult
             mp.run_phase1_ingestion.return_value = (
@@ -440,7 +465,12 @@ class TestCacheHitCompletenessSecondPass(unittest.TestCase):
                 app_label="Nexus Pay", icon_phash="abc123",
             )
 
+        # _run_analysis hashes the file before deciding whether to parse it,
+        # so the hash is its own dependency now, not something the mocked
+        # pipeline supplies. The value does not matter (lookup_signature is
+        # patched) but the read is real, and /fake/test.apk does not exist.
         with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.compute_sha256", return_value="dd" * 32), \
              patch("app.api.routes.lookup_signature", return_value=cached_row):
             mp.run_phase1_ingestion.return_value = (
                 ingestion, MagicMock(), MagicMock(), MagicMock(), MagicMock()
@@ -521,5 +551,241 @@ class TestCacheHitCompletenessSecondPass(unittest.TestCase):
         self.assertNotIn("predates grounding-check persistence", joined)
 
 
+class TestHotPathDoesNotPayForTheParseItDiscards(unittest.TestCase):
+    """
+    The cache is keyed on the SHA-256 of the raw bytes, but the lookup used to sit
+    BEHIND a full Androguard pass — so answering "known sample, here is the stored
+    verdict" still paid the entire cost of analysing it. Measured on a 7.5 MB APK:
+    AnalyzeAPK 13.42s of a 13.6s ingestion, against 0.013s to hash and 0.006s to
+    query Neo4j warm.
+
+    Two things have to stay true for that to keep working, and neither is visible
+    in a response body — which is why they are asserted on the call itself.
+    """
+
+    def _run(self, cached_row):
+        from app.core.schemas import IngestionResult
+        ingestion = IngestionResult(sha256="dd" * 32, package_name="com.x", permissions=[])
+
+        with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.compute_sha256", return_value="ab" * 32) as mock_hash, \
+             patch("app.api.routes.lookup_signature", return_value=cached_row) as mock_lookup, \
+             patch("app.api.routes.store_signature"):
+            mp.run_phase1_ingestion.return_value = (
+                ingestion, MagicMock(), MagicMock(), MagicMock(), []
+            )
+            mp.run_phase5b_impersonation.return_value = {
+                "findings": [], "coverage": [], "brands_checked": 0, "max_severity": 0.0,
+            }
+            from app.api.routes import _run_analysis
+            try:
+                _run_analysis("/fake/test.apk", skip_report=True)
+            except Exception:
+                # A cache MISS runs the rest of the cold path against mocks and may
+                # fail further down; irrelevant here — the assertions below are about
+                # what happened before that point.
+                pass
+            return mock_hash, mock_lookup, mp
+
+    def test_the_cache_is_queried_with_the_raw_hash_before_anything_is_parsed(self):
+        """
+        The lookup must use the independently computed hash, not
+        ingestion.sha256 — reading it off the ingestion result is what forced the
+        parse to happen first. The two are deliberately different values here so
+        the wrong source cannot pass by coincidence.
+        """
+        mock_hash, mock_lookup, mp = self._run({"sha256": "ab" * 32, "base_score": 70.0,
+                                                "narrative": "n", "ttps": {}})
+        mock_hash.assert_called_once_with("/fake/test.apk")
+        mock_lookup.assert_called_once_with("ab" * 32)
+
+    def test_a_cache_hit_skips_the_dex_analysis_pass(self):
+        _, _, mp = self._run({"sha256": "ab" * 32, "base_score": 70.0,
+                              "narrative": "n", "ttps": {}})
+        _, kwargs = mp.run_phase1_ingestion.call_args
+        self.assertTrue(kwargs["skip_dex_analysis"],
+                        "hot path rebuilt the DEX cross-reference graph it never reads")
+
+    def test_a_cache_miss_still_runs_the_full_pass(self):
+        """
+        The other half of the guard. The cold path builds CFGs from the Analysis
+        object, so skipping it there would not be an optimisation — it would
+        silently produce an analysis with no graph in it.
+        """
+        _, _, mp = self._run(None)
+        _, kwargs = mp.run_phase1_ingestion.call_args
+        self.assertFalse(kwargs["skip_dex_analysis"])
+
+
+class TestManifestOnlyIngestionKeepsWhatTheHotPathReads(unittest.TestCase):
+    """
+    Parity check against a real APK, because the hot path's correctness now
+    depends on skip_dex_analysis populating everything except the DEX method
+    count. In particular it must still recover app_label, icon_phash and
+    cert_thumbprint: the impersonation check re-runs on every cache hit so an
+    updated brand table applies to already-cached samples, and it reads exactly
+    those three fields.
+    """
+
+    APK = os.path.join(os.path.dirname(__file__), "..", "guardgraph_test", "guardgraph_test.apk")
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(cls.APK):
+            raise unittest.SkipTest(f"test APK not present at {cls.APK}")
+        from app.analysis.ingest import ingest_apk
+        cls.fast, _, cls.fast_dvm, cls.fast_analysis, _ = ingest_apk(
+            cls.APK, skip_dex_analysis=True
+        )
+        cls.full, _, _, _, _ = ingest_apk(cls.APK)
+
+    def test_no_dex_objects_are_built(self):
+        self.assertIsNone(self.fast_dvm)
+        self.assertIsNone(self.fast_analysis)
+
+    def test_identity_fields_the_impersonation_check_needs_survive(self):
+        for field in ("sha256", "package_name", "app_label", "icon_phash", "cert_thumbprint"):
+            self.assertEqual(getattr(self.fast, field), getattr(self.full, field),
+                             f"{field} differs without the DEX pass")
+
+    def test_manifest_and_payload_fields_survive(self):
+        for field in ("permissions", "activities", "services", "receivers",
+                      "intent_actions", "c2_indicators", "cert_anomalies",
+                      "permission_matrix_flags", "secondary_dex_count",
+                      "accessibility_flags", "payload_assets", "dropper_signals"):
+            self.assertEqual(getattr(self.fast, field), getattr(self.full, field),
+                             f"{field} differs without the DEX pass")
+
+    def test_the_method_count_is_the_one_documented_casualty(self):
+        """
+        Counting methods needs the pass we skipped, so it reports 0. Asserted
+        rather than tolerated: if a future change starts reading dex_method_count
+        on the hot path, this is the test that should have to be updated first.
+        """
+        self.assertEqual(self.fast.dex_method_count, 0)
+        self.assertGreater(self.full.dex_method_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestImpersonationFloorAppliesOnTheHotPath(unittest.TestCase):
+    """
+    Phase 5.5 deliberately re-runs on every cache hit so an updated brand table
+    reaches already-cached samples without re-analysis. But the score came from the
+    cached components, so the fresh finding could not move the verdict — the App
+    Identity tab read "impersonates Bank of India" above a verdict of `medium`.
+
+    The floor IS the mechanism by which impersonation reaches a verdict, so running
+    the check without re-applying it made the fresh run decorative.
+    """
+
+    def _run(self, cached_score, findings):
+        from app.core.schemas import IngestionResult
+        ingestion = IngestionResult(sha256="dd" * 32, package_name="com.x", permissions=[])
+        cached_row = {
+            "sha256": "dd" * 32, "family": "", "base_score": cached_score,
+            "narrative": "n", "limitations": [], "ttps": {},
+            "risk_components": {"impersonation_floor_applied": False},
+        }
+        with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.compute_sha256", return_value="dd" * 32), \
+             patch("app.api.routes.lookup_signature", return_value=cached_row):
+            mp.run_phase1_ingestion.return_value = (
+                ingestion, MagicMock(), MagicMock(), MagicMock(), MagicMock()
+            )
+            mp.run_phase5b_impersonation.return_value = {
+                "findings": findings, "coverage": [], "brands_checked": 15,
+                "max_severity": max((f.get("severity", 0.0) for f in findings), default=0.0),
+            }
+            from app.api.routes import _run_analysis
+            return _run_analysis("/fake/test.apk")
+
+    def test_a_newly_added_brand_moves_a_cached_verdict(self):
+        from app.reports.scoring import IMPERSONATION_SCORE_FLOOR
+
+        result = self._run(35.62, [{"kind": "package_namespace_squat", "brand": "Telegram"}])
+        self.assertEqual(result.risk_score.total_score,
+                         IMPERSONATION_SCORE_FLOOR["package_namespace_squat"])
+        self.assertEqual(result.risk_score.verdict_band, "high")
+        self.assertTrue(result.risk_score.impersonation_floor_applied)
+
+    def test_the_floor_never_lowers_a_cached_score(self):
+        """
+        A floor below the cached total must leave it alone. The hot path returns the
+        stored verdict verbatim; this may only ever raise it.
+        """
+        result = self._run(86.14, [{"kind": "label_impersonation", "brand": "WhatsApp"}])
+        self.assertEqual(result.risk_score.total_score, 86.14)
+        self.assertEqual(result.risk_score.verdict_band, "malicious")
+        self.assertFalse(result.risk_score.impersonation_floor_applied)
+
+    def test_no_findings_leaves_the_cached_verdict_untouched(self):
+        result = self._run(35.62, [])
+        self.assertEqual(result.risk_score.total_score, 35.62)
+        self.assertFalse(result.risk_score.impersonation_floor_applied)
+
+
+class TestImpersonationFloorAppliesOnTheHotPath(unittest.TestCase):
+    """
+    Phase 5.5 deliberately re-runs on every cache hit so an updated brand table
+    applies to already-cached samples without re-analysis. But the score came
+    straight from the cached components, so a newly added brand produced a finding
+    in the App Identity tab above a verdict that still read whatever was cached —
+    "impersonates Bank of India" sitting on top of a `medium`.
+
+    The floor is the entire mechanism by which impersonation reaches a verdict, so
+    re-running the check without re-applying it made the fresh run decorative.
+    """
+
+    def _run(self, cached_score, findings):
+        from app.core.schemas import IngestionResult
+        ingestion = IngestionResult(sha256="dd" * 32, package_name="com.x", permissions=[])
+        cached_row = {
+            "sha256": "dd" * 32, "family": "", "base_score": cached_score,
+            "narrative": "n", "limitations": [], "ttps": {},
+            "risk_components": {"impersonation_floor_applied": False},
+        }
+        # _run_analysis hashes the file before deciding whether to parse it,
+        # so the hash is its own dependency now, not something the mocked
+        # pipeline supplies. The value does not matter (lookup_signature is
+        # patched) but the read is real, and /fake/test.apk does not exist.
+        with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.compute_sha256", return_value="dd" * 32), \
+             patch("app.api.routes.lookup_signature", return_value=cached_row):
+            mp.run_phase1_ingestion.return_value = (
+                ingestion, MagicMock(), MagicMock(), MagicMock(), MagicMock()
+            )
+            mp.run_phase5b_impersonation.return_value = {
+                "findings": findings, "coverage": [], "brands_checked": 15,
+                "max_severity": max((f.get("severity", 0.0) for f in findings), default=0.0),
+            }
+            from app.api.routes import _run_analysis
+            return _run_analysis("/fake/test.apk")
+
+    def test_a_newly_detected_clone_raises_a_cached_verdict(self):
+        report = self._run(35.62, [{"kind": "certificate_mismatch", "brand": "Bank of India"}])
+        self.assertEqual(report.risk_score.verdict_band, "malicious")
+        self.assertTrue(report.risk_score.impersonation_floor_applied)
+
+    def test_the_weakest_finding_still_moves_the_band(self):
+        """label_impersonation floors at `suspicious` — the BOI sample in the corpus."""
+        report = self._run(20.0, [{"kind": "label_impersonation", "brand": "Bank of India"}])
+        self.assertEqual(report.risk_score.verdict_band, "suspicious")
+        self.assertTrue(report.risk_score.impersonation_floor_applied)
+
+    def test_the_floor_never_lowers_a_cached_score(self):
+        """
+        A floor below the cached total must change nothing. Impersonation raises a
+        verdict; it is not a re-scoring, and a cached `malicious` must not be talked
+        down to `high` by a weaker fresh finding.
+        """
+        report = self._run(92.0, [{"kind": "package_typosquat", "brand": "Telegram"}])
+        self.assertEqual(report.risk_score.total_score, 92.0)
+        self.assertEqual(report.risk_score.verdict_band, "malicious")
+
+    def test_no_findings_leaves_the_cached_verdict_untouched(self):
+        report = self._run(35.62, [])
+        self.assertEqual(report.risk_score.total_score, 35.62)
+        self.assertFalse(report.risk_score.impersonation_floor_applied)
