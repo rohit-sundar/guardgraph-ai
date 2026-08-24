@@ -26,6 +26,7 @@ looked at it".
 """
 import argparse
 import json
+import re
 import os
 import sys
 
@@ -55,6 +56,37 @@ def _index_by_package(raw: dict) -> dict[str, dict]:
     return index
 
 
+# Androguard reports an unresolvable label in two shapes, and neither is a name:
+#   "@7F120160"              a raw resource id
+#   "<0x5120, type 0x00>"    an undecoded resource reference
+# Both appear when an app installed from a bundle keeps its strings in a language split.
+_UNRESOLVED_LABEL = re.compile(r"^(@[0-9A-Fa-f]+|<0x[0-9A-Fa-f]+,.*>)$")
+
+
+def _apks_to_read(apk_dir: str) -> list[tuple[str, str]]:
+    """
+    Every APK worth parsing under apk_dir, as (path, display name).
+
+    Handles both layouts: loose `*.apk` files, and the one `adb pull` produces for an app
+    installed from an app bundle — a per-package directory holding `base.apk` plus
+    `split_config.*.apk`. Only `base.apk` is read from those: the splits carry the same
+    package and the same signing key, but no launcher icon and no manifest of their own,
+    so parsing them adds nothing and costs a multi-hundred-MB parse each.
+    """
+    found: list[tuple[str, str]] = []
+    for name in sorted(os.listdir(apk_dir)):
+        full = os.path.join(apk_dir, name)
+        if os.path.isdir(full):
+            inner = sorted(f for f in os.listdir(full) if f.lower().endswith(".apk"))
+            if not inner:
+                continue
+            base = "base.apk" if "base.apk" in inner else inner[0]
+            found.append((os.path.join(full, base), f"{name}/{base}"))
+        elif name.lower().endswith(".apk"):
+            found.append((full, name))
+    return found
+
+
 def ingest_apks(apk_dir: str, path: str) -> int:
     from androguard.core.apk import APK
 
@@ -68,10 +100,7 @@ def ingest_apks(apk_dir: str, path: str) -> int:
     by_package = _index_by_package(raw)
     updated, skipped, unmatched = 0, 0, []
 
-    for name in sorted(os.listdir(apk_dir)):
-        if not name.lower().endswith(".apk"):
-            continue
-        full = os.path.join(apk_dir, name)
+    for full, name in _apks_to_read(apk_dir):
         try:
             apk = APK(full)
             package = apk.get_package()
@@ -95,10 +124,22 @@ def ingest_apks(apk_dir: str, path: str) -> int:
             certs.add(cert.lower())
             entry["cert_sha256"] = sorted(certs)
 
-        # An adaptive (XML) launcher icon has no pixels to hash. Say so per brand
-        # rather than leaving a null that reads as "not done yet".
-        entry["verified"] = bool(entry.get("cert_sha256")) and entry.get("icon_phash") is not None
+        # `verified` means the signing certificate came off a real APK, which is what
+        # makes the strongest check runnable. It deliberately does NOT also require an
+        # icon hash: an adaptive (XML) launcher icon has no pixels to hash, and most
+        # modern apps ship one, so requiring it would leave `verified: false` forever on
+        # brands whose certificate check works perfectly. `icon_phash: null` already says
+        # the icon check is unavailable for that brand.
+        entry["verified"] = bool(entry.get("cert_sha256"))
+        # An app installed from a bundle keeps its strings in the language split, so
+        # base.apk alone resolves the label to its raw resource id ("@7F120160").
+        # Recording that as a display name would put a garbage string into the table
+        # that _check_label then matches real app names against.
         label = apk.get_app_name()
+        if label and _UNRESOLVED_LABEL.match(label):
+            print(f"  ! {package}: label unresolved in base.apk ({label}) — not recorded. "
+                  "The string lives in split_config.<lang>.apk.")
+            label = None
         if label and label not in entry.get("labels", []):
             entry.setdefault("labels", []).append(label)
 
@@ -112,9 +153,13 @@ def ingest_apks(apk_dir: str, path: str) -> int:
         for name, package in unmatched:
             print(f"  {name}: {package}")
 
+    n_cert = sum(1 for b in raw["brands"] if b.get("cert_sha256"))
+    n_icon = sum(1 for b in raw["brands"] if b.get("icon_phash"))
     raw["status"] = (
-        f"{sum(1 for b in raw['brands'] if b.get('verified'))} of {len(raw['brands'])} "
-        "brands verified against a real APK (icon hash + signing certificate recorded)."
+        f"{n_cert} of {len(raw['brands'])} brands carry a signing certificate read from a "
+        f"real APK, so the certificate check runs for them; {n_icon} also carry a launcher "
+        "icon hash. The remainder ship adaptive (XML) icons, which have no pixels to hash — "
+        "that is a permanent property of those apps, not work left undone."
     )
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(raw, handle, indent=2)

@@ -327,6 +327,86 @@ def test_shipped_reference_brands_do_not_collide_with_each_other():
             )
 
 
+def test_no_label_is_an_unresolved_resource_reference():
+    """
+    An app installed from a bundle keeps its strings in a language split, so parsing
+    base.apk alone resolves the label to a raw resource id — "@7F124DF6", or
+    "<0x5120, type 0x00>". Both were written into the table as display names when it was
+    first populated from pulled APKs. _check_label then fuzzy-matches real app names
+    against that garbage, so it must never be recorded.
+    """
+    import re
+
+    from app.analysis.impersonation import load_reference
+
+    unresolved = re.compile(r"^(@[0-9A-Fa-f]+|<0x[0-9A-Fa-f]+,.*>)$")
+    for b in load_reference():
+        for label in b.labels:
+            assert not unresolved.match(label), (
+                f"{b.name} carries an unresolved resource reference as a label: {label!r}. "
+                "scripts/build_brand_reference.py filters these; it was regenerated with an "
+                "older copy, or the value was hand-edited in."
+            )
+            assert label.strip(), f"{b.name} has a blank label"
+
+
+def test_verified_means_a_certificate_was_recorded():
+    """
+    `verified` is what the status line and the README count, so it has to mean one thing:
+    a signing certificate came off a real APK. It deliberately does NOT also require an
+    icon hash — most modern apps ship an adaptive (XML) launcher icon, which has no pixels
+    to hash, so requiring it would pin `verified: false` forever on brands whose
+    certificate check works perfectly.
+    """
+    import json
+    import os
+
+    path = os.path.join(os.path.dirname(__file__), "..", "data", "reference",
+                        "protected_brands.json")
+    with open(path, encoding="utf-8") as fh:
+        raw = json.load(fh)
+
+    for entry in raw["brands"]:
+        has_cert = bool(entry.get("cert_sha256"))
+        assert bool(entry.get("verified")) == has_cert, (
+            f"{entry['brand']}: verified={entry.get('verified')} but "
+            f"{len(entry.get('cert_sha256') or [])} certificate(s) recorded"
+        )
+
+
+def test_every_package_of_a_certified_brand_is_covered():
+    """
+    Once a brand carries any certificate, EVERY package listed under it is checked against
+    that list — so a package whose own signing key was never recorded makes the genuine app
+    on it read as a clone of itself. Measured: a two-package brand with one recorded key
+    flags the genuine sibling as certificate_mismatch.
+
+    There is no way to tell from the file alone whether one key legitimately covers several
+    packages (publishers often sign every variant with one key) — so this asserts the weaker
+    invariant that actually catches the mistake: a certified brand must not list more
+    packages than it has recorded keys, unless a human recorded that they share a key.
+    """
+    import json
+    import os
+
+    path = os.path.join(os.path.dirname(__file__), "..", "data", "reference",
+                        "protected_brands.json")
+    with open(path, encoding="utf-8") as fh:
+        raw = json.load(fh)
+
+    for entry in raw["brands"]:
+        certs = entry.get("cert_sha256") or []
+        packages = entry.get("packages") or []
+        if not certs or len(packages) <= 1:
+            continue
+        assert len(certs) >= len(packages) or entry.get("shared_signing_key") is True, (
+            f"{entry['brand']} lists {len(packages)} packages but only {len(certs)} "
+            f"certificate(s). Either record a key for each package, drop the unverified "
+            f"ones, or set \"shared_signing_key\": true if the publisher genuinely signs "
+            f"them all with one key."
+        )
+
+
 # ── scoring integration ───────────────────────────────────────────────────────
 
 def _obfuscation():
@@ -423,3 +503,117 @@ def test_no_findings_leaves_the_weighted_score_untouched():
     result = _score([])
     assert result.impersonation_floor_applied is False
     assert result.total_score == result.weighted_score
+
+
+# ── package_namespace_squat ───────────────────────────────────────────────────
+# A package that is a protected package plus a suffix. Added after measuring the
+# malware corpus: three samples wear org.telegram.messenger.<random> and NONE of
+# the four original checks fired on any of them — the typosquat check cannot see
+# them, because appending ".wgstjg" is an edit distance of 6-7 against a cap of 2.
+
+
+def test_namespace_squat_is_caught_where_the_typosquat_check_cannot_reach():
+    from app.analysis.impersonation import PACKAGE_MAX_EDIT_DISTANCE, edit_distance
+
+    squat = "com.phonepe.app.wgstjg"
+    # The premise: this is genuinely out of the typosquat check's range, so the new
+    # check is covering a real gap rather than duplicating an existing one.
+    assert edit_distance(
+        squat.replace(".", ""), "comphonepeapp", PACKAGE_MAX_EDIT_DISTANCE
+    ) > PACKAGE_MAX_EDIT_DISTANCE
+
+    result = detect_impersonation(
+        package_name=squat, app_label="Redeem Code", brands=[brand()]
+    )
+    assert [f.kind for f in result.findings] == ["package_namespace_squat"]
+    assert result.findings[0].expected == "com.phonepe.app"
+
+
+def test_a_brands_own_extended_package_is_not_a_squat():
+    """
+    The false positive this check could most easily create. Telegram ships
+    org.telegram.messenger.beta itself; listing a brand's own extended builds in
+    `packages` is what keeps them exempt.
+    """
+    result = detect_impersonation(
+        package_name="com.phonepe.app.beta",
+        app_label="PhonePe",
+        brands=[brand(packages=["com.phonepe.app", "com.phonepe.app.beta"])],
+    )
+    assert result.findings == []
+
+
+def test_a_longer_package_sharing_only_a_prefix_is_not_a_squat():
+    """
+    The dot is the whole point. `com.phonepe.application` starts with the brand's
+    package as a *string* but does not extend its *namespace*, so it must not be
+    reported — this is why the check runs on the raw package rather than the
+    confusable-normalised form, which strips the dots that mark the boundary.
+    """
+    result = detect_impersonation(
+        package_name="com.phonepe.application", app_label="Something Else",
+        brands=[brand()],
+    )
+    assert [f.kind for f in result.findings] != ["package_namespace_squat"]
+
+
+def test_namespace_squat_floors_the_verdict_at_high():
+    """
+    Floored the same as a typosquat, for a stronger reason: a package cannot reach
+    "<brand's full namespace>.<random>" by mistyping.
+    """
+    result = _score([{"kind": "package_namespace_squat", "brand": "PhonePe"}])
+    assert result.impersonation_floor_applied is True
+    assert result.verdict_band == "high"
+
+
+def test_a_genuine_package_is_not_accused_by_a_similarly_named_brand():
+    """
+    Two protected brands can have similar names, and then each one's REAL app reads
+    as impersonating the other. Found the moment Bank of India was added: "BOI Mobile"
+    is an edit distance of 2 from ICICI's "iMobile", so the genuine BOI APK was
+    reported as impersonating ICICI iMobile.
+
+    A package listed in the reference table is a known-genuine app, so the name-based
+    checks are silenced for it.
+    """
+    boi = brand(name="Bank of India", packages=["com.boi.ua.android"],
+                labels=["BOI Mobile"], cert_sha256=[], verified=False)
+    icici = brand(name="ICICI iMobile", packages=["com.csam.icici.bank.imobile"],
+                  labels=["iMobile"], cert_sha256=[], verified=False)
+
+    result = detect_impersonation(
+        package_name="com.boi.ua.android", app_label="BOI Mobile", brands=[boi, icici]
+    )
+    assert result.findings == []
+
+
+def test_silencing_a_genuine_package_does_not_silence_the_evidence_checks():
+    """
+    The other half of that fix, and the more important half. Name-based checks are
+    suppressed for a known-genuine package; certificate and icon checks are NOT —
+    a wrong signing key on a genuine package name is precisely the clone this module
+    exists to catch, and no amount of brand-name similarity can produce one.
+    """
+    result = detect_impersonation(
+        package_name="com.phonepe.app", app_label="PhonePe",
+        cert_sha256=CLONE_CERT, brands=[brand()],
+    )
+    assert [f.kind for f in result.findings] == ["certificate_mismatch"]
+
+
+def test_a_disproven_owner_stops_silencing_the_other_brands():
+    """
+    The narrowing that makes the rule above safe. A package is only known-genuine
+    while nothing contradicts it — a wrong signing key does contradict it, and then
+    an APK wearing one brand's package while displaying another's name must still
+    report both findings.
+    """
+    phonepe = brand()
+    paytm = brand(name="Paytm", packages=["net.one97.paytm"], labels=["Paytm"],
+                  cert_sha256=[REAL_CERT])
+    result = detect_impersonation(
+        package_name="net.one97.paytm", app_label="PhonePe",
+        cert_sha256=CLONE_CERT, brands=[phonepe, paytm],
+    )
+    assert [f.kind for f in result.findings] == ["certificate_mismatch", "label_impersonation"]

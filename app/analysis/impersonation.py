@@ -78,6 +78,7 @@ MIN_LABEL_LEN_FOR_FUZZY = 6
 SEVERITY = {
     "certificate_mismatch": 1.0,
     "icon_reuse": 0.9,
+    "package_namespace_squat": 0.85,
     "package_typosquat": 0.85,
     "label_impersonation": 0.75,
 }
@@ -350,6 +351,44 @@ def _check_package(brand: Brand, package: str) -> Optional[ImpersonationFinding]
     if not package or package in brand.packages:
         return None
     observed = normalize_confusables(package)
+
+    # A package that is a protected package plus a suffix — org.telegram.messenger.wgstjg
+    # — is checked before the typosquat loop below, because the typosquat check cannot
+    # see it: appending ".wgstjg" is an edit distance of 7 against a threshold of 2.
+    # Measured on the malware corpus: three samples wear exactly this shape and none of
+    # the four checks fired on any of them.
+    #
+    # It is treated as at least as strong as a typosquat rather than weaker. A typo is
+    # something a careless developer could produce by accident; a package that reproduces
+    # a brand's namespace in full and then appends random characters is not reachable by
+    # accident. Android still resolves it as an unrelated app, so the store listing and
+    # the signing key are somebody else's.
+    #
+    # The brand's own extended builds must be listed in `packages` to stay exempt — the
+    # guard above is what makes org.telegram.messenger.beta not a finding.
+    #
+    # Compared raw rather than confusable-normalised, because normalisation strips the
+    # dots and the dot is the whole point: it is what marks the namespace boundary
+    # between "the brand's package, extended" and "a longer string that merely starts
+    # with the same letters". Nothing is lost by skipping normalisation here — Android
+    # package names are Java identifiers, so they cannot contain a confusable to begin
+    # with, and the typosquat loop below still covers homoglyph substitution.
+    for original in brand.packages:
+        if original and package.startswith(original + "."):
+            return ImpersonationFinding(
+                kind="package_namespace_squat",
+                brand=brand.name,
+                severity=SEVERITY["package_namespace_squat"],
+                detail=(
+                    f"package name is {original} with '.{package[len(original) + 1:]}' "
+                    f"appended. That reproduces {brand.name}'s namespace exactly and then "
+                    f"extends it, which Android resolves as a different app entirely — "
+                    f"the listing and the signing key belong to somebody else."
+                ),
+                observed=package,
+                expected=original,
+            )
+
     for reference, original in zip(brand.normalized_packages, brand.packages):
         if not reference:
             continue
@@ -460,13 +499,39 @@ def detect_impersonation(
             "icon hash — a clone of those cannot be caught by icon reuse"
         )
 
-    for brand in reference:
-        finding = (
-            _check_certificate(brand, package, cert_sha256)
-            or _check_icon(brand, package, icon_phash)
-            or _check_package(brand, package)
-            or _check_label(brand, package, app_label)
-        )
+    # Which brand, if any, genuinely owns this package. Each check already exempts the
+    # brand it is comparing against, but that is per-brand and the name-based checks are
+    # cross-brand: two protected brands can have similar names, and then each one's real
+    # app reads as impersonating the other. Observed as soon as Bank of India was added —
+    # "BOI Mobile" is an edit distance of 2 from ICICI's "iMobile", so the genuine BOI
+    # APK was reported as impersonating ICICI.
+    #
+    # A package listed in the reference table is a known-genuine app by definition, so
+    # the NAME-based checks are silenced for it. The evidence-based ones are not: a
+    # certificate mismatch or a reused icon on a genuine package is exactly the clone
+    # this module exists to catch, and neither can be produced by two brands merely
+    # having similar names.
+    owner = next((b for b in reference if package and package in b.packages), None)
+
+    # Evidence-based checks run for every brand, unconditionally.
+    evidence = [
+        _check_certificate(brand, package, cert_sha256)
+        or _check_icon(brand, package, icon_phash)
+        for brand in reference
+    ]
+
+    # ...and if one of them contradicts the owner — a wrong signing key or a reused
+    # icon on the package it claims — then the package is NOT that brand's app after
+    # all, so nothing is silenced. An APK wearing Paytm's package, signed by somebody
+    # else and displaying "PhonePe", must still report the PhonePe label finding.
+    owner_disproven = owner is not None and evidence[reference.index(owner)] is not None
+
+    for brand, evidence_finding in zip(reference, evidence):
+        finding = evidence_finding
+        if finding is None and (owner is None or owner_disproven or owner is brand):
+            finding = _check_package(brand, package) or _check_label(
+                brand, package, app_label
+            )
         if finding:
             result.findings.append(finding)
 

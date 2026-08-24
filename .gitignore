@@ -30,6 +30,12 @@ data/benign_apks/*
 data/benign_holdout/*
 !data/benign_holdout/.gitkeep
 
+# Genuine brand APKs for scripts/build_brand_reference.py. Proprietary third-party
+# binaries pulled from official store listings — the derived icon_phash/cert_sha256 in
+# data/reference/protected_brands.json are what belong in git, not the APKs themselves.
+data/reference/apks/*
+!data/reference/apks/.gitkeep
+
 # Run logs (scripts/build_ttp_dataset.py writes a per-run file sink here) —
 # keep the directory in the repo, ignore everything written into it
 logs/*
