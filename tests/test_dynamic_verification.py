@@ -13,6 +13,8 @@ import app.analysis.dynamic_verification as dv
 from app.analysis.dynamic_verification import (
     _diff_against_predictions,
     _broadcast_declared_actions,
+    _dismiss_blocking_dialog,
+    _dismiss_blocking_dialogs,
     run_dynamic_verification,
     DynamicVerificationOutcome,
 )
@@ -230,6 +232,85 @@ def test_broadcast_declared_actions_filters_and_survives_failures(monkeypatch):
     assert sent == 2
     # Every broadcast is scoped to the target package.
     assert all("-p" in c and "com.example.evil" in c for c in calls)
+
+
+_COMPAT_DIALOG_XML = """<?xml version="1.0"?>
+<hierarchy>
+  <node text="This app was built for an older version of Android" clickable="false" bounds="[0,300][1080,600]" />
+  <node text="OK" clickable="true" bounds="[880,700][1000,780]" />
+</hierarchy>
+"""
+
+_NO_DIALOG_XML = """<?xml version="1.0"?>
+<hierarchy>
+  <node text="" clickable="true" bounds="[0,0][100,100]" />
+</hierarchy>
+"""
+
+
+def test_dismiss_blocking_dialog_taps_center_of_matching_button(monkeypatch):
+    calls = []
+
+    def fake_adb(args, timeout=30):
+        calls.append(args)
+        if args[:2] == ["shell", "cat"]:
+            return _COMPAT_DIALOG_XML
+        return ""
+
+    monkeypatch.setattr(dv, "_adb", fake_adb)
+    dismissed = _dismiss_blocking_dialog()
+    assert dismissed is True
+    tap_calls = [c for c in calls if "tap" in c]
+    assert len(tap_calls) == 1
+    # Center of bounds [880,700][1000,780] -> (940, 740).
+    assert tap_calls[0][-2:] == ["940", "740"]
+
+
+def test_dismiss_blocking_dialog_returns_false_when_nothing_matches(monkeypatch):
+    def fake_adb(args, timeout=30):
+        if args[:2] == ["shell", "cat"]:
+            return _NO_DIALOG_XML
+        return ""
+
+    monkeypatch.setattr(dv, "_adb", fake_adb)
+    assert _dismiss_blocking_dialog() is False
+
+
+def test_dismiss_blocking_dialog_survives_adb_failure(monkeypatch):
+    def fake_adb(args, timeout=30):
+        raise dv._DynamicVerificationError("device offline")
+
+    monkeypatch.setattr(dv, "_adb", fake_adb)
+    assert _dismiss_blocking_dialog() is False
+
+
+def test_dismiss_blocking_dialog_survives_malformed_xml(monkeypatch):
+    def fake_adb(args, timeout=30):
+        if args[:2] == ["shell", "cat"]:
+            return "not valid xml <<<"
+        return ""
+
+    monkeypatch.setattr(dv, "_adb", fake_adb)
+    assert _dismiss_blocking_dialog() is False
+
+
+def test_dismiss_blocking_dialogs_stops_once_nothing_left_to_dismiss(monkeypatch):
+    # First two dumps still show the dialog (simulating a second dialog
+    # appearing right behind the first); third dump shows nothing left.
+    responses = iter([_COMPAT_DIALOG_XML, _COMPAT_DIALOG_XML, _NO_DIALOG_XML])
+    dump_count = 0
+
+    def fake_adb(args, timeout=30):
+        nonlocal dump_count
+        if args[:2] == ["shell", "cat"]:
+            dump_count += 1
+            return next(responses)
+        return ""
+
+    monkeypatch.setattr(dv, "_adb", fake_adb)
+    dv._dismiss_blocking_dialogs(max_attempts=5)
+    # Stopped after the third dump found nothing — did not run all 5 attempts.
+    assert dump_count == 3
 
 
 def test_diff_hook_errors_surface_in_coverage_note():

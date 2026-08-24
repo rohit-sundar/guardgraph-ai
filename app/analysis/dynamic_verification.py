@@ -51,10 +51,12 @@ is in place, treat the probe-and-gate here as the only line of defense, not
 a guaranteed one.
 """
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -598,6 +600,72 @@ def _ensure_frida_server_running() -> None:
         raise _DynamicVerificationError(f"could not establish adb port forward for frida: {e}") from e
 
 
+# Common dialog-dismiss button labels, uppercased for a case-insensitive
+# match against uiautomator's reported text. Deliberately generic — not
+# targeting any specific app's UI, just the handful of words every Android
+# system/permission dialog's affirmative button uses.
+_DISMISS_BUTTON_TEXTS = frozenset({
+    "OK", "GOT IT", "CONTINUE", "ACCEPT", "DISMISS", "CLOSE", "YES",
+    "I AGREE", "AGREE", "ALLOW", "WHILE USING THE APP",
+})
+_BOUNDS_RE = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+
+
+def _dismiss_blocking_dialog() -> bool:
+    """
+    Best-effort, one attempt. Android's own OS-level dialogs — an old-
+    targetSdkVersion "this app was built for an older version of Android"
+    compatibility warning, a runtime permission prompt — can block a
+    sample's own code from ever running at all for the entire capture
+    window. Confirmed live: a real corpus sample sat on exactly that
+    compatibility dialog for the WHOLE window, so every single hook read
+    not-observed for the wrong reason — the app never got to run, not that
+    it behaved benignly. The stimulus taps in
+    _run_capture_window_with_stimuli are fixed-coordinate and don't hit an
+    arbitrary dialog's button, so this is a separate, targeted step: dump
+    the current UI hierarchy via `uiautomator`, find a clickable node whose
+    text matches a common dismiss label, and tap its center.
+
+    Returns whether something was actually dismissed, purely so the caller
+    can decide whether to retry (dismissing one dialog can reveal another).
+    """
+    try:
+        _adb(["shell", "uiautomator", "dump", "/sdcard/guardgraph_ui.xml"], timeout=10)
+        xml_text = _adb(["shell", "cat", "/sdcard/guardgraph_ui.xml"], timeout=10)
+    except _DynamicVerificationError:
+        return False
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError:
+        return False
+    for node in root.iter("node"):
+        text = (node.get("text") or "").strip().upper()
+        if node.get("clickable") == "true" and text in _DISMISS_BUTTON_TEXTS:
+            m = _BOUNDS_RE.match(node.get("bounds") or "")
+            if not m:
+                continue
+            x1, y1, x2, y2 = (int(v) for v in m.groups())
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            try:
+                _adb(["shell", "input", "tap", str(cx), str(cy)], timeout=10)
+                return True
+            except _DynamicVerificationError:
+                return False
+    return False
+
+
+def _dismiss_blocking_dialogs(max_attempts: int = 3) -> None:
+    """Repeats _dismiss_blocking_dialog up to max_attempts times — dismissing
+    one dialog (e.g. the compatibility warning) can reveal a second one
+    (e.g. a permission prompt) right behind it. Stops as soon as an attempt
+    finds nothing to dismiss, since further attempts would just re-dump an
+    unchanged screen."""
+    for _ in range(max_attempts):
+        if not _dismiss_blocking_dialog():
+            return
+        time.sleep(0.5)
+
+
 def _run_capture_window_with_stimuli(timeout_s: int, sha256: str | None) -> str | None:
     """
     A passive `time.sleep(timeout_s)` was the entire capture window until
@@ -626,6 +694,12 @@ def _run_capture_window_with_stimuli(timeout_s: int, sha256: str | None) -> str 
     idled back to its home screen, showing nothing useful. Returns that
     screenshot's URL (or None) so the caller can attach it to the outcome.
     """
+    # Dismiss any OS-level dialog blocking the app before it ever gets to
+    # run its own code (see _dismiss_blocking_dialog's docstring) — done
+    # FIRST, before the settle sleep, since a compatibility warning shows up
+    # immediately on launch and would otherwise burn the entire window.
+    _dismiss_blocking_dialogs()
+
     settle = min(8, max(1, timeout_s // 4))
     time.sleep(settle)
 
@@ -644,6 +718,11 @@ def _run_capture_window_with_stimuli(timeout_s: int, sha256: str | None) -> str 
     except _DynamicVerificationError as e:
         logger.warning(f"[Phase 8] synthetic tap injection failed (non-fatal): {e}")
 
+    # A permission prompt can appear as a direct result of the stimuli above
+    # (e.g. a first SMS-related API call triggering a runtime permission
+    # dialog) — one more dismissal pass before the reaction screenshot.
+    _dismiss_blocking_dialogs()
+
     # A few seconds for the app to actually respond (render an overlay,
     # process the SMS, react to the taps) before capturing.
     time.sleep(3)
@@ -651,8 +730,22 @@ def _run_capture_window_with_stimuli(timeout_s: int, sha256: str | None) -> str 
 
     elapsed = settle + 3
     remaining = max(0, timeout_s - elapsed)
-    if remaining:
-        time.sleep(remaining)
+    # A flat time.sleep(remaining) here used to leave a dialog that appeared
+    # AFTER both dismissal passes above sitting untouched for the rest of the
+    # window — confirmed live: a runtime "let app always run in background?"
+    # permission dialog appeared only after the tap stimuli opened a settings
+    # screen, past the last dismissal check, and then blocked every
+    # subsequent screenshot (reaction and final looked identical) for the
+    # remainder of a real corpus sample's run. Broken into ~5s chunks with a
+    # dismissal check between each instead, so a late-appearing dialog still
+    # gets cleared well within the window rather than at the very end.
+    _DIALOG_CHECK_INTERVAL = 5
+    while remaining > 0:
+        chunk = min(_DIALOG_CHECK_INTERVAL, remaining)
+        time.sleep(chunk)
+        remaining -= chunk
+        if remaining > 0:
+            _dismiss_blocking_dialogs()
 
     return reaction_screenshot_url
 
