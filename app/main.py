@@ -43,8 +43,25 @@ async def lifespan(_: FastAPI):
     move the wait from the first request to the process not coming up at all.
     Failure is logged and ignored; the analysis path already handles a cold or
     absent Ollama.
+
+    The graph check is deliberately synchronous and deliberately loud. Every Neo4j
+    caller degrades silently by design, so a database that is down or unloaded
+    produces a running, plausible-looking system that has quietly stopped grounding
+    its reports and stopped correlating samples. Boot is the one moment where saying
+    so costs nothing.
     """
+    from app.graph.ontology import graph_health
     from app.reports.graphrag import preload_model
+
+    graph = graph_health()
+    if not graph["reachable"]:
+        logger.error(f"[startup] Neo4j is NOT reachable — {graph['detail']} "
+                     "Hot-path caching, sample correlation and the threat landscape "
+                     "will all return empty without raising.")
+    elif graph["grounded_techniques"] == 0:
+        logger.warning(f"[startup] Neo4j is up but the ontology is missing — {graph['detail']}")
+    else:
+        logger.info(f"[startup] Neo4j ready: {graph['detail']}.")
 
     threading.Thread(target=preload_model, name="ollama-preload", daemon=True).start()
     yield
@@ -70,5 +87,24 @@ if os.path.exists(static_dir):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    """
+    Real dependency status, not a liveness ping.
+
+    `status` is "ok" only when both dependencies are reachable. Neo4j being down
+    is "degraded" rather than "down" because analysis genuinely still works
+    without it — what stops is caching, correlation and graph-backed grounding.
+    The header status pills read this, so a green light in the UI now means
+    something was checked.
+    """
+    from app.graph.ontology import graph_health
+    from app.reports.graphrag import ollama_health
+
+    graph, llm = graph_health(), ollama_health()
+    if graph["reachable"] and llm["reachable"]:
+        status = "ok"
+    elif llm["reachable"]:
+        status = "degraded"
+    else:
+        status = "down"
+    return {"status": status, "neo4j": graph, "ollama": llm}
 

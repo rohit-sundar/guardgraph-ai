@@ -65,7 +65,8 @@ STRICT RULES — violating ANY of these makes the report unusable:
    - resolved_webview_bridges (addJavascriptInterface bridge name + exposed methods)
    - resolved_native_bridges (System.loadLibrary target + JNI symbol correlation)
    - impersonation (brand-impersonation findings: certificate_mismatch,
-     icon_reuse, package_typosquat, label_impersonation). These are the highest-
+     icon_reuse, package_namespace_squat, package_typosquat, label_impersonation).
+     These are the highest-
      priority findings in the manifest when present, because they are about the
      app's IDENTITY rather than its payload: a clone of a banking app is fraud
      whether or not its code looks malicious. Lead the report with one when it is
@@ -403,6 +404,37 @@ def _model_is_loaded() -> bool:
         logger.debug(f"[Phase 7] Could not query Ollama /api/ps: {e}")
         return False
     return any(m.get("name") == settings.ollama_model for m in loaded)
+
+
+def ollama_health() -> dict:
+    """
+    Reachability and residency, for /health. Separate from _model_is_loaded()
+    because that helper folds "Ollama is down" and "model not loaded" into a
+    single False — fine for deciding whether to warm up, useless for telling an
+    operator which of the two is wrong.
+
+    Residency is reported rather than treated as a failure: a reachable Ollama
+    with a cold model still produces reports, it just pays the load on the first
+    one. Never raises.
+    """
+    try:
+        with urllib.request.urlopen(f"{_native_base_url()}/api/ps", timeout=3) as r:
+            loaded = json.load(r).get("models") or []
+    except Exception as e:
+        return {
+            "reachable": False,
+            "model_resident": False,
+            "model": settings.ollama_model,
+            "detail": f"{type(e).__name__}: {e}. Start it with: ollama serve",
+        }
+    resident = any(m.get("name") == settings.ollama_model for m in loaded)
+    return {
+        "reachable": True,
+        "model_resident": resident,
+        "model": settings.ollama_model,
+        "detail": "model resident" if resident
+                  else "reachable, model not loaded — the first report pays the load",
+    }
 
 
 def _post_native_chat(user_content: str, num_predict: int, timeout: int) -> None:

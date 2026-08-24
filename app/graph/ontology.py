@@ -133,3 +133,53 @@ def get_technique_context(technique_ids: list[str]) -> list[dict]:
             })
     return results
 
+
+def graph_health() -> dict:
+    """
+    Whether Neo4j is reachable and actually holds the ontology, for /health and
+    for the startup check.
+
+    Worth stating why this exists: every graph caller swallows its own connection
+    error and degrades quietly — lookup_signature() falls back to a process-local
+    dict, find_related_samples() and get_threat_landscape() return empty, and
+    get_technique_context() (above) falls through to the local JSON. Those are the
+    right behaviours individually; together they mean a dead database looks exactly
+    like a clean sample with no correlations. Nothing in the running system tells
+    anyone otherwise, which is how a container that had been stopped for 43 minutes
+    went unnoticed. This is the one place that reports the difference.
+
+    Reachable-but-empty is called out separately from unreachable: it is the state
+    after a fresh `docker compose up` without load_ontology.py, and it silently
+    ungrounds every report rather than failing anything.
+
+    Never raises.
+    """
+    query = """
+    MATCH (:Technique)-[:BELONGS_TO_TACTIC]->(:Tactic)
+    WITH count(*) AS grounded
+    OPTIONAL MATCH (s:Sample)
+    RETURN grounded, count(s) AS samples
+    """
+    try:
+        row = neo4j_client.run(query)[0]
+    except Exception as e:
+        return {
+            "reachable": False,
+            "grounded_techniques": 0,
+            "cached_samples": 0,
+            "detail": f"{type(e).__name__}: {e}. Start it with: docker compose up -d",
+        }
+
+    grounded, samples = row["grounded"], row["samples"]
+    if grounded == 0:
+        detail = ("connected, but no grounded techniques — reports will fall back to "
+                  "the local JSON ontology. Run: python scripts/load_ontology.py")
+    else:
+        detail = f"{grounded} grounded techniques, {samples} cached samples"
+    return {
+        "reachable": True,
+        "grounded_techniques": grounded,
+        "cached_samples": samples,
+        "detail": detail,
+    }
+

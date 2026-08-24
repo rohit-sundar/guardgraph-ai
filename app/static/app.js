@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupUploadEvents();
   loadModelAccuracy();
   loadHistory();
+  refreshHealth();
   const refreshBtn = document.getElementById('btnRefreshHistory');
   if (refreshBtn) refreshBtn.addEventListener('click', loadHistory);
   const backBtn = document.getElementById('btnBackToUpload');
@@ -27,6 +28,56 @@ function goBackToUpload() {
     preview.style.display = 'none';
   }
   loadHistory();
+}
+
+// The header status pills. Polled rather than read once at load: the failure this
+// exists to catch is a dependency dying DURING a session (someone stops Docker),
+// which a load-time check would render green and then never revisit. 30s is slow
+// enough to be free and fast enough to notice before the next upload.
+const HEALTH_POLL_MS = 30000;
+
+function setPill(id, textId, state, label, detail) {
+  const pill = document.getElementById(id);
+  const text = document.getElementById(textId);
+  if (!pill || !text) return;
+  pill.classList.remove('status-ok', 'status-warn', 'status-down', 'status-unknown');
+  pill.classList.add(`status-${state}`);
+  text.textContent = label;
+  pill.title = detail || '';
+}
+
+async function refreshHealth() {
+  try {
+    const resp = await fetch('/health');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const h = await resp.json();
+
+    const g = h.neo4j || {};
+    if (!g.reachable) {
+      setPill('pillGraph', 'pillGraphText', 'down', 'Knowledge Graph: offline', g.detail);
+    } else if (!g.grounded_techniques) {
+      setPill('pillGraph', 'pillGraphText', 'warn', 'Knowledge Graph: not loaded', g.detail);
+    } else {
+      setPill('pillGraph', 'pillGraphText', 'ok',
+              `Knowledge Graph: ${g.cached_samples} samples`, g.detail);
+    }
+
+    const l = h.ollama || {};
+    if (!l.reachable) {
+      setPill('pillLlm', 'pillLlmText', 'down', 'Qwen2.5 7B LLM: offline', l.detail);
+    } else if (!l.model_resident) {
+      setPill('pillLlm', 'pillLlmText', 'warn', 'Qwen2.5 7B LLM: loading', l.detail);
+    } else {
+      setPill('pillLlm', 'pillLlmText', 'ok', 'Qwen2.5 7B LLM: ready', l.detail);
+    }
+  } catch (err) {
+    // The API itself is unreachable, so neither dependency is knowable. Say that
+    // rather than blaming a dependency we did not manage to ask about.
+    setPill('pillGraph', 'pillGraphText', 'unknown', 'Knowledge Graph: unknown', String(err));
+    setPill('pillLlm', 'pillLlmText', 'unknown', 'API unreachable', String(err));
+  } finally {
+    setTimeout(refreshHealth, HEALTH_POLL_MS);
+  }
 }
 
 const HISTORY_BAND_VARS = {
