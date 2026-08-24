@@ -48,18 +48,28 @@ ZERO_DAY_CONF_MAX = 0.4     # classifier_confidence_component (0-1) below this =
 # analysis stages; the script prints the same tables the values below were chosen
 # from.
 #
-# Re-measured 2026-08-21 against the expanded corpus: **618 rows, 300 F-Droid
-# benign / 318 MalwareBazaar malware across 21 families** (was 353 = 220/133).
-# The benign side is two disjoint seeded selections — 220 apps under 12 MB plus 80
+# Re-measured 2026-08-24 against the rebuilt corpus: **633 rows, 299 F-Droid
+# benign / 334 MalwareBazaar malware across 21 families** (was 618 = 300/318, and
+# 353 = 220/133 before that). Reproduce with
+# `python scripts/score_corpus.py --out data/corpus_scores_v3.json`.
+# The benign side is two disjoint seeded selections — apps under 12 MB plus a set
 # between 12 and 60 MB — because the original <=12 MB cap is why the clean corpus
 # was all small utilities. A further 30 large apps are held out of training
 # entirely (data/benign_holdout) and are what distinguishes a real boundary from
 # one fitted to the corpus.
 #
+# The malware side is 334, not 344: ten APKs on disk are permanently unparseable
+# (six truncated DEX, two corrupt ZIP EOCD, two that surface as a TypeError deeper
+# in the parse). Confirmed 2026-08-24 from two independent directions — they are
+# exactly the ten with no row in data/ttp_dataset.csv, and exactly the ten the
+# corpus scorer fails on. 334 is the ceiling, not a sampling choice.
+#
 # **These boundaries were derived with online reputation DISABLED**
 # (settings.online_lookups_enabled = False), so `signature_match_count` is 0 and
-# `is_known_malware` is False for every sample — verified, max signature_matches
-# across all 616 scored samples was 0. That makes them conservative rather than
+# `is_known_malware` is False for every sample — re-verified on this corpus: max
+# signature_matches across all 633 scored samples was 0, and the reputation
+# component took exactly one distinct value (1.5 = the 0.3 unknown-sample prior
+# x its 5.0 cap) for every sample in the run. That makes them conservative rather than
 # optimistic: VirusTotal only returns a verdict when malicious > 0, so enabling
 # reputation can push malware totals up and never benign ones. It also makes the
 # run deterministic, which the two-run variance noted in earlier revisions of this
@@ -169,76 +179,121 @@ IOC_CIRCUMSTANTIAL_CAP = 0.35       # joint ceiling on the four weak terms above
 # rather than by cutting 0-100 into four. Measured *after* the N5-N8 component fixes,
 # over two full corpus runs; reproduce with `python scripts/score_corpus.py`.
 #
-# Measured 2026-08-21 with online lookups disabled, so the run is deterministic —
+# Measured 2026-08-24 with online lookups disabled, so the run is deterministic —
 # earlier revisions of this block quoted a range across two runs because live
 # VirusTotal/MalwareBazaar answers moved malware totals by about four points a day.
 # That variance is gone, not averaged over.
 #
-#   clean corpus:   median 11.81, p95 27.73, max 69.19      (298 apps scored)
-#   malware corpus: p25 64.03, median 68.26, max 75.22      (318 samples)
-#   holdout:        median 12.31, p95 35.89, max 50.31      (30 apps, never trained on)
+#   clean corpus:   median 10.83, p95 26.00, max 71.54      (299 apps scored)
+#   malware corpus: p25 57.44, median 67.81, max 76.50      (334 samples)
+#   holdout:        median 11.71, p95 41.75, max 43.37      (30 apps, never trained on)
 #
-# The holdout is the check that matters. Against the 80 training apps drawn from the
-# same 12-60 MB window it tracks almost exactly — median 12.31 vs 12.44, p75 18.71 vs
-# 19.81 — so the boundaries below are not fitted to apps the model saw.
+# The holdout is the check that matters, and it is the reason the three boundaries
+# below did not move even though the corpus did: holdout median 11.71 against the full
+# clean corpus's 10.83, p75 19.36 against 17.01. The never-trained apps sit marginally
+# HIGHER than the trained ones, which is the direction that cannot flatter the
+# boundaries.
 #
-# `low` — "costs no analyst time". Above the clean corpus's 95th percentile (27.73),
-# leaving 285 of 298 clean apps here. Malware lands here too; every one of those
-# recovered no forensic evidence at all, which is a limit on analysis depth that no
-# boundary can move.
+# The holdout is used to VALIDATE these boundaries, never to set them. Refitting to it
+# would leave no independent check at all, so where it disagrees with the training
+# corpus (see BAND_MEDIUM_CEILING) the disagreement is reported, not designed away.
+#
+# `low` — "costs no analyst time". Above the clean corpus's 95th percentile (26.00),
+# leaving 291 of 299 clean apps here, and 27 of the 30 never-trained holdout apps.
+# Malware lands here too (43 of 334); every one of those recovered no forensic evidence
+# at all, which is a limit on analysis depth that no boundary can move.
 BAND_LOW_CEILING = 30.0
-# `medium` — the 9 clean apps that clear `low` are not spread evenly through the old
-# `suspicious` range: all 9 top out at 37.05, and the next malware score above that is
-# 42.17 — a real 5-point gap with nothing in it, benign or malware. BAND_MEDIUM_CEILING
-# sits in that gap. This exists to stop labelling that clean-app tail `suspicious`,
-# which was overstating it — it is an analyst-trust fix, not a new detection boundary:
-# 4 malware samples fall in this band alongside the 9 benign ones, so `medium` reads as
-# "ambiguous", not "clean". Added 2026-08-22, derived from data/corpus_scores_v2.json.
+# `medium` — the clean apps that clear `low` are not spread evenly through the old
+# `suspicious` range: the 7 above 30 top out at 37.05, and the lowest malware score
+# above that is 40.28 — an empty 3.23-point gap with nothing in it, benign or malware.
+# BAND_MEDIUM_CEILING sits in that gap. This exists to stop labelling that clean-app
+# tail `suspicious`, which was overstating it — an analyst-trust fix, not a new
+# detection boundary: 2 malware samples fall in this band alongside the 7 benign ones,
+# so `medium` reads as "ambiguous", not "clean".
+#
+# **Two honest caveats, both new on the 2026-08-24 corpus.**
+#
+# 1. The gap narrowed from ~5 points to 3.23, and 40.0 now sits only 0.28 below the
+#    nearest malware sample (40.28). It is still inside the gap, so it is unchanged,
+#    but it no longer has room: a small upward shift in that one sample makes it read
+#    `medium`. That is the tolerable direction (`medium` means ambiguous, and the
+#    sample is still surfaced), but it is no longer a comfortable margin.
+#
+# 2. **The gap does not generalize.** It is a property of the 299-app training clean
+#    corpus. On the 30 never-trained holdout apps, 2 score ABOVE the 40.28 that defines
+#    the gap's upper edge — top.yztz.msggo at 43.37 and org.prauga.messages at 41.75 —
+#    so 2 of 30 unseen clean apps read `suspicious`, not `medium`. Both are SMS apps
+#    whose permission component is capped at 20.0/20 and which match
+#    STEALTH_SMS_INTERCEPTION / OTP_INTERCEPTION, i.e. the same capability overlap
+#    documented at BAND_SUSPICIOUS_CEILING below. The boundary is kept at 40.0 anyway,
+#    because moving it to swallow those two would be fitting to the holdout and would
+#    destroy the only independent check these constants have.
 BAND_MEDIUM_CEILING = 40.0
 # `suspicious` — the ceiling below which the tool never asserts a verdict. Youden's J
 # peaks far lower, at 27.0 (J=0.933); that difference is deliberately spent on almost
 # never showing an analyst a clean app marked `high`.
 #
-# "Almost", as of the 2026-08-21 corpus. The original criterion was "above the highest
-# score any clean app reaches", and on the 220-app corpus that was 53.33. Two apps in
-# the expanded clean corpus now exceed this ceiling, and they are kept as known
-# exceptions rather than designed around:
+# "Almost", as of the 2026-08-24 corpus. The original criterion was "above the highest
+# score any clean app reaches", and on the 220-app corpus that was 53.33. Exactly ONE
+# app in the clean corpus now exceeds this ceiling, and it is kept as a known exception
+# rather than designed around:
 #
-#   com.jens.automation2         69.19   43 permissions, ACCESSIBILITY_FULL_CONTROL,
+#   com.jens.automation2         71.54   43 permissions, ACCESSIBILITY_FULL_CONTROL,
 #                                        OVERLAY_ATTACK_PATTERN, OVERLAY_BOOT_PERSISTENCE,
 #                                        BANKING_TARGET_ENUMERATION, STEALTH_SMS_INTERCEPTION,
-#                                        DYNAMIC_CODE_LOADING
-#   dev.kerballone.spamblocker   61.90   OTP_INTERCEPTION, STEALTH_SMS_INTERCEPTION,
-#                                        OVERLAY_ATTACK_PATTERN, OVERLAY_BOOT_PERSISTENCE
+#                                        DYNAMIC_CODE_LOADING, 10 predicted techniques
 #
-# Both are clean, and both genuinely hold the capability surface of a banking trojan —
-# a Tasker-style automation app and an SMS spam blocker really do intercept SMS, read
-# OTPs, draw overlays and persist across boot. This is capability overlap, not a
-# scoring defect, and no boundary separates them: raising this ceiling above 69.19
-# would reclassify 189 of 318 malware (59%) as merely `suspicious`. The rest of the
-# clean corpus is nowhere near — the next highest score is 37.05, and 296 of 298
-# clean apps sit at or below it. (Those 9 apps between 30 and 37.05 now read `medium`,
-# not `suspicious` — see BAND_MEDIUM_CEILING above — so only the two named exceptions
-# remain above this ceiling.)
+# It is clean, and it genuinely holds the capability surface of a banking trojan — a
+# Tasker-style automation app really does intercept SMS, read OTPs, draw overlays and
+# persist across boot. This is capability overlap, not a scoring defect, and no boundary
+# separates it: raising this ceiling above 71.54 would reclassify most of the malware
+# corpus as merely `suspicious`. The rest of the clean corpus is nowhere near — the next
+# highest score is 37.05, and 298 of 299 clean apps sit at or below it.
+#
+# **dev.kerballone.spamblocker was the second exception here at 61.90 and no longer is
+# — it scores 34.88 on this corpus and reads `medium`.** The exception list went from two
+# to one without this boundary being touched. Nothing was done to that app specifically;
+# the forensic-dictionary and model changes since 2026-08-21 moved it on their own.
+#
+# Every clean app that clears `low` on either corpus is an SMS, automation or
+# accessibility tool. That is worth stating plainly rather than treating each as a
+# one-off: the false-positive tail is not noise, it is a well-defined class whose
+# legitimate function IS the banking-trojan capability surface, which is also why a
+# bank deploying this would whitelist by publisher certificate rather than by score.
 BAND_SUSPICIOUS_CEILING = 60.0
-# `high` — was placed below the malware first quartile (64.03) to maximize how much
-# malware reaches `malicious`; that criterion put the ceiling at 62.0, and both named
-# `suspicious`-ceiling exceptions above (69.19, 61.90) clear it, so `malicious` fired on
-# a clean app. Moved 2026-08-22 to the same criterion BAND_LOW_CEILING and the original
-# BAND_SUSPICIOUS_CEILING already use: placed above every known clean score (69.19)
-# instead of below the malware quartile. 70.0 is the smallest round number that clears
-# it.
+# `high` — the criterion is "placed above every known clean score", so that `malicious`,
+# the tool's strongest assertion, is unreachable by a clean app. 2026-08-22 that meant
+# 70.0, the smallest round number clearing the then-highest clean score of 69.19.
 #
-# Measured tradeoff (data/corpus_scores_v2.json, malware n=318): `malicious` becomes
-# reachable by 0 of 298 clean apps (both outliers now read `high`), but the malware
-# share reaching `malicious` drops from 247/318 (78%) to 103/318 (32%) — 70.0 sits
-# almost exactly at the split between the corpus's two largest buckets, (65,70]=124 and
-# (70,75]=102, close to the malware median (68.26). Nothing drops below `high`: total
-# malware at `high`-or-above is unchanged, 251/318 (79%), either way — this only moves
-# which of the two top labels a malware sample gets. Accepted deliberately: a false
-# `malicious` verdict on a legitimate app is judged worse than a real trojan reading
-# `high` instead of `malicious`.
-BAND_HIGH_CEILING = 70.0
+# **Raised to 72.0 on 2026-08-24, because 70.0 stopped satisfying its own criterion.**
+# com.jens.automation2 rose 69.19 -> 71.54 on the rebuilt corpus, so at 70.0 a clean app
+# read `malicious` — exactly the outcome this boundary exists to prevent. 72.0 is the
+# smallest round number clearing 71.54, which is the identical rule that produced 70.0.
+#
+# Measured tradeoff (data/corpus_scores_v3.json, malware n=334): `malicious` goes from
+# reachable by 1 of 299 clean apps to 0, and malware at `malicious` drops 118 -> 88
+# (35.3% -> 26.3%). **Nothing drops below `high`:** malware at `high`-or-above is
+# unchanged at 240/334 (71.9%) either way — this only moves which of the two top labels
+# a malware sample gets. Accepted deliberately, on the same judgment as before: a false
+# `malicious` verdict on a legitimate app is worse than a real trojan reading `high`.
+#
+# **Two things to know before touching this number again.**
+#
+# 1. **It is not a separating boundary and cannot be made into one.** There is no gap
+#    anywhere in (69, 76] larger than 0.5 points — the malware distribution is
+#    continuously dense there — and the nearest malware sample sits at 71.55, i.e. 0.01
+#    ABOVE the clean app at 71.54. The two classes are interleaved at that resolution.
+#    72.0 is a value judgment about one sample, not a discovered threshold, and the 0.46
+#    points of margin above 71.54 is all the room there is.
+#
+# 2. **That clean app is tracking upward with retraining** — 69.19 under the 364-row
+#    model, 71.54 under the 633-row one, driven by its classifier component reaching
+#    23.21/25. The retrained model is MORE confident that a clean automation app is
+#    malware. If it clears 72.0 on a future retrain, **do not keep raising this ceiling**:
+#    each raise costs real malware recall to accommodate one app that no boundary
+#    separates. Add it to the named-exception list at BAND_SUSPICIOUS_CEILING instead and
+#    leave the boundary where it is.
+BAND_HIGH_CEILING = 72.0
 
 # ── Brand impersonation (N11) ─────────────────────────────────────────────────
 # Impersonation enters the score as a FLOOR, not as an eighth weighted component.
@@ -274,6 +329,9 @@ IMPERSONATION_SCORE_FLOOR = {
     # reference hash could have been captured from a bad source APK.
     "icon_reuse": BAND_SUSPICIOUS_CEILING + _JUST_ABOVE,             # -> `high`
     "package_typosquat": BAND_SUSPICIOUS_CEILING + _JUST_ABOVE,      # -> `high`
+    # Same floor as a typosquat, for a stronger reason: a package cannot arrive at
+    # "<brand's full namespace>.<random>" by mistyping. See _check_package.
+    "package_namespace_squat": BAND_SUSPICIOUS_CEILING + _JUST_ABOVE,  # -> `high`
     # Weakest of the four: display names are not unique, and a genuine third-party
     # companion app may legitimately carry a brand's name.
     "label_impersonation": BAND_MEDIUM_CEILING + _JUST_ABOVE,        # -> `suspicious`
@@ -286,6 +344,7 @@ IMPERSONATION_SCORE_FLOOR = {
 IMPERSONATION_FLOOR_BAND = {
     "certificate_mismatch": "malicious",
     "icon_reuse": "high",
+    "package_namespace_squat": "high",
     "package_typosquat": "high",
     "label_impersonation": "suspicious",
 }
