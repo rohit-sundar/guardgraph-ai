@@ -11,17 +11,36 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.core.schemas import AnalysisManifest, RiskScoreBreakdown, ObfuscationSignal, BehavioralSubgraph
 
-# Mock the Neo4j ontology call before importing graphrag
-import app.graph.ontology
-app.graph.ontology.get_technique_context = lambda t: {
-    "T1636": "Stealth SMS Interception: Intercepting incoming SMS messages for OTP theft.",
-    "T1417": "Input Capture: Capturing user input (e.g. credentials) via overlays or keylogging.",
-    "T1624": "Screen Capture: Capturing the screen to steal sensitive data."
-}
 
-from app.reports.graphrag import generate_report
+def _install_ontology_stub():
+    """
+    Replaces the Neo4j-backed ontology lookup with fixed text so this harness
+    runs without a database, then imports graphrag AFTERWARDS — graphrag binds
+    the function with `from ... import get_technique_context`, so the stub only
+    takes effect if it is in place before that import runs.
+
+    Both the patch and the import live in here, called from main(), rather than
+    at module scope. This file's name matches pytest's `test_*.py` discovery
+    pattern, so a bare `pytest` from the repo root COLLECTS AND IMPORTS it —
+    and a module-level patch of a real module is never undone, silently
+    replacing the ontology lookup for every test that runs afterwards in the
+    same process. That produced a genuine, confusing failure: a cache-hit test
+    unrelated to this file received this dict, iterated it, and got the keys as
+    strings. Any import-time mutation of application state is unsafe here for
+    the same reason; keep side effects inside functions.
+    """
+    import app.graph.ontology
+    app.graph.ontology.get_technique_context = lambda t: {
+        "T1636": "Stealth SMS Interception: Intercepting incoming SMS messages for OTP theft.",
+        "T1417": "Input Capture: Capturing user input (e.g. credentials) via overlays or keylogging.",
+        "T1624": "Screen Capture: Capturing the screen to steal sensitive data."
+    }
+    from app.reports.graphrag import generate_report
+    return generate_report
+
 
 def main():
+    generate_report = _install_ontology_stub()
     print("🚀 Initializing RAG Test Harness...")
 
     # 1. Create Mock Obfuscation Signal
