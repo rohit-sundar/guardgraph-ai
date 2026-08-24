@@ -198,13 +198,21 @@ def build_frida_agent(result: Result):
     if not hooks_js.exists():
         result.add("Frida agent build", "FAIL", f"{hooks_js} not found — is app/analysis/frida_scripts/ present?")
         return
+    # Freshness is checked BEFORE npm is required, because npm is a build-time
+    # dependency needed only when a rebuild is actually warranted — demanding it
+    # to validate an already-committed artifact blocks setup for no reason.
+    # `>=`, not `>`: git stamps every file it checks out with the same mtime, so
+    # a fresh clone or merge lands _agent.js and hooks.js on an identical
+    # timestamp. Strict `>` reads that tie as "stale" and sends anyone without
+    # Node down a rebuild path they don't need (confirmed live on a merge).
+    if agent_js.exists() and agent_js.stat().st_mtime >= hooks_js.stat().st_mtime:
+        result.add("Frida agent build", "OK", "_agent.js already up to date")
+        return
     npm = shutil.which("npm")
     if not npm:
         result.add("Frida agent build", "FAIL",
-                    "npm not found on PATH — install Node.js (nodejs.org), then re-run this script")
-        return
-    if agent_js.exists() and agent_js.stat().st_mtime > hooks_js.stat().st_mtime:
-        result.add("Frida agent build", "OK", "_agent.js already up to date")
+                    "npm not found on PATH — hooks.js is newer than the compiled _agent.js, so this "
+                    "genuinely needs a rebuild: install Node.js (nodejs.org), then re-run this script")
         return
     try:
         node_modules = FRIDA_SCRIPTS_DIR / "node_modules"
@@ -366,7 +374,7 @@ def main():
     if args.check_only:
         agent_js = FRIDA_SCRIPTS_DIR / "_agent.js"
         if agent_js.exists():
-            result.add("Frida agent build", "OK" if agent_js.stat().st_mtime >
+            result.add("Frida agent build", "OK" if agent_js.stat().st_mtime >=
                         (FRIDA_SCRIPTS_DIR / "hooks.js").stat().st_mtime else "WARN",
                         "" if agent_js.exists() else "not built")
         else:
