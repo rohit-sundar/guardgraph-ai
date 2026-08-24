@@ -29,9 +29,11 @@ graph TD
     A[Phase 1: Ingestion & Metadata] --> B[Phase 1.5: Signature & Triage]
     B --> C[Phase 2: Graph Representation]
     C --> D[Phase 3: Forensic Anchor Matching]
-    D --> E[Phase 4: Feature Engineering]
+    D --> D2[Phase 3.5: RE Deep Dive]
+    D2 --> E[Phase 4: Feature Engineering]
     E --> F[Phase 5: ML TTP Classification]
-    F --> G[Phase 6: Risk Scoring]
+    F --> F2[Phase 5.5: Brand Impersonation]
+    F2 --> G[Phase 6: Risk Scoring]
     G --> H[Phase 7: GraphRAG Reporting]
 ```
 
@@ -39,9 +41,11 @@ graph TD
 - **Phase 1.5: Signature & Online Triage**: Checks local hash/cert DB, scans against VirusTotal API v3 and MalwareBazaar, and runs YARA scanning (8 built-in rules + 455 community rules).
 - **Phase 2: Graph Representation (CFGs & ACFGs)**: Builds control flow graphs per method.
 - **Phase 3: Forensic Anchor Matching & Subgraphs**: Matches forensic dictionary against CFGs and extracts 4-hop subgraphs around matched sensitive nodes.
+- **Phase 3.5: Reverse-Engineering Deep Dive** (`run_phase3b_re_deepdive`): Runs the shared register-constant propagation engine (`app/analysis/static_resolution.py`) over the CFGs to resolve `Cipher.getInstance`/`SecretKeySpec` crypto configuration, `DexClassLoader` dynamic-loading targets, `addJavascriptInterface` WebView bridges, and `System.loadLibrary`/JNI native symbol correlation. Entirely static — it fails closed on ambiguous dataflow rather than guessing.
 - **Phase 4: Feature Engineering**: Computes topological invariants across behavioral subgraphs and extracts obfuscation indicators (entropy, flattening z-score, parse failure rates).
-- **Phase 5: ML TTP Classification**: Runs direct multi-label TTP classification (Binary Relevance XGBoost, predicting 57 ATT&CK Mobile techniques).
-- **Phase 6: Risk Scoring & Verdict**: Evaluates the risk formula and labels zero-day indicators.
+- **Phase 5: ML TTP Classification**: Runs direct multi-label TTP classification (Binary Relevance XGBoost). 34 of the 57 ATT&CK Mobile techniques have enough corpus positives to train; the other 23 are in `dropped_labels` and are never predicted.
+- **Phase 5.5: Brand Impersonation** (`run_phase5b_impersonation`, `app/analysis/impersonation.py`): Answers "is this app pretending to be a different, legitimate app?" — a separate question from "how malicious does the code look?". Five checks against `data/reference/protected_brands.json`, all after Unicode-confusable normalization: `certificate_mismatch`, `icon_reuse`, `package_typosquat`, `package_namespace_squat`, and `label_impersonation`. A match raises a **floor** under the verdict rather than adding a weighted term, because a cloned banking app can carry a deliberately unremarkable payload. Re-runs on cache hits, so an updated brand table applies to already-analysed samples without re-analysis.
+- **Phase 6: Risk Scoring & Verdict**: Evaluates the risk formula and labels zero-day indicators. Five bands: `low` / `medium` / `suspicious` / `high` / `malicious`.
 - **Phase 7: GraphRAG Reporting**: Fetches ontology context from Neo4j and calls the local Ollama LLM to format the final narrative report.
 
 ---
