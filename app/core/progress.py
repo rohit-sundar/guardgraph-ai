@@ -42,6 +42,7 @@ PHASES: list[tuple[float, str]] = [
     (4, "Feature Engineering"),
     (5, "MITRE TTP Classification"),
     (5.5, "Brand Impersonation Checks"),
+    (5.7, "Dynamic Verification"),
     (6, "Risk Scoring"),
     (7, "GraphRAG Report Generation"),
 ]

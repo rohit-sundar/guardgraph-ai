@@ -125,6 +125,78 @@ class TestStoreSigAlwaysCalledAfterColdPath(unittest.TestCase):
                 f"Expected family='', got {kwargs.get('family')!r}")
 
 
+# ─── dynamically_confirmed C2 flag (Neo4j CONTACTS edge) ────────────────────
+
+class TestDynamicallyConfirmedC2Flag(unittest.TestCase):
+    """
+    store_signature must derive the C2 MERGE query's confirmed_c2 param from
+    dynamic_verification.network_confirmed, and find_related_samples must
+    surface the resulting shared_c2_confirmed subset — the flag that
+    distinguishes "this sample's DEX contains this C2 string" from the
+    strictly stronger "a dynamic pass actually observed it being contacted".
+    """
+
+    def _run_store(self, sha256, dynamic_verification=None):
+        import app.graph.cache as m
+        calls = []
+
+        def fake_run(query, **params):
+            calls.append((query, params))
+            return []
+
+        with patch.object(m.neo4j_client, "run", side_effect=fake_run):
+            m.store_signature(
+                sha256=sha256, family="banker", risk_score=50.0, ttps={},
+                c2_indicators=["evil.example.com"],
+                dynamic_verification=dynamic_verification,
+            )
+        return [p for q, p in calls if "C2Indicator" in q]
+
+    def test_confirmed_c2_derived_from_dynamic_verification(self):
+        c2_calls = self._run_store(
+            "cc" * 32, dynamic_verification={"network_confirmed": ["evil.example.com"]}
+        )
+        self.assertEqual(len(c2_calls), 1)
+        self.assertEqual(c2_calls[0]["confirmed_c2"], ["evil.example.com"])
+
+    def test_confirmed_c2_empty_when_no_dynamic_verification(self):
+        c2_calls = self._run_store("dd" * 32)
+        self.assertEqual(c2_calls[0]["confirmed_c2"], [])
+
+    def test_confirmed_c2_empty_when_dynamic_ran_but_nothing_confirmed(self):
+        c2_calls = self._run_store(
+            "ee" * 32, dynamic_verification={"network_confirmed": []}
+        )
+        self.assertEqual(c2_calls[0]["confirmed_c2"], [])
+
+    def test_shared_c2_confirmed_surfaces_in_related_samples(self):
+        import app.graph.cache as m
+        rows = [{
+            "sha256": "ff" * 32, "app_name": "evil.apk", "family": "banker",
+            "risk_score": 80.0, "shared_c2": ["evil.example.com"],
+            "shared_c2_confirmed": ["evil.example.com"],
+        }]
+        with patch.object(m.neo4j_client, "run", return_value=rows):
+            result = m.find_related_samples(
+                [], ["evil.example.com"], exclude_sha256="00" * 32
+            )
+        self.assertEqual(result[0]["shared_c2_confirmed"], ["evil.example.com"])
+
+    def test_shared_c2_confirmed_defaults_empty_when_absent(self):
+        # A row with no shared_c2_confirmed key (e.g. an older query shape)
+        # must not crash the merge — defaults to [], not None/KeyError.
+        import app.graph.cache as m
+        rows = [{
+            "sha256": "11" * 32, "app_name": "evil.apk", "family": "banker",
+            "risk_score": 80.0, "shared_c2": ["evil.example.com"],
+        }]
+        with patch.object(m.neo4j_client, "run", return_value=rows):
+            result = m.find_related_samples(
+                [], ["evil.example.com"], exclude_sha256="00" * 32
+            )
+        self.assertEqual(result[0]["shared_c2_confirmed"], [])
+
+
 # ─── LLM warm-up: first report after a cold model load ──────────────────────
 
 class TestEnsureModelWarm(unittest.TestCase):
@@ -457,6 +529,113 @@ class TestStripFabricatedIdentification(unittest.TestCase):
         narrative = "### Verdict\nMalicious, score 73.7/100.\n"
         cleaned = _strip_fabricated_identification(narrative, "aa" * 32, "com.x")
         self.assertEqual(cleaned, narrative)
+
+
+# ─── Bug: model reverts to an entire alternate fake report template ─────────
+# Observed live (2026-08-24): on a fresh cold-path sample, the model wrote a
+# full "Malware Analysis Report" with a fabricated Analysis Date, a fabricated
+# family name, a verbatim risk_score restatement, and generic advice using the
+# exact three phrases SYSTEM_PROMPT rule 12 forbids — none of it caught by the
+# permission/identifier/placeholder checks since every fabricated field used a
+# concrete (wrong) value rather than a bracketed placeholder or a recognizable
+# hash/permission pattern. Fixture below is condensed from the real captured
+# narrative, not invented for the test.
+
+class TestSectionContractCheck(unittest.TestCase):
+
+    _FABRICATED_NARRATIVE = (
+        "**Sample:** `com.google.android.apps.fitness` — **SHA-256:** `abc123`\n\n"
+        "### Malware Analysis Report\n\n"
+        "#### General Information\n"
+        "- **File Size:** 1.2 MB\n"
+        "- **Analysis Date:** 2023-10-10\n"
+        "- **Analysis Tool:** Mobile Malware Analyzer\n\n"
+        "#### Malware Indicators\n"
+        "- **Malware Family:** AndroidMalware\n\n"
+        "### Key Evidence\n"
+        "The app requests SEND_SMS and has a RAT classifier signal.\n\n"
+        "#### Risk Score Breakdown\n"
+        "- **Total Score:** 59.85\n\n"
+        "### Recommendations\n"
+        "1. Isolate the device from the network.\n"
+        "2. Educate users about risks.\n\n"
+        "### Conclusion\n"
+        "The analysis indicates malware.\n"
+    )
+
+    def test_flags_every_unauthorized_section(self):
+        from app.reports.graphrag import _section_contract_check
+        found = _section_contract_check(self._FABRICATED_NARRATIVE)
+        normalized = {f.lstrip("#").strip().lower() for f in found}
+        self.assertIn("malware analysis report", normalized)
+        self.assertIn("general information", normalized)
+        self.assertIn("malware indicators", normalized)
+        self.assertIn("risk score breakdown", normalized)
+        self.assertIn("recommendations", normalized)
+        self.assertIn("conclusion", normalized)
+        # The one legitimate section in the mix must NOT be flagged.
+        self.assertNotIn("key evidence", normalized)
+
+    def test_strips_unauthorized_sections_keeps_allowed_and_opening_sentence(self):
+        from app.reports.graphrag import _strip_unauthorized_sections
+        cleaned = _strip_unauthorized_sections(self._FABRICATED_NARRATIVE)
+        # The unheaded opening sentence (the deterministic sha256/package
+        # header, in this fixture) survives — it comes before any header.
+        self.assertIn("**Sample:** `com.google.android.apps.fitness`", cleaned)
+        # Every fabricated field and section is gone.
+        for banned in ("Analysis Date", "AndroidMalware", "Risk Score Breakdown",
+                       "Isolate the device", "Educate users", "Conclusion",
+                       "General Information", "Malware Indicators"):
+            self.assertNotIn(banned, cleaned)
+        # The one legitimate section survives with its real content intact.
+        self.assertIn("### Key Evidence", cleaned)
+        self.assertIn("The app requests SEND_SMS and has a RAT classifier signal.", cleaned)
+
+    def test_no_flag_on_clean_narrative(self):
+        from app.reports.graphrag import _section_contract_check
+        narrative = (
+            "Malicious, score 73.7/100 — a confirmed banking trojan.\n\n"
+            "### Key Evidence\nRequests SEND_SMS and RECEIVE_SMS together.\n\n"
+            "### Coverage Limitations\nNative code was not analyzed.\n\n"
+            "### Recommended Analyst Actions\n1. Escalate to fraud response.\n"
+        )
+        self.assertEqual(_section_contract_check(narrative), [])
+
+    def test_strip_is_a_no_op_on_clean_narrative(self):
+        from app.reports.graphrag import _strip_unauthorized_sections
+        narrative = (
+            "Malicious, score 73.7/100.\n\n"
+            "### Key Evidence\nRequests SEND_SMS and RECEIVE_SMS together.\n"
+        )
+        self.assertEqual(_strip_unauthorized_sections(narrative).strip(), narrative.strip())
+
+    def test_header_matching_is_case_and_whitespace_tolerant(self):
+        from app.reports.graphrag import _section_contract_check
+        narrative = "####   key evidence   \nSome content.\n"
+        self.assertEqual(_section_contract_check(narrative), [])
+
+    def test_bold_header_wrapper_recognized_as_allowed(self):
+        # A model sometimes bolds the header text itself; the trailing colon
+        # and markdown-bold wrapper must not defeat the allowed-header match.
+        from app.reports.graphrag import _section_contract_check
+        narrative = "### **Coverage Limitations:**\nSome content.\n"
+        self.assertEqual(_section_contract_check(narrative), [])
+
+    def test_strip_leaves_empty_string_when_model_wrote_only_fabricated_sections(self):
+        # Observed live: the model's first line can go straight into a
+        # fabricated header with no legitimate unheaded opening sentence at
+        # all (rule 11 requires one, but the model doesn't always write it) —
+        # stripping every section then leaves nothing. generate_report()
+        # detects this exact empty-string case and substitutes a discarded-
+        # message fallback; this test locks in that _strip_unauthorized_
+        # sections alone correctly produces the empty string it must detect.
+        from app.reports.graphrag import _strip_unauthorized_sections
+        narrative = (
+            "### Malware Analysis Report\n\n"
+            "#### General Information\n"
+            "- **Analysis Date:** 2023-10-10\n"
+        )
+        self.assertEqual(_strip_unauthorized_sections(narrative).strip(), "")
 
 
 # ─── Bug: greedy-decode degenerate repetition loop ───────────────────────────

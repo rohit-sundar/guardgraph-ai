@@ -5,11 +5,18 @@
 > build status, what's real vs stubbed, and what to do next. Read this before
 > touching any code.
 
-> **This file predates 2026-08-22.** Read **`TEAM_CONTEXT.md`'s "Session 12"** entry first — it covers
-> everything added since (RE deep dive, manifest/ZIP resilience, Neo4j graph correlation, GraphRAG
-> anti-fabrication) and, importantly, records what was *tried and found not to work* (e.g. the local
-> LLM does not reliably follow structural output instructions, confirmed across repeated live tests —
-> don't re-attempt a rigid section-header contract without reading why it was reverted).
+> **This file predates 2026-08-22 and its "static-analysis-only" framing below (Sections 1 and 4) is
+> now WRONG.** Read **`TEAM_CONTEXT.md`'s "Session 14"** entry first — as of 2026-08-24 this project
+> also runs a scoped, opt-in Android-emulator + Frida **dynamic** verification pass
+> (`app/analysis/dynamic_verification.py`) alongside the static pipeline, specifically to confirm/refute
+> static predictions (C2 contact, DCL payload execution, native library loads) at runtime. That work is
+> currently **uncommitted on this machine** — check `git status` before assuming it exists wherever
+> you're reading this from. Sessions 12-13 (RE deep dive, manifest/ZIP resilience, Neo4j graph
+> correlation, GraphRAG anti-fabrication, several small committed fixes) are also not covered here —
+> read Session 12/13/14 in `TEAM_CONTEXT.md`'s Change Log in that order. Session 12 importantly records
+> what was *tried and found not to work* (e.g. the local LLM does not reliably follow structural output
+> instructions, confirmed across repeated live tests — don't re-attempt a rigid section-header contract
+> without reading why it was reverted).
 
 ---
 
@@ -31,10 +38,16 @@ CAPEC mappings, known signatures, malware families) and a GraphRAG layer
 (Claude API) generates analyst-readable, evidence-grounded reports — never
 hallucinating findings not present in the extracted data.
 
-### Why this approach (explicit design decision)
+### Why this approach (explicit design decision — since revised, see banner above)
 - Dynamic analysis (sandboxing/emulation) was ruled out as too heavy/slow for
   the target use case (banks need fast per-APK verdicts during active fraud
-  campaigns).
+  campaigns). **Revised in Session 14 (2026-08-24, `TEAM_CONTEXT.md`)**: a
+  scoped, strictly opt-in dynamic pass was added on top of this static
+  engine, not instead of it — the default/cold path is still exactly this
+  static-only design; dynamic analysis only ever runs when a caller
+  explicitly asks for it via `enable_dynamic`, and every dynamic hook exists
+  to confirm/refute a specific prediction this static engine already made,
+  never as an independent verdict source.
 - Static graph-invariant features were chosen specifically because they
   survive common obfuscation techniques that defeat naive string/API-name
   matching.

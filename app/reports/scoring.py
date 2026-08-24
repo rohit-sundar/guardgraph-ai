@@ -266,6 +266,50 @@ BAND_HIGH_CEILING = 70.0
 # to survive the round(total, 2) applied to the final score.
 _JUST_ABOVE = 0.01
 
+# ── Dynamic verification (Phase 8) ────────────────────────────────────────────
+# Same floor pattern as impersonation, not an eighth weighted component: dynamic
+# confirmation has no comparable measured corpus yet (impersonation's floors were
+# derived from what Android's own trust model guarantees; these two are simply
+# "this is strong enough evidence that it shouldn't read as a low weighted score
+# just because a static component happened to be quiet"). A `not_observed` dynamic
+# result must NEVER lower a verdict — see compute_risk_score below, where only a
+# confirmed positive contributes a floor at all.
+DYNAMIC_CONFIRMATION_SCORE_FLOOR = {
+    # A statically-extracted C2 indicator (Telegram bot, Discord webhook, raw
+    # IP:port, .onion, etc.) that the app actually connected to at runtime —
+    # this is live, observed contact with attacker infrastructure, not a string
+    # sitting unused in the binary.
+    "c2_contact_confirmed": BAND_SUSPICIOUS_CEILING + _JUST_ABOVE,   # -> `high`
+    # A DexClassLoader/PathClassLoader target the static pass could only
+    # resolve to a path actually got loaded and executed at runtime — the
+    # exact "predicted but unseen payload" gap the static-only README already
+    # documents as a known limitation, closed by direct observation.
+    "dcl_payload_executed": BAND_SUSPICIOUS_CEILING + _JUST_ABOVE,   # -> `high`
+}
+
+
+def dynamic_confirmation_floor(dynamic_verification: dict | None) -> float:
+    """
+    Extracted so the hot (cache-hit) path in routes.py can apply the exact
+    same floor logic when a request explicitly asks for dynamic verification
+    on an already-cached sample — dynamic behavior is a runtime property, not
+    something a static-analysis cache hit should silently skip just because
+    the SHA-256 was seen before.
+
+    Only a CONFIRMED positive contributes — a `ran: False` (pass didn't
+    complete) or an all-empty `ran: True` (nothing confirmed) result must
+    never lower a score, so both read as 0.0 here, identical to "no dynamic
+    evidence available" rather than "checked, found nothing malicious".
+    """
+    floor = 0.0
+    if dynamic_verification and dynamic_verification.get("ran"):
+        if dynamic_verification.get("network_confirmed"):
+            floor = max(floor, DYNAMIC_CONFIRMATION_SCORE_FLOOR.get("c2_contact_confirmed", 0.0))
+        if dynamic_verification.get("dcl_payload_executed"):
+            floor = max(floor, DYNAMIC_CONFIRMATION_SCORE_FLOOR.get("dcl_payload_executed", 0.0))
+    return floor
+
+
 IMPERSONATION_SCORE_FLOOR = {
     # Definitive: Android identifies publishers by signing key. Either the real
     # publisher signed this or somebody else did, and there is no third case.
@@ -696,6 +740,9 @@ def compute_risk_score(
     # at least a "kind". Applied as a floor, not a weighted term — see
     # IMPERSONATION_SCORE_FLOOR for why.
     impersonation_findings: list[dict] | None = None,
+    # Phase 8's output dict (dynamic_verification.py), or None when that phase
+    # didn't run. Applied as a floor — see DYNAMIC_CONFIRMATION_SCORE_FLOOR.
+    dynamic_verification: dict | None = None,
 ) -> RiskScoreBreakdown:
     if matched_anchor_behaviors is None:
         matched_anchor_behaviors = set()
@@ -744,8 +791,10 @@ def compute_risk_score(
             impersonation_floor,
             IMPERSONATION_SCORE_FLOOR.get(finding.get("kind", ""), 0.0),
         )
-    if impersonation_floor > total:
-        total = impersonation_floor
+
+    dynamic_floor = dynamic_confirmation_floor(dynamic_verification)
+
+    total = max(total, impersonation_floor, dynamic_floor)
 
     band = _band_for(total)
 
@@ -773,5 +822,6 @@ def compute_risk_score(
         verdict_band=band,
         zero_day_indicator=zero_day_indicator,
         impersonation_floor_applied=impersonation_floor > weighted_total,
+        dynamic_confirmation_floor_applied=dynamic_floor > weighted_total,
         weighted_score=round(weighted_total, 2),
     )

@@ -279,7 +279,7 @@ function handleFileSelected(file) {
 // Real pipeline phase count — must match app.core.progress.PHASES on the backend.
 // Only used as a fallback when an event omits total_phases; every event from a
 // current server carries its own, so this rarely matters in practice.
-const PIPELINE_PHASE_COUNT = 10;
+const PIPELINE_PHASE_COUNT = 11;
 
 async function uploadAndAnalyze(file) {
   document.getElementById('uploadSection').classList.add('hidden');
@@ -290,8 +290,11 @@ async function uploadAndAnalyze(file) {
   const formData = new FormData();
   formData.append("file", file);
 
+  const enableDynamic = document.getElementById('enableDynamicCheckbox')?.checked || false;
+  const startUrl = enableDynamic ? '/analyze/start?enable_dynamic=true' : '/analyze/start';
+
   try {
-    const startResp = await fetch('/analyze/start', {
+    const startResp = await fetch(startUrl, {
       method: 'POST',
       body: formData
     });
@@ -644,6 +647,13 @@ function renderResults(data) {
   // Reverse Engineering Findings (crypto / DCL / WebView / native)
   renderReFindings(manifest);
 
+  // Dynamic verification (Phase 8, opt-in) — tab stays hidden unless it ran
+  renderDynamicVerification(manifest);
+
+  // Coverage & limitations — always computed by the backend, was never
+  // rendered anywhere before this. See renderLimitations for why that mattered.
+  renderLimitations(data.limitations);
+
   // Brand impersonation / app identity
   renderImpersonation(manifest, risk);
 
@@ -862,6 +872,337 @@ function renderReFindings(manifest) {
 
   const countEl = document.getElementById('reFindingsCount');
   if (countEl) countEl.textContent = total;
+}
+
+function renderLimitations(limitations) {
+  const card = document.getElementById('limitationsCard');
+  const list = document.getElementById('limitationsList');
+  if (!card || !list) return;
+
+  const items = limitations || [];
+  if (items.length === 0) {
+    card.classList.add('hidden');
+    return;
+  }
+  card.classList.remove('hidden');
+  list.innerHTML = '';
+  items.forEach(text => {
+    const item = document.createElement('div');
+    item.className = 'limitation-item';
+    if (text.startsWith('HISTORICAL RECORD')) {
+      item.classList.add('historical-record');
+    }
+    item.textContent = text;
+    list.appendChild(item);
+  });
+}
+
+function renderDynamicVerification(manifest) {
+  const tabBtn = document.getElementById('tabBtnDynamicVerification');
+  const dyn = manifest.dynamic_verification || null;
+
+  // Hidden entirely unless this request actually asked for a dynamic pass —
+  // `dynamic_verification: null` (the default for every normal analysis) is
+  // not "ran and found nothing", it's "wasn't requested", and showing an
+  // empty tab for that on every report would be misleading, not honest.
+  if (!dyn) {
+    if (tabBtn) tabBtn.classList.add('hidden');
+    return;
+  }
+  if (tabBtn) tabBtn.classList.remove('hidden');
+
+  setText('dynDuration', dyn.ran ? `${dyn.duration_s}s` : 'did not complete');
+  setText('dynCoverage', dyn.coverage_note || '—');
+
+  // Runtime Activity Summary — always populated when ran=true, regardless of
+  // whether anything matched a static prediction. Without this, a run where
+  // the app simply didn't do anything predictable rendered as three empty
+  // "None found" sections and nothing else, which reads as broken even when
+  // it's an honest, correctly-computed negative result.
+  const summaryEl = document.getElementById('dynActivitySummary');
+  if (summaryEl) {
+    const es = dyn.event_summary || {};
+    if (!dyn.ran || Object.keys(es).length === 0) {
+      summaryEl.innerHTML = '';
+    } else {
+      const labels = {
+        hook_installed: 'hook(s) installed successfully',
+        hook_error: 'hook(s) failed to install',
+        network: 'network connection attempt(s)',
+        sms_send: 'SMS send attempt(s)',
+        dcl_class_load: 'class(es) dynamically loaded',
+        accessibility_bound: 'accessibility service bind(s)',
+        crypto_invoked: 'crypto API invocation(s)',
+        url_accessed: 'URL(s) requested',
+        file_written: 'file write(s)',
+        command_executed: 'command(s) executed',
+        sms_intercepted: 'incoming SMS intercepted',
+        overlay_window: 'overlay window(s) drawn',
+        sensitive_content_query: 'sensitive content read(s)',
+        clipboard_read: 'clipboard read(s)',
+        target_crashed: 'process crash(es) mid-capture',
+        ready: null, // internal marker, not analyst-relevant
+      };
+      const parts = Object.entries(es)
+        .filter(([kind]) => labels[kind] !== null)
+        .map(([kind, count]) => `${count} ${labels[kind] || kind}`);
+      summaryEl.innerHTML = '';
+      const item = document.createElement('div');
+      item.className = 're-finding-item';
+      item.textContent = parts.join(' · ');
+      summaryEl.appendChild(item);
+    }
+  }
+
+  // Live screenshots — hidden entirely unless at least one capture succeeded.
+  const screenshotSection = document.getElementById('dynScreenshotSection');
+  const screenshotImg = document.getElementById('dynScreenshot');
+  const screenshotFinalWrap = document.getElementById('dynScreenshotFinalWrap');
+  const screenshotReactionImg = document.getElementById('dynScreenshotReaction');
+  const screenshotReactionWrap = document.getElementById('dynScreenshotReactionWrap');
+  const eventScreenshotsWrap = document.getElementById('dynEventScreenshotsWrap');
+  const eventScreenshotsList = document.getElementById('dynEventScreenshots');
+  const EVENT_SCREENSHOT_LABELS = {
+    sms_intercepted: 'SMS Intercepted',
+    overlay_window: 'Overlay Drawn',
+    accessibility_bound: 'Accessibility Bound',
+    dcl_class_load: 'Payload Class Loaded',
+    sms_send: 'SMS Sent',
+    command_executed: 'OS Command Executed',
+  };
+  if (screenshotSection && screenshotImg && screenshotReactionImg) {
+    const hasReaction = !!dyn.screenshot_reaction_url;
+    const hasFinal = !!dyn.screenshot_url;
+    const eventShots = dyn.event_screenshots || [];
+    // Cache-bust: the same sha256 can be re-analyzed, producing a new
+    // screenshot at the same URL — without this the browser would keep
+    // showing a stale cached image from an earlier run.
+    if (hasReaction) {
+      screenshotReactionWrap.classList.remove('hidden');
+      screenshotReactionImg.src = dyn.screenshot_reaction_url + '?t=' + Date.now();
+    } else {
+      screenshotReactionWrap.classList.add('hidden');
+    }
+    if (hasFinal) {
+      screenshotFinalWrap.classList.remove('hidden');
+      screenshotImg.src = dyn.screenshot_url + '?t=' + Date.now();
+    } else {
+      screenshotFinalWrap.classList.add('hidden');
+    }
+    if (eventScreenshotsWrap && eventScreenshotsList) {
+      eventScreenshotsList.innerHTML = '';
+      if (eventShots.length) {
+        eventScreenshotsWrap.classList.remove('hidden');
+        for (const shot of eventShots) {
+          if (!shot.url) continue;
+          const wrap = document.createElement('div');
+          const label = document.createElement('div');
+          label.style.cssText = 'font-size:0.85em; opacity:0.8; margin-bottom:4px;';
+          label.textContent = EVENT_SCREENSHOT_LABELS[shot.kind] || shot.kind;
+          const img = document.createElement('img');
+          img.style.cssText = 'max-width:320px; border-radius:8px; border:1px solid rgba(255,255,255,0.15); display:block;';
+          img.alt = `Live capture taken when ${shot.kind} fired`;
+          img.src = shot.url + '?t=' + Date.now();
+          wrap.appendChild(label);
+          wrap.appendChild(img);
+          eventScreenshotsList.appendChild(wrap);
+        }
+      } else {
+        eventScreenshotsWrap.classList.add('hidden');
+      }
+    }
+    screenshotSection.classList.toggle('hidden', !hasReaction && !hasFinal && !eventShots.length);
+  }
+
+  const networkList = document.getElementById('dynNetworkList');
+  const dclList = document.getElementById('dynDclList');
+  const nativeList = document.getElementById('dynNativeList');
+  const otherList = document.getElementById('dynOtherList');
+  if (!networkList || !dclList || !otherList) return;
+
+  networkList.innerHTML = '';
+  const confirmedSet = new Set(dyn.network_confirmed || []);
+  const unpredictedObserved = (dyn.network_observed_all || []).filter(
+    v => !confirmedSet.has(v)
+  );
+  const networkRows = [
+    ...(dyn.network_confirmed || []).map(v => ({ text: `CONFIRMED — runtime contacted ${v}`, ok: true })),
+    ...unpredictedObserved.map(v => ({ text: `OBSERVED (no matching static prediction) — runtime contacted ${v}`, ok: true })),
+    ...(dyn.network_predicted_not_seen || []).map(v => ({ text: `not observed — ${v} was not contacted during the capture window`, ok: false })),
+  ];
+  if (networkRows.length === 0) {
+    networkList.appendChild(emptyNote('No statically-extracted C2 indicators to check against, and no network connections observed at runtime.'));
+  } else {
+    networkRows.forEach(row => {
+      const item = document.createElement('div');
+      item.className = 're-finding-item';
+      item.classList.toggle('re-finding-weak', row.ok);
+      item.textContent = row.text;
+      networkList.appendChild(item);
+    });
+  }
+
+  dclList.innerHTML = '';
+  if (dyn.dcl_payload_executed) {
+    const item = document.createElement('div');
+    item.className = 're-finding-item re-finding-weak';
+    item.textContent = 'CONFIRMED — a resolved DexClassLoader target was observed executing at runtime'
+      + (dyn.dcl_classes_loaded.length ? `: ${dyn.dcl_classes_loaded.join(', ')}` : '');
+    dclList.appendChild(item);
+  } else if (dyn.dcl_classes_loaded && dyn.dcl_classes_loaded.length) {
+    const item = document.createElement('div');
+    item.className = 're-finding-item';
+    item.textContent = `Classes loaded at runtime (no static DCL target match): ${dyn.dcl_classes_loaded.join(', ')}`;
+    dclList.appendChild(item);
+  } else {
+    dclList.appendChild(emptyNote('No dynamic class-loading observed during the capture window.'));
+  }
+
+  if (nativeList) {
+    nativeList.innerHTML = '';
+    if (dyn.native_library_confirmed) {
+      const item = document.createElement('div');
+      item.className = 're-finding-item re-finding-weak';
+      item.textContent = 'CONFIRMED — a resolved native library was observed loading at runtime'
+        + ((dyn.native_libraries_loaded || []).length ? `: ${dyn.native_libraries_loaded.join(', ')}` : '');
+      nativeList.appendChild(item);
+    } else if (dyn.native_libraries_loaded && dyn.native_libraries_loaded.length) {
+      const item = document.createElement('div');
+      item.className = 're-finding-item';
+      item.textContent = `Native libraries loaded at runtime (no static resolution match): ${dyn.native_libraries_loaded.join(', ')}`;
+      nativeList.appendChild(item);
+    } else {
+      nativeList.appendChild(emptyNote('No native library loading observed during the capture window.'));
+    }
+  }
+
+  otherList.innerHTML = '';
+  const otherRows = [];
+  if (dyn.sms_api_invoked) {
+    const dests = (dyn.sms_destinations || []).join(', ');
+    otherRows.push('CONFIRMED — SmsManager.sendTextMessage was invoked at runtime'
+      + (dests ? ` — destination(s): ${dests}` : ''));
+  }
+  if (dyn.accessibility_bound) {
+    const svcs = (dyn.accessibility_services || []).join(', ');
+    otherRows.push('CONFIRMED — an AccessibilityService was bound at runtime'
+      + (svcs ? `: ${svcs}` : ''));
+  }
+  if (dyn.crypto_invoked) {
+    const algos = (dyn.crypto_algorithms || []).join(', ');
+    otherRows.push('CONFIRMED — Cipher.doFinal was invoked at runtime'
+      + (algos ? ` — algorithm(s): ${algos}` : ''));
+  }
+  if (otherRows.length === 0) {
+    otherList.appendChild(emptyNote('No SMS, accessibility, or crypto API invocation observed during the capture window.'));
+  } else {
+    otherRows.forEach(text => {
+      const item = document.createElement('div');
+      item.className = 're-finding-item re-finding-weak';
+      item.textContent = text;
+      otherList.appendChild(item);
+    });
+  }
+
+  const iocList = document.getElementById('dynIocList');
+  if (iocList) {
+    iocList.innerHTML = '';
+    const iocRows = [
+      ...(dyn.urls_accessed || []).map(v => `URL requested: ${v}`),
+      ...(dyn.files_written || []).map(v => `File written: ${v}`),
+      ...(dyn.commands_executed || []).map(v => `Command executed: ${v}`),
+    ];
+    if (iocRows.length === 0) {
+      iocList.appendChild(emptyNote('No URLs, file writes, or command execution observed during the capture window.'));
+    } else {
+      iocRows.forEach(text => {
+        const item = document.createElement('div');
+        item.className = 're-finding-item re-finding-weak';
+        item.textContent = text;
+        iocList.appendChild(item);
+      });
+    }
+  }
+
+  const smsInterceptList = document.getElementById('dynSmsInterceptList');
+  if (smsInterceptList) {
+    smsInterceptList.innerHTML = '';
+    const senders = dyn.sms_intercepted || [];
+    if (senders.length === 0) {
+      smsInterceptList.appendChild(emptyNote('The simulated inbound SMS was not observed being parsed by this app during the capture window.'));
+    } else {
+      senders.forEach(sender => {
+        const item = document.createElement('div');
+        item.className = 're-finding-item re-finding-weak';
+        item.textContent = `CONFIRMED — app parsed an incoming SMS from ${sender}`;
+        smsInterceptList.appendChild(item);
+      });
+    }
+  }
+
+  const overlayList = document.getElementById('dynOverlayList');
+  if (overlayList) {
+    overlayList.innerHTML = '';
+    const types = dyn.overlay_window_types || [];
+    if (!dyn.overlay_detected || types.length === 0) {
+      overlayList.appendChild(emptyNote('No system/overlay-class window addition observed during the capture window.'));
+    } else {
+      types.forEach(t => {
+        const item = document.createElement('div');
+        item.className = 're-finding-item re-finding-weak';
+        item.textContent = `CONFIRMED — a system/overlay-class window was drawn at runtime (${t})`;
+        overlayList.appendChild(item);
+      });
+    }
+  }
+
+  const sensitiveList = document.getElementById('dynSensitiveDataList');
+  if (sensitiveList) {
+    sensitiveList.innerHTML = '';
+    const rows = [
+      ...(dyn.sensitive_content_queries || []).map(v => `Content query: ${v}`),
+      ...(dyn.clipboard_read ? ['CONFIRMED — clipboard contents were read at runtime'] : []),
+    ];
+    if (rows.length === 0) {
+      sensitiveList.appendChild(emptyNote('No contacts/call-log/SMS-history or clipboard access observed during the capture window.'));
+    } else {
+      rows.forEach(text => {
+        const item = document.createElement('div');
+        item.className = 're-finding-item re-finding-weak';
+        item.textContent = text;
+        sensitiveList.appendChild(item);
+      });
+    }
+  }
+
+  const timelineList = document.getElementById('dynTimelineList');
+  if (timelineList) {
+    timelineList.innerHTML = '';
+    const timeline = dyn.timeline || [];
+    if (timeline.length === 0) {
+      timelineList.appendChild(emptyNote('No timestamped events to show (either nothing fired, or the pass did not run).'));
+    } else {
+      timeline.forEach(ev => {
+        const item = document.createElement('div');
+        item.className = 're-finding-item';
+        const seconds = (ev.t / 1000).toFixed(2);
+        item.textContent = `t+${seconds}s — ${ev.kind}: ${ev.value}`;
+        timelineList.appendChild(item);
+      });
+    }
+  }
+
+  const crashLogcatSection = document.getElementById('dynCrashLogcatSection');
+  const crashLogcatText = document.getElementById('dynCrashLogcatText');
+  if (crashLogcatSection && crashLogcatText) {
+    const tail = dyn.crash_logcat_tail || [];
+    if (tail.length) {
+      crashLogcatSection.classList.remove('hidden');
+      crashLogcatText.textContent = tail.join('\n');
+    } else {
+      crashLogcatSection.classList.add('hidden');
+    }
+  }
 }
 
 function renderGrounding(grounding, narrativeText) {
@@ -1097,7 +1438,14 @@ function renderRelatedSamples(manifest) {
     const item = document.createElement('div');
     item.className = 'related-sample-item';
     const sharedTech = (r.shared_techniques || []).map(t => `<span class="chip">${esc(t)}</span>`).join('');
-    const sharedC2 = (r.shared_c2 || []).map(c => `<span class="chip chip-danger">${esc(c)}</span>`).join('');
+    const confirmedC2 = new Set(r.shared_c2_confirmed || []);
+    const sharedC2 = (r.shared_c2 || []).map(c => {
+      const isConfirmed = confirmedC2.has(c);
+      const title = isConfirmed
+        ? 'A dynamic pass on this other sample actually observed it contacting this indicator, not just sharing the string'
+        : 'Shared as a static string only — not (yet) dynamically confirmed live on this other sample';
+      return `<span class="chip chip-danger" title="${esc(title)}">${isConfirmed ? '✓ ' : ''}${esc(c)}</span>`;
+    }).join('');
     item.innerHTML = `
       <div class="related-sample-header">
         <span class="mitre-name">${esc(r.app_name || r.sha256)}</span>

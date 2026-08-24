@@ -1,6 +1,7 @@
 # GuardGraph AI — Processing Phases
 
-This document describes the 9 sequential static analysis execution phases that construct the processing pipeline in the cold path.
+This document describes the sequential execution phases in the cold path — mostly static analysis,
+plus one opt-in dynamic phase (5.7) added 2026-08-24 (see `TEAM_CONTEXT.md` Session 14).
 
 ```mermaid
 graph TD
@@ -10,7 +11,9 @@ graph TD
     C --> C5[Phase 3.5: RE Deep Dive]
     C5 --> D[Phase 4: Feature Engineering]
     D --> E[Phase 5: ML Classification]
-    E --> F[Phase 6: Risk Scoring]
+    E --> E5[Phase 5.5: Brand Impersonation]
+    E5 --> E7[Phase 5.7: Dynamic Verification - opt-in]
+    E7 --> F[Phase 6: Risk Scoring]
     F --> G[Phase 7: GraphRAG Reporting]
 ```
 
@@ -44,6 +47,32 @@ graph TD
 ### Phase 5: Machine Learning Classification
 - **Module**: `app/ml/classifier.py`
 - **Actions**: Feeds the compiled feature vector into the XGBoost classifier to predict the threat/malware family (e.g., banker, rat) and maps the classification to MITRE ATT&CK Mobile techniques.
+
+### Phase 5.5: Brand Impersonation Checks
+- **Module**: `app/analysis/impersonation.py`, `app/core/pipeline.py::run_phase5b_impersonation`
+- **Actions**: Answers a different question than every other phase — "is this app pretending to be a
+  different, legitimate app?" rather than "how malicious does the code look?". Checks the current
+  sample's package name / display label / launcher icon / signing certificate against
+  `data/reference/protected_brands.json` (65 brands as of 2026-08-24) for certificate mismatch, icon
+  reuse, package typosquatting, and label impersonation. A match raises a **floor** under the verdict
+  rather than adding to the weighted score (`IMPERSONATION_SCORE_FLOOR` in `scoring.py`).
+
+### Phase 5.7: Dynamic Verification [NEW Session 14, 2026-08-24 — opt-in, off by default]
+- **Module**: `app/analysis/dynamic_verification.py`, `app/analysis/frida_scripts/`,
+  `app/core/pipeline.py::run_phase8_dynamic_verification`
+- **Actions**: Only runs when the request explicitly passes `enable_dynamic=true` AND
+  `settings.dynamic_analysis_enabled` is on (both default off — never affects the default path's speed
+  or behavior). Installs the APK on a locally-running, network-egress-isolated Android emulator (AVD),
+  launches it (falling back to broadcasting its own declared intent-filter actions if it has no
+  launcher activity — common for headless/receiver-only malware), attaches Frida, injects a simulated
+  inbound SMS + synthetic taps as stimuli, and hooks 13 APIs for a bounded capture window (network
+  connects, SMS send/intercept, DexClassLoader execution, accessibility binding, crypto invocation,
+  overlay-attack windows, native library loads, contacts/call-log/clipboard reads, URLs/files/commands).
+  Each hook diffs against a specific static prediction already made earlier in the pipeline (C2
+  indicators, DCL targets, native library targets) to produce a CONFIRMED/REFUTED/not-observed verdict
+  per signal, plus up to 3 screenshots (reaction / event-triggered / final) and a crash-logcat capture
+  if the target self-terminates mid-run. See `TEAM_CONTEXT.md` Session 14 for the full design writeup
+  and `app/analysis/frida_scripts/README.md` for the containment setup required before enabling this.
 
 ### Phase 6: Risk Scoring
 - **Module**: `app/reports/scoring.py`

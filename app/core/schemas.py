@@ -205,6 +205,97 @@ class SignatureYaraResult(BaseModel):
     yara_scan_targets: list[str] = []
 
 
+class DynamicVerificationResult(BaseModel):
+    """
+    Phase 8 (opt-in) — see app/analysis/dynamic_verification.py. `ran=False`
+    means the dynamic pass did not complete (no AVD, install failure, etc.);
+    it must never be read as "no dynamic evidence found" — that is what an
+    all-empty `ran=True` result means. Every list/bool here is a diff against
+    a static prediction already computed earlier in the pipeline, not a
+    free-standing dynamic finding — see the module docstring for the mapping.
+    """
+    ran: bool = False
+    duration_s: float = 0.0
+    network_confirmed: list[str] = []
+    network_predicted_not_seen: list[str] = []
+    # Every host:port actually contacted, regardless of whether it matched a
+    # static prediction — the confirm/refute fields above only ever cover
+    # what the static pass predicted; this is the full unfiltered record.
+    network_observed_all: list[str] = []
+    sms_api_invoked: bool = False
+    dcl_payload_executed: bool = False
+    dcl_classes_loaded: list[str] = []
+    accessibility_bound: bool = False
+    crypto_invoked: bool = False
+    # native_bridge.py statically resolves System.loadLibrary("x") call sites
+    # to their .so/JNI symbols but can never confirm the call actually ran —
+    # this is that confirmation, the same "predicted vs confirmed" treatment
+    # dcl_payload_executed already gets.
+    native_libraries_loaded: list[str] = []
+    native_library_confirmed: bool = False
+    # IoC-oriented findings, standalone — not diffed against a static
+    # prediction the way the fields above are, since there usually isn't one
+    # to diff against. Reported the way any dynamic-analysis sandbox would:
+    # full URLs requested, files written to the app's own sandbox (a
+    # dropper's payload lands here), shell commands executed.
+    urls_accessed: list[str] = []
+    files_written: list[str] = []
+    commands_executed: list[str] = []
+    # sms_api_invoked/accessibility_bound/crypto_invoked above are booleans;
+    # these carry the actual value the hook captured (destination number,
+    # service class name, cipher algorithm) — a premium-rate SMS number or a
+    # weak cipher (DES/ECB) is a specific IoC, not just a yes/no.
+    sms_destinations: list[str] = []
+    accessibility_services: list[str] = []
+    crypto_algorithms: list[str] = []
+    # Incoming-SMS interception (the real OTP-theft path — sms_api_invoked
+    # above only ever covered the app SENDING a message). A simulated inbound
+    # SMS is injected mid-capture (see dynamic_verification.py's
+    # _run_capture_window_with_stimuli) since an AVD has no real carrier.
+    sms_intercepted: list[str] = []
+    # Overlay-attack detection (WindowManager.addView with a system/overlay
+    # window type — a fake login screen drawn over the real app). Mechanically
+    # verified installing cleanly on this project's AVD image; NOT yet
+    # confirmed firing against a real overlay attack in this codebase's own
+    # testing — see dynamic_verification.py's DynamicVerificationOutcome
+    # docstring before treating a `false` here as a confident negative.
+    overlay_detected: bool = False
+    overlay_window_types: list[str] = []
+    # Contacts/call-log/SMS-history ContentResolver reads, and clipboard
+    # reads (crypto-clipper malware swaps a copied wallet address).
+    sensitive_content_queries: list[str] = []
+    clipboard_read: bool = False
+    # Every event above, unfiltered and ordered by t (ms since agent load) —
+    # the per-kind fields lose ordering; this is what lets a report
+    # eventually say "contacted C2 3.2s after launch" instead of just
+    # "at some point during the window".
+    timeline: list[dict] = []
+    # /static/screenshots/{sha256}_final.png — a live capture of the app's
+    # actual foreground UI at the end of the capture window. None if capture
+    # failed. Secondary to screenshot_reaction_url for before/after comparison.
+    screenshot_url: Optional[str] = None
+    # /static/screenshots/{sha256}_reaction.png — captured a few seconds after
+    # the SMS/tap stimuli fire mid-window, while the app is most likely
+    # actually reacting. This is the primary useful capture.
+    screenshot_reaction_url: Optional[str] = None
+    # Screenshots taken the instant a crucial event fired (overlay drawn, SMS
+    # intercepted, accessibility bound, DCL payload class loaded). Each entry:
+    # {"kind": <triggering event kind>, "url": ..., "t": <ms since agent load>}.
+    event_screenshots: list[dict] = []
+    # Last ~50 logcat lines captured the moment the target process crashed
+    # mid-capture — substantiates the "possible anti-analysis
+    # self-termination" coverage-note inference with the actual
+    # exception/reason. Empty unless a crash actually happened.
+    crash_logcat_tail: list[str] = []
+    # Raw agent event counts by kind (network, sms_send, dcl_class_load,
+    # accessibility_bound, crypto_invoked, url_accessed, file_written,
+    # command_executed, hook_installed, hook_error, target_crashed) — gives
+    # the report something concrete to say even when nothing happened to
+    # match a static prediction.
+    event_summary: dict[str, int] = {}
+    coverage_note: str = "dynamic analysis did not run"
+
+
 class AnalysisManifest(BaseModel):
     target_package: Optional[str]
     sha256: str
@@ -267,6 +358,10 @@ class AnalysisManifest(BaseModel):
     # when nothing in the graph overlaps, or when Neo4j is unreachable (fails
     # closed, same as the rest of cache.py).
     related_samples: list[dict] = []
+    # Phase 8, opt-in only (see DynamicVerificationResult). None when the
+    # request did not ask for it (the default) — distinct from a populated
+    # result with ran=False, which means it was requested but didn't complete.
+    dynamic_verification: Optional[DynamicVerificationResult] = None
 
 
 class RiskScoreBreakdown(BaseModel):
@@ -298,6 +393,11 @@ class RiskScoreBreakdown(BaseModel):
     # scoring in the teens, and without this flag the report would read as though the
     # behaviour earned the verdict.
     impersonation_floor_applied: bool = False
+    # Same distinction as impersonation_floor_applied, for the Phase 8 dynamic-
+    # confirmation floor (see DYNAMIC_CONFIRMATION_SCORE_FLOOR) — true when a
+    # confirmed C2 contact or executed DCL payload raised the verdict above what
+    # the weighted components alone produced. Both flags can be true at once.
+    dynamic_confirmation_floor_applied: bool = False
     # The weighted total before any floor. Equal to total_score unless a floor moved
     # it. None on the hot path, where no component was recomputed.
     weighted_score: Optional[float] = None

@@ -88,6 +88,10 @@
             <span class="file-name" id="fileName">sample.apk</span>
             <span class="file-size" id="fileSize">0 MB</span>
           </div>
+          <label class="dynamic-toggle" style="display:flex;align-items:center;gap:0.5rem;justify-content:center;margin:0.75rem 0;font-size:0.85rem;color:#94a3b8;">
+            <input type="checkbox" id="enableDynamicCheckbox">
+            🧪 Also run dynamic verification (needs a running AVD — adds ~30s)
+          </label>
           <button type="button" class="btn btn-analyze" id="btnStartAnalyze">
             🚀 Run GraphRAG Threat Analysis
           </button>
@@ -122,7 +126,7 @@
           <div class="progress-bar-fill" id="progressBarFill"></div>
         </div>
         <div class="progress-live-note" id="progressLiveNote">Connecting&hellip;</div>
-        <div class="pipeline-steps pipeline-steps-10">
+        <div class="pipeline-steps pipeline-steps-11">
           <div class="step-item" data-phase="1">
             <div class="step-dot">1</div>
             <span class="step-label">APK Ingestion</span>
@@ -155,12 +159,16 @@
             <div class="step-dot">8</div>
             <span class="step-label">Impersonation</span>
           </div>
-          <div class="step-item" data-phase="6">
+          <div class="step-item" data-phase="5.7">
             <div class="step-dot">9</div>
+            <span class="step-label">Dynamic Verification</span>
+          </div>
+          <div class="step-item" data-phase="6">
+            <div class="step-dot">10</div>
             <span class="step-label">Risk Scoring</span>
           </div>
           <div class="step-item" data-phase="7">
-            <div class="step-dot">10</div>
+            <div class="step-dot">11</div>
             <span class="step-label">GraphRAG AI</span>
           </div>
         </div>
@@ -239,6 +247,18 @@
         </div>
       </div>
 
+      <!-- Coverage & Limitations — the backend always computes this (why a field
+           reads empty, why a component was suppressed, whether this is a cached
+           historical record with unrecoverable fields), but until now the frontend
+           never rendered it anywhere. Placed above the tabs, not inside one, since
+           it applies to the whole report regardless of which tab is open. -->
+      <div class="glass-card limitations-card hidden" id="limitationsCard">
+        <div class="card-header">
+          <h4>⚠️ COVERAGE &amp; LIMITATIONS — WHY SOME FIELDS ABOVE MAY READ EMPTY</h4>
+        </div>
+        <div class="limitations-list" id="limitationsList"></div>
+      </div>
+
       <!-- Tabbed Detailed Findings Container -->
       <div class="glass-card tabs-card">
         <div class="tabs-header">
@@ -259,6 +279,9 @@
           </button>
           <button class="tab-btn" onclick="switchTab('reFindings', this)">
             Rev-Engg Indicators (<span id="reFindingsCount">0</span>)
+          </button>
+          <button class="tab-btn hidden" id="tabBtnDynamicVerification" onclick="switchTab('dynamicVerification', this)">
+            🧪 Dynamic Verification
           </button>
           <button class="tab-btn" onclick="switchTab('appIdentity', this)">
             App Identity (<span id="impersonationCount">0</span>)
@@ -460,6 +483,124 @@
             <div class="re-findings-section">
               <h5>⚙️ Native / JNI Bridges</h5>
               <div class="re-findings-list" id="reNativeList"><span class="re-empty">None found</span></div>
+            </div>
+          </div>
+
+          <!-- Dynamic Verification (Phase 8, opt-in) — hidden entirely unless a
+               dynamic pass actually ran for this analysis; see renderDynamicVerification -->
+          <div class="tab-content" id="tabDynamicVerification">
+            <p class="graph-subtitle" style="margin-bottom:1rem;">
+              A narrow, opt-in runtime pass on a local AVD — this does NOT re-analyze the
+              app independently. Every row below either confirms or does not confirm a
+              specific finding the static pipeline already made; it is never a new
+              standalone claim. "Not observed" is not the same as "refuted" — a capture
+              window can miss a time-gated or sandbox-aware check.
+            </p>
+            <div class="spec-grid" style="margin-bottom:1rem;">
+              <div class="spec-item">
+                <span class="spec-label">Capture Window</span>
+                <span class="spec-value" id="dynDuration">&mdash;</span>
+              </div>
+              <div class="spec-item">
+                <span class="spec-label">Coverage</span>
+                <span class="spec-value" id="dynCoverage">&mdash;</span>
+              </div>
+            </div>
+            <div class="re-findings-section">
+              <h5>📊 Runtime Activity Summary</h5>
+              <div class="re-findings-list" id="dynActivitySummary"></div>
+            </div>
+            <div class="re-findings-section hidden" id="dynScreenshotSection">
+              <h5>📸 Live Capture</h5>
+              <div class="hidden" id="dynEventScreenshotsWrap" style="margin-bottom:14px;">
+                <div style="font-size:0.85em; opacity:0.8; margin-bottom:4px;">Event-triggered — captured the instant a crucial finding fired</div>
+                <div style="display:flex; gap:16px; flex-wrap:wrap;" id="dynEventScreenshots"></div>
+              </div>
+              <div style="display:flex; gap:16px; flex-wrap:wrap;">
+                <div class="hidden" id="dynScreenshotReactionWrap">
+                  <div style="font-size:0.85em; opacity:0.8; margin-bottom:4px;">Reaction — shortly after SMS/tap stimuli</div>
+                  <img id="dynScreenshotReaction" alt="Live capture of the app's screen shortly after the SMS/tap stimuli fired" style="max-width:320px; border-radius:8px; border:1px solid rgba(255,255,255,0.15); display:block;" />
+                </div>
+                <div class="hidden" id="dynScreenshotFinalWrap">
+                  <div style="font-size:0.85em; opacity:0.8; margin-bottom:4px;">Final — end of capture window</div>
+                  <img id="dynScreenshot" alt="Live capture of the app's screen at the end of the dynamic-verification window" style="max-width:320px; border-radius:8px; border:1px solid rgba(255,255,255,0.15); display:block;" />
+                </div>
+              </div>
+            </div>
+            <div class="re-findings-section">
+              <h5>🌐 Network — Static C2 Indicators vs. Runtime Contact</h5>
+              <div class="re-findings-list" id="dynNetworkList"><span class="re-empty">None found</span></div>
+            </div>
+            <div class="re-findings-section">
+              <h5>📦 DexClassLoader Payload — Resolved vs. Executed</h5>
+              <div class="re-findings-list" id="dynDclList"><span class="re-empty">None found</span></div>
+            </div>
+            <div class="re-findings-section">
+              <h5>🧬 Native Library — Resolved vs. Loaded</h5>
+              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
+                Static analysis resolves System.loadLibrary() call sites to their .so file and JNI
+                symbols but can never confirm the call actually ran — this is that confirmation.
+              </p>
+              <div class="re-findings-list" id="dynNativeList"><span class="re-empty">None found</span></div>
+            </div>
+            <div class="re-findings-section">
+              <h5>📵 Incoming SMS Interception (OTP Theft)</h5>
+              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
+                A simulated inbound SMS is injected partway through the capture window (an AVD has
+                no real carrier) — this is whether the app's own code parsed its sender, the actual
+                OTP-theft mechanism this project targets, not just declaring the RECEIVE_SMS permission.
+              </p>
+              <div class="re-findings-list" id="dynSmsInterceptList"><span class="re-empty">None found</span></div>
+            </div>
+            <div class="re-findings-section">
+              <h5>🪟 Overlay Attack Detection</h5>
+              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
+                A WindowManager.addView call with a system/overlay-class window type — the mechanism
+                behind a fake login screen drawn over a real banking app. Mechanically verified
+                installing correctly on this project's AVD image; not yet independently confirmed
+                firing against a real overlay attack, so treat "none found" here as weaker evidence
+                than the other rows on this tab.
+              </p>
+              <div class="re-findings-list" id="dynOverlayList"><span class="re-empty">None found</span></div>
+            </div>
+            <div class="re-findings-section">
+              <h5>📋 Other Runtime Signals</h5>
+              <div class="re-findings-list" id="dynOtherList"><span class="re-empty">None found</span></div>
+            </div>
+            <div class="re-findings-section">
+              <h5>🔍 Sensitive Data Access</h5>
+              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
+                Contacts/call-log/SMS-history reads via ContentResolver, and clipboard reads (the
+                mechanism behind crypto-clipper malware swapping a copied wallet address).
+              </p>
+              <div class="re-findings-list" id="dynSensitiveDataList"><span class="re-empty">None found</span></div>
+            </div>
+            <div class="re-findings-section">
+              <h5>🎯 Indicators of Compromise Observed at Runtime</h5>
+              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
+                Standalone findings, not diffed against a static prediction — reported the way any
+                dynamic-analysis sandbox would: URLs actually requested, files the app wrote to its
+                own sandbox, and shell commands it executed.
+              </p>
+              <div class="re-findings-list" id="dynIocList"><span class="re-empty">None found</span></div>
+            </div>
+            <div class="re-findings-section">
+              <h5>🕐 Event Timeline</h5>
+              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
+                Every event above, in the order it actually happened (ms since the hooks attached) —
+                lets you see, e.g., whether a C2 contact happened immediately after launch or only
+                after the simulated SMS/tap stimuli partway through the window.
+              </p>
+              <div class="re-findings-list" id="dynTimelineList"><span class="re-empty">None found</span></div>
+            </div>
+            <div class="re-findings-section hidden" id="dynCrashLogcatSection">
+              <h5>💥 Crash Diagnostics</h5>
+              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
+                The target process exited mid-capture — possible anti-analysis self-termination, but
+                could also be an unrelated crash. Last ~50 logcat lines at the moment it happened, so
+                you can tell which:
+              </p>
+              <pre id="dynCrashLogcatText" style="white-space:pre-wrap; font-size:0.8em; max-height:260px; overflow-y:auto; background:rgba(0,0,0,0.25); border-radius:8px; padding:10px;"></pre>
             </div>
           </div>
 

@@ -20,3 +20,8 @@ pyelftools>=0.31
 # Launcher-icon decoding for brand-impersonation detection
 # (app/analysis/impersonation.py). Was only present transitively before N11.
 Pillow>=10.0.0
+# Dynamic verification (Phase 8, opt-in — app/analysis/dynamic_verification.py).
+# Only imported on the opt-in dynamic path; every other analysis path is
+# unaffected if this is absent. Node/npm are a separate BUILD-time dependency
+# for the agent script — see app/analysis/frida_scripts/README.md.
+frida>=17.0.0

@@ -241,8 +241,27 @@ def relevance_vocabulary() -> tuple[frozenset[str], frozenset[str]]:
     A method matching none of these cannot satisfy any clause, so skipping it is
     free of false negatives. Being a superset is the whole contract: it may admit
     methods that go on to match nothing.
+
+    Audit finding (2026-08-24, 36-sample sweep): this contract was violated for
+    two of the four RE-deep-dive modules that ALSO run only over methods with a
+    built CFG. crypto_recovery.py resolves `Cipher.getInstance` /
+    `SecretKeySpec.<init>` / `IvParameterSpec.<init>`, and native_bridge.py
+    resolves `System.loadLibrary` / `Runtime.loadLibrary` — none of which were
+    in FORENSIC_DICTIONARY (only the unrelated `Cipher.doFinal` was, and
+    loadLibrary wasn't present at all). A method calling ONLY these APIs, with
+    no other forensic-dictionary overlap, was silently skipped before ever
+    reaching CFG construction — resolved_native_bridges read empty on every
+    single sample in that sweep (100%), and resolved_crypto_configs on most,
+    not because nothing was there but because the relevant method never got a
+    CFG built to look inside. dcl_tracing.py's DexClassLoader family and
+    webview_bridge.py's addJavascriptInterface were already covered (both are
+    also literal forensic-dictionary anchors) — this only needed to add the two
+    that weren't.
     """
-    apis: set[str] = set()
+    from app.analysis.crypto_recovery import CIPHER_GET_INSTANCE, SECRET_KEY_SPEC_INIT, IV_PARAM_SPEC_INIT
+    from app.analysis.native_bridge import LOAD_LIBRARY_APIS
+
+    apis: set[str] = {CIPHER_GET_INSTANCE, SECRET_KEY_SPEC_INIT, IV_PARAM_SPEC_INIT, *LOAD_LIBRARY_APIS}
     strings: set[str] = set()
     for rules in FORENSIC_DICTIONARY.values():
         for clause in rules["clauses"]:

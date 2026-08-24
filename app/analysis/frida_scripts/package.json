@@ -1,0 +1,14 @@
+{
+  "name": "guardgraph-dynamic-verification-agent",
+  "private": true,
+  "description": "Build-time only — bundles hooks.js + frida-java-bridge into _agent.js, which is what dynamic_verification.py actually loads at runtime. Node/npm are NOT a runtime dependency of the analysis pipeline; _agent.js is committed so a fresh checkout works without them.",
+  "scripts": {
+    "build": "frida-compile hooks.js -o _agent.js"
+  },
+  "devDependencies": {
+    "frida-compile": "*"
+  },
+  "dependencies": {
+    "frida-java-bridge": "*"
+  }
+}

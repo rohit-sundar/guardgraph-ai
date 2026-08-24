@@ -9,7 +9,64 @@ labels, but ttp_severity_component expects MITRE technique IDs. Without this
 mapping that scoring component is silently dead (always returns DEFAULT). This is
 an honest proxy until per-technique binary classifiers are trained — see §9.2.
 """
+import os
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _default_build_tools_dir() -> str:
+    """
+    Best-effort locate the newest installed build-tools directory (holds
+    apksigner/zipalign, needed to re-sign a malware sample whose own
+    signature is missing/corrupt before it can be installed on the AVD —
+    Android's package manager refuses to install anything unsigned, and
+    plenty of real-world malware samples arrive that way).
+    """
+    sdk_root = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    if not sdk_root:
+        return ""
+    build_tools_root = os.path.join(sdk_root, "build-tools")
+    if not os.path.isdir(build_tools_root):
+        return ""
+    versions = sorted(os.listdir(build_tools_root))
+    return os.path.join(build_tools_root, versions[-1]) if versions else ""
+
+
+def _default_keytool_path() -> str:
+    """
+    `keytool` is NOT reliably on PATH even when `java` is: on this dev
+    machine PATH only carries a slim javapath shim (java.exe/javaw.exe), not
+    the full JDK bin directory — confirmed live (`keytool: command not
+    found` despite `java -version` working fine). JAVA_HOME, when set,
+    points at the real JDK bin/ which does carry it.
+    """
+    java_home = os.environ.get("JAVA_HOME")
+    if java_home:
+        candidate = os.path.join(java_home, "bin", "keytool.exe")
+        if os.path.exists(candidate):
+            return candidate
+        candidate = os.path.join(java_home, "bin", "keytool")
+        if os.path.exists(candidate):
+            return candidate
+    return "keytool"
+
+
+def _default_adb_path() -> str:
+    """
+    Best-effort locate adb.exe under ANDROID_HOME/ANDROID_SDK_ROOT, since it is
+    not reliably on PATH (confirmed on the dev machine: the PATH entry pointed
+    one directory short of the real binary). Falls back to the bare command
+    name, which still works if adb genuinely is on PATH.
+    """
+    sdk_root = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    if sdk_root:
+        candidate = os.path.join(sdk_root, "platform-tools", "adb.exe")
+        if os.path.exists(candidate):
+            return candidate
+        candidate = os.path.join(sdk_root, "platform-tools", "adb")
+        if os.path.exists(candidate):
+            return candidate
+    return "adb"
 
 
 class Settings(BaseSettings):
@@ -43,6 +100,57 @@ class Settings(BaseSettings):
 
     entropy_high_threshold: float = 7.2
     flattening_degree_outlier_zscore: float = 3.0
+
+    # ── Dynamic verification (Phase 8) ──────────────────────────────────────
+    # Off by default — this must never block a normal /analyze request, since
+    # it needs a booted AVD (see app/analysis/frida_scripts/README.md's
+    # go/no-go setup notes) and takes tens of seconds. Opt-in per request via
+    # /analyze's `enable_dynamic` query param, gated additionally on this
+    # master switch so a misconfigured deployment can't accidentally expose
+    # emulator-dependent behavior on a request path with no AVD behind it.
+    dynamic_analysis_enabled: bool = False
+    dynamic_analysis_timeout_seconds: int = 30
+    # Refuse to install an APK unless a live probe measures the AVD's egress as
+    # blocked (see dynamic_verification._egress_appears_blocked). True by
+    # default — this is a safety gate, not a convenience switch; only set
+    # false if you have verified isolation some other way (e.g. a host
+    # firewall rule already scopes the emulator process, or you deliberately
+    # want to observe traffic against a controlled honeypot).
+    dynamic_analysis_require_network_isolation: bool = True
+    # adb's default port 5037 is unusable on a machine where Hyper-V has
+    # reserved it in a dynamic port-exclusion range (confirmed via `netsh int
+    # ipv4 show excludedportrange protocol=tcp` on the dev machine — 5037 fell
+    # inside 4939-5038). Override per-machine in .env if 5039 collides there
+    # too; `emulator/dynamic_verification.py` sets ANDROID_ADB_SERVER_PORT
+    # from this for every adb invocation rather than trusting the default.
+    adb_server_port: int = 5039
+    adb_path: str = _default_adb_path()
+    # None = whichever single USB/emulator device Frida finds (frida.get_usb_device).
+    # Set explicitly (e.g. "emulator-5554") once more than one AVD/device could
+    # be attached, so a stray second instance can't silently steal the target.
+    adb_device_serial: str = ""
+    frida_device_id: str = ""
+    # frida-server has proven flaky in this feature's own live testing —
+    # confirmed dying between runs multiple times — so dynamic_verification.py
+    # self-heals it (checks + restarts + re-forwards) rather than requiring a
+    # human to notice and run manual adb commands every time. This is where
+    # it must already be PUSHED (one-time manual setup, see
+    # app/analysis/frida_scripts/README.md) — self-healing only covers it not
+    # currently running, not it never having been installed on the device.
+    frida_server_device_path: str = "/data/local/tmp/frida-server"
+    frida_local_port: int = 27042
+    # apksigner/zipalign dir, for re-signing a sample whose own signature is
+    # missing/corrupt (common in malware-feed downloads) before install — see
+    # dynamic_verification._resign_apk. Empty string disables the fallback
+    # entirely; install then just fails closed as before on such a sample.
+    android_build_tools_dir: str = _default_build_tools_dir()
+    # Where the throwaway debug keystore used ONLY for that re-sign step is
+    # cached (generated once, reused after). This key has no relationship to
+    # the sample's real identity — it exists purely so Android's package
+    # manager has *a* valid signature to install against; nothing about
+    # provenance or authorship is asserted by it.
+    dynamic_resign_keystore_path: str = "data/dynamic/debug_resign.jks"
+    java_keytool_path: str = _default_keytool_path()
 
     # Hard ceiling on the Phase 7 (GraphRAG) prompt, in approximate tokens.
     # Set against the OBSERVED 16,386 tokens Ollama actually evaluated for

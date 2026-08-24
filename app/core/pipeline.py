@@ -34,6 +34,7 @@ from app.analysis.dcl_tracing import trace_dcl_targets
 from app.analysis.webview_bridge import map_webview_bridges
 from app.analysis.native_bridge import resolve_native_bridges
 from app.analysis.impersonation import detect_impersonation
+from app.analysis.dynamic_verification import run_dynamic_verification
 from app.ml.classifier import classifier, ttp_classifier
 from app.ml.features import build_feature_vector, build_ttp_feature_vector
 from app.reports.scoring import compute_risk_score
@@ -709,6 +710,7 @@ class AnalysisPipeline:
         ingestion: Optional[IngestionResult] = None,
         classifier_evidence_present: bool = True,
         impersonation: Optional[dict] = None,
+        dynamic_verification: Optional[dict] = None,
     ) -> RiskScoreBreakdown:
         """Phase 6: Calculate weighted risk score component breakdown and verdict.
 
@@ -716,6 +718,10 @@ class AnalysisPipeline:
         (see has_deterministic_evidence). Phase 5 already empties `predicted_ttps` in
         that case, so this is belt-and-braces for callers that score without going
         through Phase 5.
+
+        `dynamic_verification` (Phase 8's output, or None when that phase didn't
+        run) feeds compute_risk_score's dynamic-confirmation floor — see
+        DYNAMIC_CONFIRMATION_SCORE_FLOOR in scoring.py.
         """
         logger.info("[Phase 6] Starting Risk Scoring...")
         start_time = time.time()
@@ -777,10 +783,66 @@ class AnalysisPipeline:
             classifier_evidence_present=classifier_evidence_present,
             ttp_thresholds=ttp_thresholds,
             impersonation_findings=(impersonation or {}).get("findings"),
+            dynamic_verification=dynamic_verification,
         )
         duration = time.time() - start_time
         logger.info(f"[Phase 6] Completed in {duration:.3f}s. Risk Score: {risk_score.total_score} ({risk_score.verdict_band})")
         return risk_score
+
+    @staticmethod
+    def run_phase8_dynamic_verification(
+        filepath: str,
+        ingestion: IngestionResult,
+        resolved_dcl_targets: List[str],
+        enabled: bool,
+        resolved_native_targets: List[str] | None = None,
+    ) -> dict:
+        """
+        Phase 8: scoped dynamic verification, opt-in only (see
+        app/analysis/dynamic_verification.py's module docstring for why this
+        is narrow-by-design rather than a general sandbox). `enabled` is the
+        AND of the request's `enable_dynamic` flag and
+        settings.dynamic_analysis_enabled — checked by the caller so this
+        method has one clean early-return rather than duplicating that gate.
+
+        static_predictions passed in only carries fields this module actually
+        uses (c2_indicators, dcl_targets, native_targets, intent_actions) —
+        resolved_dcl_targets/resolved_native_targets are human-readable
+        "ClassName(\"path\")" / 'System.loadLibrary("x") -> ...' describe()
+        strings from dcl_tracing.py/native_bridge.py, so only a resolved
+        fragment is useful for substring matching against a
+        dynamically-observed class/library name; the raw describe() string is
+        kept as a fallback since a caller can't always cheaply re-extract just
+        the fragment. ingestion.intent_actions (the app's own declared
+        intent-filter actions) lets a headless/receiver-only sample still get
+        activated when it has no launcher activity — see
+        _broadcast_declared_actions.
+        """
+        logger.info("[Phase 8] Starting Dynamic Verification...")
+        if not enabled:
+            logger.info("[Phase 8] Skipped — dynamic analysis disabled for this request.")
+            return {"ran": False, "coverage_note": "dynamic analysis not requested"}
+
+        start_time = time.time()
+        result = run_dynamic_verification(
+            apk_path=filepath,
+            package_name=ingestion.package_name,
+            static_predictions={
+                "c2_indicators": ingestion.c2_indicators,
+                "dcl_targets": resolved_dcl_targets,
+                "native_targets": resolved_native_targets or [],
+                "intent_actions": ingestion.intent_actions,
+            },
+            sha256=ingestion.sha256,
+        )
+        duration = time.time() - start_time
+        logger.info(
+            f"[Phase 8] Completed in {duration:.3f}s. ran={result.get('ran')} "
+            f"network_confirmed={result.get('network_confirmed')} "
+            f"dcl_payload_executed={result.get('dcl_payload_executed')} "
+            f"native_library_confirmed={result.get('native_library_confirmed')}"
+        )
+        return result
 
     @staticmethod
     def run_phase7_reporting(

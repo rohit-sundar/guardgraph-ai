@@ -6,6 +6,227 @@
 
 ## Change Log
 
+### Session 14 — 2026-08-24 | Author: Tarun (with Claude) — Dynamic analysis: real detonation, not just Frida hooks that fire; Neo4j confirmation layer; a data-loss bug found through using the feature
+
+> **Overview:** This project stopped being "static-analysis-only" this session — a scoped Android
+> emulator (AVD) + Frida dynamic-verification pass now runs opt-in alongside the static pipeline (see
+> `app/analysis/dynamic_verification.py`, new this session, and `app/analysis/frida_scripts/`). It is
+> deliberately narrow: every hook exists to confirm or refute a specific *static* prediction already
+> made elsewhere in the pipeline (a C2 indicator, a DCL payload path, a native library load), not a
+> general-purpose sandbox report. **This is all currently uncommitted local work on this machine** —
+> `git status` shows `app/analysis/dynamic_verification.py`, `app/analysis/frida_scripts/`, and
+> `tests/test_dynamic_verification.py` as untracked, plus modifications across `routes.py`, `pipeline.py`,
+> `schemas.py`, `cache.py`, `scoring.py`, `progress.py`, `config.py`, and the frontend. **If you're
+> reading this from a fresh `git pull`, none of this exists in your working copy yet** — it needs to be
+> committed and pushed from this machine first. Full test suite: 352 passing (0 failing) as of this
+> session's end.
+
+**New files:** `app/analysis/dynamic_verification.py`, `app/analysis/frida_scripts/hooks.js` +
+`_agent.js` (compiled) + `package.json` + `README.md`, `tests/test_dynamic_verification.py`
+
+**Files changed (major):** `app/api/routes.py`, `app/core/pipeline.py`, `app/core/schemas.py`,
+`app/core/config.py`, `app/core/progress.py`, `app/graph/cache.py`, `app/reports/scoring.py`,
+`app/static/app.js`, `app/static/index.html`, `data/reference/protected_brands.json`,
+`tests/test_fixes_regression.py`
+
+**1. Why dynamic analysis, and why scoped rather than a general sandbox**
+- Three options were weighed: local AVD+Frida, a cloud sandbox API, and a "scoped local pass" reusing
+  the AVD+Frida stack but hooking only signals with a **direct static counterpart already computed by
+  this pipeline** — so every dynamic finding either confirms or refutes something the static pipeline
+  (or GraphRAG) already claims, reusing the existing "resolved vs. unresolved" narrative pattern rather
+  than bolting on a second, disconnected report. Chose the third.
+- Validated the AVD boots reliably with hardware acceleration (WHPX) and Frida can attach to a running
+  app on this specific machine **before** writing any pipeline code — this laptop has known GPU/driver
+  instability, and a crash mid-demo is worse than not having dynamic analysis at all.
+- Opt-in only (`enable_dynamic` query param on `/analyze` and `/analyze/start`), gated additionally by
+  `settings.dynamic_analysis_enabled` — never runs on the default path, never blocks a normal upload.
+
+**2. Containment — an AVD's default networking has real internet egress AND a route to this machine's
+own loopback (`10.0.2.2`); an unconstrained guest could reach a real C2 or this box's other services**
+- `adb emu network disable` (the documented emulator-console kill switch) returns `KO: bad sub-command`
+  on this emulator build — doesn't exist. `_egress_appears_blocked()` probes real TCP connectivity via
+  `toybox nc` before every install and **refuses to install the APK at all** if egress measures as
+  reachable (`dynamic_analysis_require_network_isolation`, on by default).
+- That probe is a measurement, not an enforcement mechanism — real containment is a **host Windows
+  Firewall rule blocking the actual network-capable process**, which turned out to be TWO separate
+  processes, not one: `qemu-system-x86_64.exe` (confirmed via `Get-Process`) AND, discovered later,
+  `netsimd.exe` (the emulator's separate network-simulation daemon) — traffic kept flowing through the
+  second one even with the first blocked. See `app/analysis/frida_scripts/README.md` for both
+  `New-NetFirewallRule` commands; **both must be applied**, not just the first.
+- This does not blind the network-confirmation hook: `hookNetwork` fires on the `InetSocketAddress`
+  constructor, which every socket path (raw `Socket`, OkHttp, `HttpURLConnection`) calls **before** any
+  packet leaves the device — the confirm signal is captured at the API call, egress-blocked or not.
+
+**3. The Frida hook script (`hooks.js`, 13 hooks, each answering one specific static question)**
+- Original five: network connections (→ `c2_indicators`), outbound SMS (`SmsManager.sendTextMessage`),
+  DexClassLoader payload execution (`BaseDexClassLoader.findClass` → `resolved_dcl_targets`),
+  accessibility service binding, crypto invocation (`Cipher.doFinal`).
+- Added this session: **incoming-SMS interception** (`SmsMessage.createFromPdu` — the actual OTP-theft
+  path this project targets; an AVD has no real carrier, so a simulated inbound SMS is injected
+  mid-capture via `adb emu sms send` for this hook to ever have something to catch), **overlay-attack
+  detection** (`WindowManagerImpl.addView` with a window type from an explicit allowlist —
+  `{2002,2003,2006,2007,2032,2038}` — a plain `type >= 2000` range check was tried first and confirmed
+  live to false-positive on `TYPE_TOAST=2005`, completely routine UI), **contacts/call-log/SMS-history
+  reads** via `ContentResolver.query` categorized by URI substring, **clipboard reads** (crypto-clipper
+  wallet-address-swap detection), and **native library load confirmation**
+  (`System.loadLibrary`/`System.load` → `resolved_native_bridges`, the same "predicted vs confirmed"
+  treatment `dcl_payload_executed` already had — `native_bridge.py` statically resolves the call site
+  but can never confirm it actually ran; this closes that gap).
+- IoC-oriented, standalone (no static counterpart): full URLs accessed, files written, OS commands
+  executed (`Runtime.exec`). Both URL and file-write hooks needed noise filters after live testing
+  showed Android's own ART profiler writes (`primary.prof`) and framework JAR loads
+  (`file:/system/framework/framework.jar`) reporting as if the sample itself did them.
+- Every event carries `t` (ms since agent load) for a real event timeline, not just per-kind sets.
+
+**4. User-interaction and stimulus injection (`_run_capture_window_with_stimuli`)**
+- A passive `sleep(timeout_s)` was the entire capture window originally — a sample gating behavior
+  behind ANY interaction (a real incoming SMS, a tap suggesting "this is a live device") would idle the
+  whole window and read as "not observed" for the wrong reason. Now injects a simulated inbound SMS
+  (`adb emu sms send`, deliberately generic OTP text — a detonation aid, not a deception) and two
+  synthetic taps partway through the window, both best-effort.
+- `_grant_overlay_permission()`: `adb install -g` only grants normal runtime permissions, not the
+  special AppOps permission overlay attacks need (`appops set <pkg> SYSTEM_ALERT_WINDOW allow`).
+
+**5. Screenshot capture — three distinct moments, not one, after live testing showed a single
+end-of-window shot was frequently useless**
+- **Reaction** (`{sha256}_reaction.png`): ~3s after the SMS/tap stimuli fire, while the app is most
+  likely actually responding. **Final** (`{sha256}_final.png`): end of window, kept for a before/after
+  comparison, not as the primary capture — confirmed live to frequently just show the device having
+  idled back to Settings or the home screen by then, which is exactly the "blank screen every time"
+  problem this replaced.
+- **Event-triggered** (`{sha256}_event_<kind>.png`, up to `_MAX_EVENT_SCREENSHOTS`=6, one per kind,
+  first-occurrence-only): captured the instant one of six "crucial" hook kinds fires —
+  `sms_intercepted`, `overlay_window`, `accessibility_bound`, `dcl_class_load`, `sms_send`,
+  `command_executed`. Deliberately excludes high-frequency kinds (network, url_accessed,
+  crypto_invoked, file_written, sensitive_content_query, clipboard_read) — those can fire dozens of
+  times a second and rarely coincide with a visible UI change; triggering on them would mostly add
+  latency for screenshot noise, not signal.
+
+**6. Headless/receiver-only malware — a real launch failure found live, not hypothetical**
+- Confirmed live: a real corpus sample has no exported launcher activity at all
+  (`monkey -c android.intent.category.LAUNCHER` exits 252, "no activities found") — this used to make
+  the entire pass report `ran=False`, even though the sample may still be very much alive as a pure
+  background/receiver-only component (SMS interceptors and boot-persistence droppers commonly have zero
+  UI at all).
+- `_broadcast_declared_actions()`: on launch failure, falls back to firing `adb shell am broadcast -p
+  <pkg> -a <action>` for each of the app's OWN declared intent-filter actions
+  (`ingestion.intent_actions`, already extracted statically) — deliberately NOT a hardcoded guess list,
+  since a receiver's `onReceive` commonly branches on `intent.getAction()` and silently no-ops for
+  anything else. Best-effort per action (one protected-broadcast `SecurityException` — confirmed live,
+  `SCREEN_ON`/`USER_PRESENT` are OS-only-sendable — must not abort the rest).
+- **Genuine finding from live testing, not a bug**: the two protected system actions above are the only
+  ones one real corpus sample declares, so it remains untriggerable by any external actor at all,
+  fallback or not — that sample is a dead end regardless of this fix, and the fix correctly reports that
+  rather than crashing.
+
+**7. Crash diagnostics** — `_capture_logcat_tail()` pulls the last ~50 logcat lines (cleared at the
+start of each run via `_clear_logcat()` so the tail is scoped to the current sample) when the target
+process crashes mid-capture, substantiating the "possible anti-analysis self-termination" inference in
+`coverage_note` with the actual exception instead of leaving it as a guess from the Frida session merely
+disconnecting. New `crash_logcat_tail` field, new UI section (hidden unless non-empty).
+
+**8. Neo4j: `dynamically_confirmed` flag on the `CONTACTS` edge, plus a real data-loss bug this
+surfaced** — user-requested design discussion, not unilateral: files/URLs/commands/SMS-sender/overlay
+window-types were all deliberately rejected as node candidates (either genuinely sample-unique, or —
+`sms_intercepted`'s sender number — literally our own injected test artifact, or — overlay window
+types — too generic/shared-by-construction to mean anything as a "hub" node); only C2 indicators pass
+the "recurs as shared infrastructure across independent samples" test, which is exactly why
+`C2Indicator` already existed as a node type.
+- `store_signature()`'s C2-MERGE query now also sets `r.dynamically_confirmed =
+  coalesce(r.dynamically_confirmed, false) OR (c2 IN $confirmed_c2)` — OR-with-existing so a later
+  static-only re-analysis can never erase a confirmation an earlier dynamic run established.
+  `find_related_samples()` returns the new `shared_c2_confirmed` subset; the Correlated Samples tab
+  marks confirmed chips with `✓` + a tooltip. Verified live against the real Neo4j instance (not just
+  unit tests): stored a confirmed indicator, re-stored without dynamic data, confirmed it survived.
+- **Bug found by actually using the feature**: the cache-hit dynamic-verification branch in `routes.py`
+  used `ingestion.c2_indicators` (Phase-1-ingestion-only, asset-scan-only) as the C2 set for BOTH the
+  Neo4j write and the manifest the analyst sees — but `merge_c2_from_strings` (Phase 3+, the deeper
+  DEX-string-literal scan that finds a real subset of C2 indicators asset-scanning alone misses) is
+  never run on the cache-hit fast path by design. A live re-run of an already-cached sample with a
+  string-literal-only C2 indicator **silently erased it from the cached record** — `store_signature`
+  does a full dict replacement, not a merge, so the opportunistic re-store on that path overwrote the
+  correct cold-path C2 set with the narrower one. Confirmed via direct Neo4j queries before and after.
+  **Fix**: `ingestion` is now reassigned to `ingestion.model_copy(update={"c2_indicators": union of
+  cached + fresh})` right after the cache-hit lookup, so every downstream use in that branch — the
+  manifest, `find_related_samples`, and what `run_phase8_dynamic_verification` diffs against — sees the
+  complete set. **Recovery for the one sample already corrupted by this bug during live testing**:
+  deleted the corrupted `Sample` node, forced a genuine cold-path re-analysis, verified the indicator
+  and `dynamically_confirmed` value came back correct, then verified a repeat cache-hit run no longer
+  loses it.
+
+**9. Brand-impersonation reference table — 12 → 65 entries**, every package name verified via web
+search against a live Play Store listing before adding (never guessed — the file's own header warns a
+wrong package name here false-positives the *real* app as a typosquat of one that doesn't exist). Added
+the Indian PSU/private banks, RBI/government/UPI apps, and non-financial fraud targets (Roblox, gaming
+MOD-APK targets, streaming-account-theft targets) a friend's Gemini-sourced research flagged as missing.
+**One real collision found and fixed along the way**: adding "BOI Mobile" (Bank of India) as a label
+tripped the impersonation detector's fuzzy-match against ICICI's "iMobile" — `edit_distance("boimobile",
+"imobile") == 2`, exactly at the fuzzy-match cap, because "iMobile" is short/generic enough to collide
+with the "`<Bank> Mobile`" naming pattern most of the newly-added PSU banks use. Fixed by dropping the
+bare "iMobile" label (kept the more distinctive "iMobile Pay", the app's actual current title) rather
+than weakening the detector generally.
+
+**Verified:** 352/352 tests passing (up from 339 at session start — 13 new tests: 2 for event-triggered
+screenshots, 6 for native-library/crash-logcat/broadcast-fallback logic, 5 for the `dynamically_confirmed`
+flag). Every dynamic-analysis claim above was checked against a real, running AVD + Frida + Neo4j, not
+just unit-tested — including the launch-fallback fix (re-ran the exact previously-failing sample and
+read the real `SecurityException` off the logs) and the C2 bug (corrupted a real cached record live,
+then recovered it live).
+
+---
+
+### Session 13 — 2026-08-23 | Authors: Tarun, Rohit — Five small fixes, all committed: a broken-report regression, cache-hit/history completeness gaps, and GraphRAG's fourth live-caught fabrication mode
+
+> Five commits on `main`, same day, not one session in the usual sense of this log — grouped here
+> because none of them individually warranted a full entry and none of this was previously logged.
+> Commits: `2da0b56`, `89ce646`, `0704789` (merge), `40e9d9f`, `9971957`.
+
+**1. `fix(reporting): unpack generate_report grounding value at every call site` (`2da0b56`, Rohit)** —
+`generate_report()` gained a third return value (`grounding`) but its callers still unpacked two, so
+**every single analysis died** with "too many values to unpack" — `run_phase7_reporting`'s broad
+`except` caught it and logged it as an Ollama outage, on runs where the grounding check had already
+logged a pass. Fixed the unpack in `run_phase7_reporting`, `_run_analysis`, `_unparseable_report`, and
+two dev scripts. The `skip_llm` branch also returned two values while the other exit returned three
+(would have broken bulk population runs) — now returns `None` for grounding, since no narrative means
+the checks never ran.
+
+**2. `fix: cache-hit and history completeness gaps, C2 detection widening` (`89ce646`, Tarun)** — cache
+hits and `/analyses/{sha256}` were silently dropping resolved crypto/DCL/WebView/native findings and
+grounding checks even when that data existed in the persisted record (now read from cache instead of
+treated as permanently unrecoverable — the fix this session's Session 14 bug report builds directly on
+top of). `list_recent_samples` ordering fixed — Neo4j sorts `null` as the *largest* value in a bare
+`ORDER BY DESC`, so untimestamped legacy rows were burying freshly-analyzed samples in "Analysis
+History". `apk_static.py`'s C2 panel-path detection widened to more real panel-kit URL patterns (still
+URL-anchored, 0 false positives on 40 benign APKs). New utility scripts: `scripts/clear_sample.py`,
+`scripts/refresh_stale_samples.py` (to re-run stale pre-fix cached samples so old records self-heal).
+
+**3. `Merge origin/main` (`0704789`) + `script update :)` (`40e9d9f`, Tarun)** — merged the above with
+origin's `populate.py` change (`skip_report=true` bulk-population flag, avoiding the Ollama call cost
+running many samples serially — the same problem `refresh_stale_samples.py` hit). Small follow-up
+hardening to `refresh_stale_samples.py` itself.
+
+**4. `fix: GraphRAG report fabrication stripping, degenerate-repetition collapse, prompt quality`
+(`9971957`, Tarun with Claude)** — four more live-observed Phase 7 failure modes, each closed:
+- Fabricated permissions were only footnoted in `limitations`, never removed from the narrative an
+  analyst under time pressure actually reads — now stripped the same way fabricated hashes/identifiers
+  already were.
+- The identifier-fabrication regex only recognized MD5/SHA-*-labeled hashes and Sample/File-Name-labeled
+  identifiers; a fake `"Signature:"` hash and `"Package Name:"` label both evaded it — closed via a new
+  `_GENERIC_HASH_LABEL_RE` and a broadened sample-name label pattern.
+- `qwen2.5:7b-instruct-q4_K_M` hit a greedy-decode degenerate repetition loop live — one line repeated
+  ~90 times, burning the entire completion budget instead of writing the report. Added `repeat_penalty`
+  to both LLM calls (deterministic, doesn't affect reproducibility) plus a `_repetition_check` safety net
+  that discards a collapsed narrative rather than shipping it.
+- The model routinely reverted to its own trained-in report template — unfilled `[Insert Date Here]`
+  placeholders, raw YARA/risk-score fields dumped verbatim, generic advice untied to any finding.
+  Tightened `SYSTEM_PROMPT` with an explicit OUTPUT FORMAT contract and added a 4th fabrication
+  check+strip for template placeholder text. **This is the fix Session 14's "is the GraphRAG
+  hallucinating" conversation traced a stale cached report back to** — a report generated before this
+  commit still shows the old, unstripped narrative; the live fabrication-check panel (which reruns fresh
+  on every request regardless of when the narrative was written) is what caught it after the fact.
+
+---
+
 ### Session 12 — 2026-08-22 | Author: Tarun (with Claude) — Reverse-engineering deep dive, manifest/ZIP anti-analysis resilience, Neo4j graph correlation, GraphRAG hardening; fixed a broken merge already on `main`
 
 > **Overview:** Large multi-part session on `feature/reflection-resolution` (merged to `main` at the

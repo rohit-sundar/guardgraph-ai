@@ -8,7 +8,27 @@ data/samples/*
 *.egg-info/
 .DS_Store
 
-bin/ollama/
+# Everything under bin/ is a local binary download (Ollama builds, frida-server
+# — see scripts/setup_dynamic_analysis.py), never source. Ignore the whole
+# directory rather than naming each binary: a narrower `bin/ollama/` rule
+# already let a 3.2 GB `bin/ollama_old_v0.32.5/` directory sit completely
+# untracked-but-not-ignored on this machine (found live, right before a
+# push — a broad `git add` would have committed 3.2 GB of binaries into
+# history). This project's own change log already records committing an
+# Ollama build to git by accident once before (TEAM_CONTEXT.md, "Web UI"
+# session entry) — a wildcard here is deliberately blunt so a differently-
+# named future download can't repeat either incident.
+bin/
+
+# Throwaway keystore used only to re-sign malware samples missing a valid
+# signature before dynamic-verification install (app/analysis/dynamic_verification.py)
+data/dynamic/
+
+# Build-time-only Frida agent bundling deps — see app/analysis/frida_scripts/README.md
+app/analysis/frida_scripts/node_modules/
+
+# Live screenshots captured during dynamic verification (app/analysis/dynamic_verification.py)
+app/static/screenshots/
 
 # Obsidian & Local Task Tracking
 .obsidian/

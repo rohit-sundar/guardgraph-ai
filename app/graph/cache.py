@@ -85,6 +85,11 @@ _RECORD_FIELDS = (
     "resolved_webview_bridges",
     "resolved_native_bridges",
     "grounding",
+    # Persisted opportunistically whenever a dynamic pass actually ran (cold
+    # path, or a cache-hit request that explicitly asked for enable_dynamic)
+    # — same reasoning as resolved_*/grounding above: no cheap way to
+    # recompute it on a plain cache hit, since it needs the AVD.
+    "dynamic_verification",
 )
 
 
@@ -113,7 +118,7 @@ def _decode_record(raw, sha256: str) -> dict:
     return {k: v for k, v in decoded.items() if v is not None}
 
 
-def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None, *, signature_yara_data: dict | None = None, permissions: list[str] | None = None, risk_components: dict | None = None, obfuscation_data: dict | None = None, package_name: str | None = None, c2_indicators: list[str] | None = None, cert_thumbprint: str | None = None, resolved_crypto_configs: list[str] | None = None, resolved_dcl_targets: list[str] | None = None, resolved_webview_bridges: list[str] | None = None, resolved_native_bridges: list[str] | None = None, grounding: dict | None = None):
+def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None, *, signature_yara_data: dict | None = None, permissions: list[str] | None = None, risk_components: dict | None = None, obfuscation_data: dict | None = None, package_name: str | None = None, c2_indicators: list[str] | None = None, cert_thumbprint: str | None = None, resolved_crypto_configs: list[str] | None = None, resolved_dcl_targets: list[str] | None = None, resolved_webview_bridges: list[str] | None = None, resolved_native_bridges: list[str] | None = None, grounding: dict | None = None, dynamic_verification: dict | None = None):
     """
     Call this after a cold-path analysis completes, so future uploads of
     the same sample (or re-uploads during a campaign) hit the fast path.
@@ -151,6 +156,13 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
         "resolved_webview_bridges": resolved_webview_bridges or [],
         "resolved_native_bridges": resolved_native_bridges or [],
         "grounding": grounding,
+        # Persisted opportunistically whenever a dynamic pass actually ran
+        # (cold path or a cache-hit that explicitly requested enable_dynamic)
+        # — previously thrown away after every single response, so a cache
+        # hit could never show dynamic findings from an earlier run. Rides
+        # the same record_json blob as everything else here rather than
+        # needing its own Cypher property.
+        "dynamic_verification": dynamic_verification,
     }
 
     # Three separate statements rather than one query chaining UNWIND $ttps then
@@ -188,11 +200,21 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
     # (e.g. "firebase:evil.firebaseio.com") from apk_static.extract_c2_indicators —
     # two samples sharing infrastructure MERGE onto the same node, which is what
     # find_related_samples() pivots on.
+    #
+    # dynamically_confirmed distinguishes "this string appeared in the DEX"
+    # (every row here) from the strictly stronger "a dynamic pass actually
+    # observed the app contacting it" (network_confirmed, when a dynamic run
+    # happened) — lets correlation queries ask for verified-live
+    # infrastructure, not just string co-occurrence. `coalesce(..., false) OR`
+    # rather than a plain overwrite: a later store_signature call without
+    # fresh dynamic data (e.g. a static-only re-analysis) must never erase a
+    # confirmation an earlier dynamic run already established.
     c2_query = """
     MATCH (s:Sample {sha256: $sha256})
     UNWIND $c2_indicators AS c2
     MERGE (ci:C2Indicator {value: c2})
-    MERGE (s)-[:CONTACTS]->(ci)
+    MERGE (s)-[r:CONTACTS]->(ci)
+    SET r.dynamically_confirmed = coalesce(r.dynamically_confirmed, false) OR (c2 IN $confirmed_c2)
     """
     # Certificate reuse across nominally different packages/samples is a strong
     # actor/campaign signal — malware families routinely re-sign variants with
@@ -221,7 +243,10 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
                 ttps=[{"technique_id": k, "probability": v} for k, v in ttps.items()],
             )
         if c2_indicators:
-            neo4j_client.run(c2_query, sha256=sha256, c2_indicators=c2_indicators)
+            confirmed_c2 = (dynamic_verification or {}).get("network_confirmed") or []
+            neo4j_client.run(
+                c2_query, sha256=sha256, c2_indicators=c2_indicators, confirmed_c2=confirmed_c2
+            )
         if cert_thumbprint:
             neo4j_client.run(cert_query, sha256=sha256, cert_thumbprint=cert_thumbprint)
     except Exception:
@@ -282,7 +307,12 @@ def find_related_samples(
 
     Returns entries merged across all signals, sorted by total overlap, each:
     {sha256, app_name, family, risk_score, shared_techniques, shared_c2,
-    shared_cert}. shared_cert is the reused thumbprint, or None.
+    shared_c2_confirmed, shared_cert}. shared_cert is the reused thumbprint,
+    or None. shared_c2_confirmed is the subset of shared_c2 where a dynamic
+    pass on THAT other sample actually observed it contacting the indicator
+    (r.dynamically_confirmed on its own CONTACTS edge) — stronger evidence
+    than merely sharing the string, since it proves the infrastructure was
+    live and reachable at analysis time, not just present in the binary.
     """
     if not technique_ids and not c2_indicators and not cert_thumbprint:
         return []
@@ -299,6 +329,7 @@ def find_related_samples(
                 "risk_score": row.get("risk_score"),
                 "shared_techniques": [],
                 "shared_c2": [],
+                "shared_c2_confirmed": [],
                 "shared_cert": None,
             })
             entry[key] = row.get(key) or ([] if key != "shared_cert" else None)
@@ -324,17 +355,22 @@ def find_related_samples(
             c2_rows = neo4j_client.run(
                 """
                 UNWIND $c2_indicators AS c2
-                MATCH (ci:C2Indicator {value: c2})<-[:CONTACTS]-(other:Sample)
+                MATCH (ci:C2Indicator {value: c2})<-[r:CONTACTS]-(other:Sample)
                 WHERE other.sha256 <> $exclude_sha256
-                WITH other, collect(DISTINCT c2) AS shared_c2
+                WITH other, collect(DISTINCT c2) AS shared_c2,
+                     // collect() silently drops nulls, which is what makes this
+                     // work as a filter — Cypher has no SQL-style FILTER(WHERE...)
+                     // clause on an aggregate.
+                     collect(DISTINCT CASE WHEN coalesce(r.dynamically_confirmed, false) THEN c2 END) AS shared_c2_confirmed
                 OPTIONAL MATCH (other)-[:CLASSIFIED_AS_FAMILY]->(f:MalwareFamily)
                 RETURN other.sha256 AS sha256, other.app_name AS app_name,
                        f.name AS family, other.risk_score AS risk_score,
-                       shared_c2
+                       shared_c2, shared_c2_confirmed
                 """,
                 c2_indicators=c2_indicators, exclude_sha256=exclude_sha256,
             )
             _merge(c2_rows, "shared_c2")
+            _merge(c2_rows, "shared_c2_confirmed")
 
         if cert_thumbprint:
             cert_rows = neo4j_client.run(
