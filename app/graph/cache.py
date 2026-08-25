@@ -44,11 +44,20 @@ def lookup_signature(sha256: str) -> dict | None:
             # store_signature's record_json for why they are stored this way.
             row.update(_decode_record(row.pop("record_json", None), row["sha256"]))
             return row
+        # Neo4j answered, and its answer is "no such sample". That is
+        # AUTHORITATIVE — do not fall through to the in-memory cache below.
+        # Falling through made scripts/clear_sample.py silently ineffective
+        # against a running server: the Sample node was deleted, but this
+        # process still held the record in _MEMORY_CACHE, so the next upload
+        # kept hitting the cache and reported every static phase as "skipped —
+        # known sample" while the operator watched a delete they had just run
+        # do nothing. The memory cache exists to survive a Neo4j OUTAGE, which
+        # is the except branch, not to outvote a successful query.
+        _MEMORY_CACHE.pop(sha256, None)
+        return None
     except Exception:
-        pass
-
-    # In-memory cache fallback
-    return _MEMORY_CACHE.get(sha256)
+        # Neo4j is unreachable — this is the case the in-memory cache is for.
+        return _MEMORY_CACHE.get(sha256)
 
 
 # Fields that make a cached verdict re-renderable but have no sensible native Neo4j
