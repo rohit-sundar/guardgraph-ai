@@ -12,7 +12,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.analysis.signatures import (
     match_signatures, reset_signature_db, normalize_family_name, deterministic_family,
 )
-from app.analysis.yara_engine import compile_rules, scan_bytes, reset_compiled_rules, YARA_AVAILABLE
+from app.analysis.yara_engine import (
+    compile_rules, scan_bytes, reset_compiled_rules, YARA_AVAILABLE,
+    identify_packer_families, scan_apk_with_payloads,
+)
 from app.ml.features import build_feature_vector, FEATURE_NAMES
 from app.reports.scoring import compute_risk_score
 from app.core.schemas import ObfuscationSignal
@@ -184,6 +187,47 @@ def test_yara_rule_scanning():
     clean_bytes = b"This is a completely normal string without suspicious keywords."
     clean_matches = scan_bytes(clean_bytes)
     assert len(clean_matches) == 0
+
+
+def test_yara_detects_apkprotect_stub():
+    if not YARA_AVAILABLE:
+        print("Skipping YARA scan test: yara-python not installed.")
+        return
+    reset_compiled_rules()
+    matches = scan_bytes(b"some header bytes libAPKProtect.so more bytes com.apkprotect.Loader")
+    packer_matches = [m for m in matches if m["rule_name"] == "AndroidPacker_KnownStubs"]
+    assert len(packer_matches) == 1
+    assert "apkprot1" in packer_matches[0]["matched_strings"][0] or any(
+        "apkprot" in s for s in packer_matches[0]["matched_strings"]
+    )
+
+
+def test_identify_packer_families_maps_known_prefixes():
+    assert identify_packer_families(["$jiagu1", "$jiagu3"]) == ["Jiagu (Qihoo 360)"]
+    assert identify_packer_families(["$bangcle2"]) == ["Bangcle / SecNeo"]
+    assert identify_packer_families(["$apkprot1", "$apkprot3"]) == ["APKProtect"]
+    # A jiagu + bangcle double-pack reports both, in first-seen order.
+    assert identify_packer_families(["$bangcle1", "$jiagu2"]) == ["Bangcle / SecNeo", "Jiagu (Qihoo 360)"]
+    # Unrecognized / unrelated identifiers (e.g. from a different rule) yield nothing.
+    assert identify_packer_families(["$webview1", "$target3"]) == []
+    assert identify_packer_families([]) == []
+
+
+def test_scan_apk_with_payloads_names_specific_packer_family_in_description():
+    if not YARA_AVAILABLE:
+        print("Skipping YARA scan test: yara-python not installed.")
+        return
+    reset_compiled_rules()
+    with tempfile.NamedTemporaryFile(suffix=".apk", delete=False) as tmp:
+        tmp.write(b"padding bytes libjiagu.so com.qihoo.util.Helper padding bytes")
+        tmp_name = tmp.name
+    try:
+        matches, _targets = scan_apk_with_payloads(tmp_name)
+        packer_matches = [m for m in matches if m["rule_name"] == "AndroidPacker_KnownStubs"]
+        assert len(packer_matches) == 1
+        assert "Jiagu (Qihoo 360)" in packer_matches[0]["description"]
+    finally:
+        os.unlink(tmp_name)
 
 
 def test_feature_vector_35_features():
