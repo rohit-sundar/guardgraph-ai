@@ -1310,6 +1310,15 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.6rem;
+  padding: 0 0.9rem 0.9rem;
+  max-height: 22rem;
+  overflow-y: auto;
+}
+
+.re-findings-details.no-toggle > .limitations-list {
+  padding: 0;
+  max-height: none;
+  overflow: visible;
 }
 
 .limitation-item {
