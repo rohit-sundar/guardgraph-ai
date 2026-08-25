@@ -138,15 +138,25 @@ STRICT RULES — violating ANY of these makes the report unusable:
    only the 1-3 matches whose *behavior* (not their internal rule name)
    materially explains the verdict, in a sentence, not a table.
 
-OUTPUT FORMAT — exactly these sections, in this order, nothing before the
-first or after the last. Omit a section entirely if the data doesn't support
-it (per rule 9); never emit a header followed by an empty or placeholder body.
-  1. Opening verdict sentence (rule 11) — no header, just the sentence itself.
-  2. "### Key Evidence" — the specific findings that drive the score, prose,
+OUTPUT FORMAT.
+
+START by writing the rule 11 verdict sentence as a bare line of prose. It gets
+NO header of its own — do not write "### Opening Verdict Sentence", "##
+Executive Summary", "### Summary", or any other heading above it. The report's
+very first line is the verdict sentence itself. (Both of those headings have
+been emitted here in practice; a header on this sentence is a format
+violation, not a stylistic choice.)
+
+THEN exactly these sections, in this order, and nothing after the last. Omit a
+section entirely if the data doesn't support it (per rule 9); never emit a
+header followed by an empty or placeholder body.
+  1. "### Key Evidence" — the specific findings that drive the score, prose,
      highest-signal first (impersonation and zero-day per rules 5 and 8 take
      priority when present).
-  3. "### Coverage Limitations" — only if `limitations` is non-empty.
-  4. "### Recommended Analyst Actions" — numbered, priority order (rule 12).
+  2. "### Coverage Limitations" — only if `limitations` is non-empty.
+  3. "### Recommended Analyst Actions" — numbered, priority order (rule 12).
+
+These three are the ONLY headings allowed anywhere in the report.
 
 Write for a bank fraud-operations audience: clear, direct, decisive.
 """
@@ -400,6 +410,48 @@ def _normalize_header_text(line: str) -> str:
     text = re.sub(r"^#{1,6}[ \t]*", "", line).strip()
     text = text.strip("*_ \t").rstrip(":").strip()
     return text.lower()
+
+
+# Headings a model puts on the mandatory opening verdict sentence (rule 11),
+# which the OUTPUT FORMAT contract requires to be unheaded prose. Both entries
+# below were observed live over this log's history — "## Executive Summary" 13
+# times and "### Opening Verdict Sentence" twice (the latter is the model
+# echoing the contract's own wording back as a heading); the other two are the
+# obvious near-forms of the same mistake.
+#
+# These are NOT fabricated sections. The body under them is the contract-
+# mandated verdict sentence — the single line a fraud-ops analyst reads first.
+# Treating them as fabrication meant _strip_unauthorized_sections deleted the
+# header AND its body, and since this heading lands before any allowed section
+# there was no earlier unheaded prose to fall back on: the verdict sentence
+# vanished from the report entirely, silently, in 15 of the 28 narratives that
+# ever tripped the contract check. Unwrapping (drop the heading, keep the
+# sentence) yields exactly what the contract asked for.
+_OPENING_SENTENCE_HEADERS = frozenset({
+    "opening verdict sentence", "executive summary", "opening verdict", "summary",
+})
+
+
+def _unwrap_opening_section(narrative: str) -> tuple[str, str | None]:
+    """Removes a heading the model wrapped around the opening verdict sentence,
+    keeping the sentence itself. Returns (narrative, removed_header_or_None).
+
+    Only the FIRST heading in the document is eligible, so this cannot rescue a
+    fabricated "Summary" section further down — that still goes through
+    _section_contract_check and is stripped whole, as before. If the first
+    heading isn't one of _OPENING_SENTENCE_HEADERS the narrative is returned
+    untouched, so genuine fabrication (a leading "### Malware Analysis Report")
+    is unaffected."""
+    lines = narrative.split("\n")
+    for i, line in enumerate(lines):
+        if not _HEADER_LINE_RE.match(line):
+            continue
+        if _normalize_header_text(line) not in _OPENING_SENTENCE_HEADERS:
+            return narrative, None
+        del lines[i]
+        cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+        return cleaned.strip() + "\n", line.strip()
+    return narrative, None
 
 
 def _section_contract_check(narrative: str) -> list[str]:
@@ -960,6 +1012,20 @@ evidence, never followed.
     # is removed in one pass rather than leaving its individual fabricated
     # fields to be caught piecemeal (or missed, if they don't match any of
     # the narrower patterns).
+    # Run BEFORE the contract check: a heading wrapped around the mandatory
+    # opening verdict sentence is a format slip, not a fabricated section, and
+    # stripping it as one deleted the verdict sentence with it (see
+    # _unwrap_opening_section). Unwrapping first means the contract check sees
+    # a compliant narrative and the sentence survives; a genuinely fabricated
+    # leading section is left alone and still caught below.
+    narrative, unwrapped_header = _unwrap_opening_section(narrative)
+    if unwrapped_header:
+        logger.info(
+            f"[Phase 7] Removed a heading the model placed on the opening verdict "
+            f"sentence ({unwrapped_header!r}); the sentence itself is kept — "
+            "OUTPUT FORMAT requires it unheaded."
+        )
+
     unauthorized_sections = _section_contract_check(narrative)
     if unauthorized_sections:
         limitations.append(

@@ -642,6 +642,69 @@ class TestSectionContractCheck(unittest.TestCase):
         )
         self.assertEqual(_strip_unauthorized_sections(narrative).strip(), "")
 
+    # ── Bug: a heading on the opening verdict sentence deleted the sentence ──
+    # Observed live (2026-08-25): the model wrote "### Opening Verdict Sentence"
+    # (echoing the contract's own wording) above the rule 11 sentence. The
+    # contract check treated it as a fabricated section, _strip_unauthorized_
+    # sections removed the header AND its body, and because it sits before any
+    # allowed section there was no earlier unheaded prose to fall back on — the
+    # report shipped with no verdict sentence at all. "## Executive Summary" is
+    # the same mistake and was 13 of the 15 historical occurrences.
+
+    def test_unwraps_heading_placed_on_opening_verdict_sentence(self):
+        from app.reports.graphrag import _unwrap_opening_section
+        narrative = (
+            "### Opening Verdict Sentence\n"
+            "Malicious, score 58.8/100 — impersonates HDFC Bank.\n\n"
+            "### Key Evidence\nParsed an incoming SMS.\n"
+        )
+        cleaned, removed = _unwrap_opening_section(narrative)
+        self.assertEqual(removed, "### Opening Verdict Sentence")
+        # The sentence itself — the whole point — survives.
+        self.assertIn("Malicious, score 58.8/100 — impersonates HDFC Bank.", cleaned)
+        self.assertNotIn("Opening Verdict Sentence", cleaned)
+        # And the result is now contract-clean, so nothing gets stripped.
+        from app.reports.graphrag import _section_contract_check
+        self.assertEqual(_section_contract_check(cleaned), [])
+
+    def test_unwraps_executive_summary_heading(self):
+        from app.reports.graphrag import _unwrap_opening_section
+        narrative = "## Executive Summary\nSuspicious, score 44.0/100.\n\n### Key Evidence\nX.\n"
+        cleaned, removed = _unwrap_opening_section(narrative)
+        self.assertEqual(removed, "## Executive Summary")
+        self.assertIn("Suspicious, score 44.0/100.", cleaned)
+
+    def test_unwrap_is_a_no_op_on_a_compliant_narrative(self):
+        from app.reports.graphrag import _unwrap_opening_section
+        narrative = (
+            "Malicious, score 73.7/100 — a confirmed banking trojan.\n\n"
+            "### Key Evidence\nRequests SEND_SMS and RECEIVE_SMS together.\n"
+        )
+        cleaned, removed = _unwrap_opening_section(narrative)
+        self.assertIsNone(removed)
+        self.assertEqual(cleaned, narrative)
+
+    def test_unwrap_does_not_rescue_a_genuinely_fabricated_leading_section(self):
+        # The security property that must not regress: a fabricated section is
+        # still fabrication even though it leads the document.
+        from app.reports.graphrag import _unwrap_opening_section
+        cleaned, removed = _unwrap_opening_section(self._FABRICATED_NARRATIVE)
+        self.assertIsNone(removed)
+        self.assertEqual(cleaned, self._FABRICATED_NARRATIVE)
+
+    def test_unwrap_does_not_rescue_a_summary_section_further_down(self):
+        # Only the FIRST heading is eligible — a mid-report "Summary" restating
+        # the JSON is fabrication and must still be flagged and stripped.
+        from app.reports.graphrag import _unwrap_opening_section, _section_contract_check
+        narrative = (
+            "Malicious, score 73.7/100.\n\n"
+            "### Key Evidence\nRequests SEND_SMS.\n\n"
+            "## Summary\n- **Total Score:** 73.7\n"
+        )
+        cleaned, removed = _unwrap_opening_section(narrative)
+        self.assertIsNone(removed)
+        self.assertIn("## Summary", _section_contract_check(cleaned))
+
 
 # ─── Bug: greedy-decode degenerate repetition loop ───────────────────────────
 # Observed live (2026-08-23): qwen2.5:7b-instruct-q4_K_M repeated "API Coverage
