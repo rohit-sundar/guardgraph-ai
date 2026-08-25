@@ -49,6 +49,7 @@ from app.reports.scoring import (
     BAND_LOW_CEILING,
     BAND_MEDIUM_CEILING,
     BAND_SUSPICIOUS_CEILING,
+    CODE_NOT_RECOVERED_WEIGHT,
     MATRIX_FLAG_SEVERITY,
     OPAQUE_REPUTATION_SCORE_FLOOR,
     OPAQUE_DEX_MAX_METHODS,
@@ -656,3 +657,31 @@ class TestOpaqueReputationFloor(unittest.TestCase):
         after = 2.12 - 0.0 + TOTAL_METHOD_PARSE_FAILURE_WEIGHT * 15
         self.assertAlmostEqual(after, 11.12, places=2)
         self.assertEqual(_band_for(after), "low")
+
+    # ── Regression: a weight that armed itself when its input stopped being a stub ──
+    # UNRESOLVED_REFLECTION_WEIGHT was calibrated while the input always returned 0,
+    # and was deliberately "wired so that implementing the taint pass turns it on".
+    # The taint pass landed; the weight armed; nobody re-measured. It then paid
+    # 1.50/15 to 88.2% of CLEAN corpus apps against 76.9% of malware — a constant
+    # pointing the wrong way, the exact defect N7 removed three other inputs for.
+
+    def test_unresolved_reflection_does_not_move_the_score(self):
+        """Reported in the coverage note, never scored."""
+        none_ = _obfuscation(unresolved_reflection_targets=0)
+        many = _obfuscation(unresolved_reflection_targets=12)
+        self.assertEqual(obfuscation_component(none_), obfuscation_component(many))
+        self.assertEqual(obfuscation_component(many), 0.0)
+
+    def test_a_normal_app_with_reflection_scores_zero_obfuscation(self):
+        """The user-visible symptom: a healthy app showing '12 reflection call
+        targets not statically resolved' rendered a constant 1.50/15 forever."""
+        realistic = _obfuscation(dex_method_count=28241, declared_component_count=12,
+                                 unresolved_reflection_targets=12, analyzed_method_count=288)
+        self.assertEqual(obfuscation_component(realistic) * 15, 0.0)
+
+    def test_the_real_signal_still_fires(self):
+        """Removing the noise term must not touch CODE_NOT_RECOVERED, which is the
+        only part of this component that discriminates (malware-only in the corpus)."""
+        stub = _obfuscation(dex_method_count=57, declared_component_count=630,
+                            unresolved_reflection_targets=12, analyzed_method_count=5)
+        self.assertEqual(obfuscation_component(stub), CODE_NOT_RECOVERED_WEIGHT)
