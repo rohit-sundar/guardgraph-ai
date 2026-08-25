@@ -250,7 +250,22 @@ def _adb(args: list[str], timeout: int = 30) -> str:
     cmd += args
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout, env=_adb_env()
+            cmd, capture_output=True, text=True, timeout=timeout, env=_adb_env(),
+            # Explicit, because `text=True` alone decodes with the LOCALE codec —
+            # cp1252 on a default Windows install. adb emits UTF-8, and device
+            # output routinely carries non-Latin text (an app's own UI strings via
+            # `uiautomator dump`, localized package labels, logcat). A byte that
+            # cp1252 leaves undefined (0x81, 0x8d, 0x8f, 0x90, 0x9d) killed
+            # subprocess's reader thread with UnicodeDecodeError, which does NOT
+            # propagate here — it leaves result.stdout as None, so this returned
+            # None and the caller failed later with an unrelated-looking
+            # "expected string or bytes-like object". Observed live: a sample whose
+            # UI text is non-Latin aborted the whole Phase 8 capture window this
+            # way, and the failure was then reported to the analyst as the sample
+            # "self-terminating" (anti-analysis) rather than as our own decode bug.
+            # errors="replace" so a single odd byte degrades one character instead
+            # of losing the entire stream again.
+            encoding="utf-8", errors="replace",
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         raise _DynamicVerificationError(f"adb {' '.join(args)} failed: {e}") from e
@@ -289,7 +304,7 @@ def _ensure_resign_keystore() -> str:
                 "-validity", "10000",
                 "-dname", "CN=GuardGraph Dynamic Verification, OU=Sandbox, O=GuardGraph, C=US",
             ],
-            capture_output=True, text=True, timeout=30, check=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, check=True,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
         raise _DynamicVerificationError(f"could not generate re-sign keystore: {e}") from e
@@ -332,7 +347,7 @@ def _resign_apk(apk_path: str) -> str:
                 "--ks", ks_path, "--ks-pass", "pass:guardgraph", "--key-pass", "pass:guardgraph",
                 resigned_path,
             ],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         os.unlink(resigned_path)
@@ -621,7 +636,7 @@ def _list_avds() -> list[str]:
     try:
         result = subprocess.run(
             [settings.emulator_path, "-list-avds"],
-            capture_output=True, text=True, timeout=30, env=_adb_env(),
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30, env=_adb_env(),
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         raise _DynamicVerificationError(
@@ -1022,6 +1037,7 @@ def _collect_events(pid: int, timeout_s: int, sha256: str | None = None) -> tupl
             logger.warning(f"[Phase 8] agent script error: {message.get('description')}")
 
     crashed = False
+    target_died = False
     reaction_screenshot_url: str | None = None
     try:
         script = session.create_script(src)
@@ -1042,13 +1058,34 @@ def _collect_events(pid: int, timeout_s: int, sha256: str | None = None) -> tupl
         # through to _diff_against_predictions' coverage_note instead of
         # raising, which would drop everything captured so far as ran=False.
         crashed = True
-        logger.warning(f"[Phase 8] target process (pid {pid}) exited during capture: {e}")
+        # Only a frida.Error means the TARGET actually went away. Any other
+        # exception here is a fault in our own capture code, and reporting that
+        # as "the sample self-terminated" states a forensic conclusion about the
+        # malware that was never observed. Confirmed live: a UnicodeDecodeError
+        # in _adb (see its encoding= comment) aborted the window on a perfectly
+        # healthy process, and the report told the analyst the sample had
+        # detected instrumentation and killed itself. Partial events are kept
+        # either way — what changes is only what this claims happened.
+        target_died = isinstance(e, frida.Error)
+        logger.warning(
+            f"[Phase 8] capture window ended early for pid {pid} "
+            f"({'target exited' if target_died else 'INTERNAL ERROR in capture code'}): {e!r}"
+        )
     if crashed:
         events.append({
-            "kind": "target_crashed",
+            "kind": "target_crashed" if target_died else "capture_aborted",
             "value": (
-                f"process exited/crashed mid-capture — possible anti-analysis "
-                f"self-termination, {len(events)} event(s) captured before this point"
+                (
+                    f"process exited/crashed mid-capture — possible anti-analysis "
+                    f"self-termination, {len(events)} event(s) captured before this point"
+                )
+                if target_died
+                else (
+                    f"capture window aborted by an internal error in the analysis "
+                    f"harness, not by anything the sample did — "
+                    f"{len(events)} event(s) captured before this point are still valid, "
+                    f"but coverage is incomplete for a reason unrelated to this APK"
+                )
             ),
         })
         crash_logcat = _capture_logcat_tail()
@@ -1154,7 +1191,12 @@ def _diff_against_predictions(events: list[dict], static_predictions: dict) -> D
     )
 
     hook_errors = [e["value"] for e in events if e.get("kind") == "hook_error"]
-    crash_events = [e["value"] for e in events if e.get("kind") == "target_crashed"]
+    # Both kinds must reach the coverage note — they describe the same coverage
+    # gap and differ only in cause (the sample vs. our own harness).
+    crash_events = [
+        e["value"] for e in events
+        if e.get("kind") in ("target_crashed", "capture_aborted")
+    ]
 
     summary: dict[str, int] = {}
     for e in events:
@@ -1202,7 +1244,7 @@ def _capture_screenshot(sha256: str | None, tag: str = "final") -> str | None:
         if settings.adb_device_serial:
             cmd += ["-s", settings.adb_device_serial]
         cmd += ["pull", device_path, str(local_path)]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=20, env=_adb_env())
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=20, env=_adb_env())
         if result.returncode != 0 or not local_path.exists():
             logger.warning(f"[Phase 8] screenshot pull ({tag}) failed: {result.stderr.strip()}")
             return None

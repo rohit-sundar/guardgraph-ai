@@ -79,7 +79,7 @@ class Result:
 
 
 def run(cmd: list[str], timeout: int = 30, env: dict | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env)
 
 
 def find_android_sdk() -> Path | None:
@@ -232,7 +232,7 @@ def build_frida_agent(result: Result):
             run(["npm", "install"], timeout=180, env=os.environ.copy())  # cwd set below via cwd kwarg
         print("    npm run build ...")
         r = subprocess.run(["npm", "run", "build"], cwd=str(FRIDA_SCRIPTS_DIR),
-                            capture_output=True, text=True, timeout=120)
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
         if r.returncode == 0 and agent_js.exists():
             result.add("Frida agent build", "FIXED", "_agent.js compiled from hooks.js")
         else:
