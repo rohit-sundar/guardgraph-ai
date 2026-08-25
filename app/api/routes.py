@@ -250,6 +250,7 @@ async def get_analysis(sha256: str):
         zero_day_indicator=rc.get("zero_day_indicator", False),
         impersonation_floor_applied=rc.get("impersonation_floor_applied", False),
         dynamic_confirmation_floor_applied=rc.get("dynamic_confirmation_floor_applied", False),
+        opaque_reputation_floor_applied=rc.get("opaque_reputation_floor_applied", False),
         weighted_score=rc.get("weighted_score"),
     )
 
@@ -311,6 +312,15 @@ async def get_analysis(sha256: str):
         risk_score=risk_score,
         narrative_report=narrative,
         limitations=limitations,
+        # store_signature persists the grounding result inside the record, so for
+        # any sample analysed since that shipped it IS recoverable here — it was
+        # simply never read. Omitting it made the UI render "NOT CHECKED — this is
+        # a cached result from before grounding checks were persisted ... re-upload
+        # the sample", which is false for such a record and advises a re-upload that
+        # changes nothing. Every sample opened from the Analysis History panel hit
+        # this. Still None for genuinely older records, which is the honest gap this
+        # endpoint's docstring describes.
+        grounding=cached.get("grounding"),
     )
 
 
@@ -883,7 +893,7 @@ def _run_analysis(
         if cached_score is not None and grounding is None and narrative:
             limitations = limitations + [
                 "cache hit predates grounding-check persistence — the narrative's "
-                "fabrication checks cannot be shown for this record without a "
+                "grounding checks cannot be shown for this record without a "
                 "fresh upload"
             ]
         if dynamic_enabled:
@@ -891,8 +901,11 @@ def _run_analysis(
                 "DYNAMIC VERIFICATION ran fresh for this request (see the Dynamic "
                 "Verification tab and the risk score above, both current), but the "
                 "narrative text below is the cached historical report and does not "
-                "mention these fresh runtime findings — re-upload for a narrative "
-                "that discusses them."
+                "mention these fresh runtime findings. A cache hit replays the stored "
+                "narrative without calling the model, so re-uploading this APK will "
+                "keep returning this same text — the record has to be dropped first. "
+                f"Run `python scripts/clear_sample.py {ingestion.sha256}` and upload "
+                "again for a narrative that discusses the runtime findings."
             ]
             # Opportunistic persistence: a dynamic pass just ran fresh against
             # an already-cached sample — without this, that finding is thrown
@@ -929,7 +942,7 @@ def _run_analysis(
             narrative = "[No narrative was generated for this sample.]"
             limitations = limitations + [
                 "This sample was analysed with report generation disabled, so it has "
-                "no narrative and no fabrication-check results — the verdict, score "
+                "no narrative and no grounding-check results — the verdict, score "
                 "and manifest above are unaffected. A narrative cannot be produced "
                 "from a cache hit: it needs the control-flow graph, which is only "
                 "built on a full analysis. To generate one, run "
