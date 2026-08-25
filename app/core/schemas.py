@@ -398,6 +398,12 @@ class RiskScoreBreakdown(BaseModel):
     # confirmed C2 contact or executed DCL payload raised the verdict above what
     # the weighted components alone produced. Both flags can be true at once.
     dynamic_confirmation_floor_applied: bool = False
+    # Same distinction again, for OPAQUE_REPUTATION_SCORE_FLOOR — true when the
+    # sample is externally flagged as known malware AND static parsing recovered
+    # nothing, so the weighted components could not speak. Tells an analyst the
+    # verdict rests on external reputation plus opacity, not on anything this
+    # pipeline observed itself, which is a materially weaker claim.
+    opaque_reputation_floor_applied: bool = False
     # The weighted total before any floor. Equal to total_score unless a floor moved
     # it. None on the hot path, where no component was recomputed.
     weighted_score: Optional[float] = None

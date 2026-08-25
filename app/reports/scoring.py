@@ -154,6 +154,68 @@ UNRESOLVED_REFLECTION_WEIGHT = 0.10
 # build tool produces one), so unlike those two this doesn't need corpus
 # measurement to justify scoring it — see obfuscation_component's docstring.
 MANIFEST_CORRUPTED_WEIGHT = 0.60
+# Total method-parse failure: the analyser recovered ZERO control-flow graphs from
+# a DEX too small to be a real app. Both halves are required, and the second half is
+# what keeps this honest — `analyzed_method_count == 0` ALONE is not evasion. It is
+# also what a small clean app looks like when cfg.py's relevance pre-filter finds
+# nothing touching the forensic dictionary, which ObfuscationSignal.dex_method_count
+# documents and test_relevance_filter_selecting_nothing_is_not_evasion pins.
+#
+# Measured 2026-08-25 over a full corpus run on current code (631 scored), of the
+# rows with no recovered CFGs at all:
+#
+#   benign    2 / 297  dex_method_count 117, 1444
+#   malware   2 / 334  dex_method_count 20, 61
+#
+# Those ranges do not overlap — malware tops out at 61 methods, the lowest clean
+# app is 117 — so OPAQUE_DEX_MAX_METHODS sits in measured empty space, on the same
+# principle as BAND_MEDIUM_CEILING and not fitted to either side.
+#
+# **This population used to be 20x larger, and shrank for a good reason.** On the
+# 2026-08-24 corpus (data/corpus_scores_v3.json) it was 39 malware and 3 benign,
+# with the gap at 87→117. Commit 323dd2c then added Cipher.getInstance /
+# SecretKeySpec.<init> / IvParameterSpec.<init> / System.loadLibrary to the API set
+# that selects methods for CFG construction, and 37 of those 39 malware went from
+# 0 recovered CFGs to 1 — enough to satisfy has_deterministic_evidence and un-gate
+# classifier_confidence + ttp_severity. 02c08ec2… (41/77 VirusTotal engines
+# malicious, 59 DEX methods), the sample that opened this whole issue at 22.63
+# `low`, scores 47.88 `suspicious` on current code from that change alone, before
+# anything here applies.
+#
+# So this weight is NOT what fixed that sample, and should not be credited with it.
+# What it does is close the structural hole underneath: zero recovered CFGs means
+# the three code-derived components (classifier_confidence 25, ttp_severity 15,
+# forensic_anchor 15) all read 0 together, so 55 of 100 points are unreachable and
+# the component that exists to measure evasion was reading 0.0 on exactly the
+# samples that defeated the analyser. Widening the CFG dictionary shrank that
+# population; it cannot guarantee the next packer leaves a recognised API behind.
+#
+# 0.60 is the same magnitude as CODE_NOT_RECOVERED_WEIGHT and
+# MANIFEST_CORRUPTED_WEIGHT — all three say "the analyser was denied the code", and
+# none should outrank the others. Chosen for that consistency, not fitted to a
+# sample. Measured effect on the 2026-08-25 corpus run: it fires on 2 malware and
+# 0 benign, moving one malware sample `low` -> `medium` and changing nothing else.
+# Every benign band count is byte-identical before and after.
+TOTAL_METHOD_PARSE_FAILURE_WEIGHT = 0.60
+# The upper edge of "too small to be a real app", placed in the measured 87-to-117
+# gap above. A DEX larger than this with no analysed methods is the pre-filter
+# finding nothing interesting, which is not evidence of anything.
+#
+# **The gap does not fully generalize, same caveat as BAND_MEDIUM_CEILING.** On the
+# 30 never-trained holdout apps, 1 falls inside it: player.efis.data.ant.spl, 60
+# methods and no recovered CFGs — a data-only package that declares no permissions
+# at all. It is charged this weight and moves 2.12 -> 11.12, still `low` with 18.9
+# points of headroom. Reported rather than designed away, because widening the
+# boundary to exclude it would fit it to the holdout and destroy the only
+# independent check these constants have.
+#
+# That case is also why this weight is safe on its own: a clean app in this state
+# has nothing ELSE firing, so 9 points cannot carry it anywhere. The signal only
+# changes a verdict when it corroborates other evidence — which is exactly what a
+# coverage-gap signal should do, and why the band-changing work is done by
+# OPAQUE_REPUTATION_SCORE_FLOOR, which additionally requires an external hash hit
+# no clean app receives.
+OPAQUE_DEX_MAX_METHODS = 100
 
 # ioc_component (N6). The old tiers let three weak signals saturate the cap: a
 # YARA term of severity * 0.3 * min(n, 3) paid 0.765 to any app matching three
@@ -363,6 +425,73 @@ def dynamic_confirmation_floor(dynamic_verification: dict | None) -> float:
         if dynamic_verification.get("dcl_payload_executed"):
             floor = max(floor, DYNAMIC_CONFIRMATION_SCORE_FLOOR.get("dcl_payload_executed", 0.0))
     return floor
+
+
+# Third floor, same pattern and the same reason as the two above: strong evidence
+# that must not read as a low weighted score merely because the weighted components
+# had nothing to work with.
+#
+# The gap this closes: when static parsing recovers nothing, classifier_confidence
+# (25), ttp_severity (15) and forensic_anchor (15) all go to zero together — 55 of
+# 100 points structurally unreachable — while the only component that can still
+# speak to "other people have seen this exact file and called it malware" is
+# reputation, capped at 5.0. So a sample that is BOTH externally flagged AND opaque
+# enough to defeat the analyser scored lower than a transparent, mildly odd one.
+# Found live: 02c08ec2…, 41 of 77 VirusTotal engines malicious, scored 29.8 `low`.
+#
+# `suspicious`, deliberately not `high`. Internal analysis contributed nothing here;
+# the assertion being made is "a human should look at this", which is exactly what
+# `suspicious` means. Claiming `high` on someone else's verdict plus an absence of
+# our own evidence would be overreach.
+#
+# Trigger is a hash hit (is_known_malware — local signature DB, VirusTotal or
+# MalwareBazaar), which identifies THIS file. YARA breadth is deliberately NOT a
+# trigger: clean apps match a mean of 14 community rules (see IOC_YARA_WEIGHT), so
+# admitting YARA here would fire the floor on benign apps that merely parse badly —
+# the exact false-positive mode this scoring system exists to avoid.
+OPAQUE_REPUTATION_SCORE_FLOOR = {
+    "known_malware_no_static_coverage": BAND_MEDIUM_CEILING + _JUST_ABOVE,  # -> `suspicious`
+}
+
+
+def no_code_analysed(obfuscation: ObfuscationSignal) -> bool:
+    """
+    The analyser recovered no control-flow graphs from a DEX too small to be a real
+    app — see TOTAL_METHOD_PARSE_FAILURE_WEIGHT for the corpus measurement and for
+    why BOTH halves are required. Shared by obfuscation_component and
+    opaque_reputation_floor so the two cannot drift apart.
+
+    `dex_method_count is None` means not measured, and returns False: absence of a
+    measurement is not evidence, exactly as it is for the ratio test.
+    """
+    if obfuscation.dex_method_count is None:
+        return False
+    return (
+        obfuscation.analyzed_method_count == 0
+        and obfuscation.dex_method_count <= OPAQUE_DEX_MAX_METHODS
+    )
+
+
+def opaque_reputation_floor(is_known_malware: bool, obfuscation: ObfuscationSignal) -> float:
+    """
+    Floor for "externally confirmed AND we could not read it".
+
+    BOTH halves are required. External reputation alone needs no floor — a sample
+    the analyser could read scores on its own evidence. Degraded coverage alone must
+    never raise a score, or every APK this parser struggles with becomes suspicious
+    on nothing more than our own failure to parse it.
+
+    Degraded coverage means no_code_analysed (so the three code-derived components
+    all read 0), or a corrupt manifest. Both are the same situation for scoring: the
+    feature vector the weighted components need was never produced. It deliberately
+    does NOT include "the relevance pre-filter selected nothing on a normal-sized
+    app" — see no_code_analysed.
+    """
+    if not is_known_malware:
+        return 0.0
+    if no_code_analysed(obfuscation) or obfuscation.manifest_parse_failed:
+        return OPAQUE_REPUTATION_SCORE_FLOOR["known_malware_no_static_coverage"]
+    return 0.0
 
 
 IMPERSONATION_SCORE_FLOOR = {
@@ -651,6 +780,13 @@ def obfuscation_component(
             and recovered < MIN_METHODS_PER_DECLARED_COMPONENT * declared
         ):
             score += CODE_NOT_RECOVERED_WEIGHT
+    # No code examined at all, out of a DEX too small to be a real app. Distinct
+    # from the ratio test above, which compares the DEX against its own manifest;
+    # this compares it against "is there enough here to be an app". Additive, so
+    # "no methods AND no CFGs" saturates the component. See
+    # TOTAL_METHOD_PARSE_FAILURE_WEIGHT for the corpus measurement behind it.
+    if no_code_analysed(obfuscation):
+        score += TOTAL_METHOD_PARSE_FAILURE_WEIGHT
 
     # Reflection targets that constant propagation could not resolve. Still a stub in
     # obfuscation.count_reflection_calls (always 0); wired so that implementing the
@@ -852,8 +988,9 @@ def compute_risk_score(
         )
 
     dynamic_floor = dynamic_confirmation_floor(dynamic_verification)
+    opaque_floor = opaque_reputation_floor(is_known_malware, obfuscation)
 
-    total = max(total, impersonation_floor, dynamic_floor)
+    total = max(total, impersonation_floor, dynamic_floor, opaque_floor)
 
     band = _band_for(total)
 
@@ -882,5 +1019,6 @@ def compute_risk_score(
         zero_day_indicator=zero_day_indicator,
         impersonation_floor_applied=impersonation_floor > weighted_total,
         dynamic_confirmation_floor_applied=dynamic_floor > weighted_total,
+        opaque_reputation_floor_applied=opaque_floor > weighted_total,
         weighted_score=round(weighted_total, 2),
     )
