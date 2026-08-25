@@ -83,6 +83,29 @@ def test_diff_reports_actual_sms_accessibility_crypto_values():
     assert outcome.crypto_algorithms == ["DES/ECB/PKCS5Padding"]
 
 
+def test_diff_reports_crypto_output_preview_and_mode():
+    # Cheap substitute for real parameterized string-decryption (see
+    # hooks.js's hookCrypto docstring): the actual doFinal() return value,
+    # captured live, plus Cipher.init's encrypt/decrypt mode. Reported as
+    # independent observations, not correlated per-Cipher-instance.
+    events = [
+        {"kind": "crypto_invoked", "value": "AES/CBC/PKCS5Padding"},
+        {"kind": "crypto_output", "value": "http://evil.example.com/gate.php", "algorithm": "AES/CBC/PKCS5Padding"},
+        {"kind": "crypto_mode", "value": "decrypt", "algorithm": "AES/CBC/PKCS5Padding"},
+    ]
+    outcome = _diff_against_predictions(events, {})
+    assert outcome.crypto_outputs == [
+        {"algorithm": "AES/CBC/PKCS5Padding", "preview": "http://evil.example.com/gate.php"}
+    ]
+    assert outcome.crypto_modes_observed == ["decrypt"]
+
+
+def test_diff_crypto_output_absent_when_no_crypto_events():
+    outcome = _diff_against_predictions([{"kind": "network", "value": "1.2.3.4:443"}], {})
+    assert outcome.crypto_outputs == []
+    assert outcome.crypto_modes_observed == []
+
+
 def test_diff_event_summary_counts_by_kind():
     events = [
         {"kind": "hook_installed", "value": "network"},

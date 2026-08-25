@@ -137,16 +137,89 @@ function hookAccessibility(Java) {
   }
 }
 
+// Cheap, practical substitute for real parameterized string-decryption
+// (resolving a decrypt routine whose key comes from runtime state — device
+// ID, a value fetched from C2 — statically would need a real Dalvik
+// interpreter/symbolic-execution engine, out of scope here). Instead of
+// solving it statically, capture the actual decrypted/encrypted bytes at the
+// one place they exist in the clear: Cipher.doFinal's return value, live on
+// device. Only fires for samples where the code path actually executes
+// during the capture window — a complement to the static gap, not a full
+// close of it.
+//
+// CRYPTO_OUTPUT_PREVIEW_CAP bytes: this project has no prior convention for
+// capturing arbitrary runtime string content (see hookSmsRead/hookUrls —
+// none of them cap length), and a decrypted payload could be arbitrarily
+// large unlike a bare algorithm name, so an explicit, documented cap is
+// needed here specifically. 128 is enough to recognize a C2 URL, a JSON
+// config blob's shape, or a key/token string without shipping an entire
+// payload through the event channel.
+const CRYPTO_OUTPUT_PREVIEW_CAP = 128;
+
+// Cipher.init's opmode and doFinal's output are reported as independent
+// events, not correlated per-Cipher-instance: frida-java-bridge does not
+// guarantee a JS property attached to `this` in one hooked call survives to
+// a later call on what is nominally "the same" Java object, so building
+// instance-keyed correlation here would be fragile state for a hackathon
+// feature to depend on. The Python side can still line them up loosely by
+// timestamp proximity if useful; this hook does not attempt to.
+function previewCryptoBytes(Java, byteArray) {
+  const len = byteArray.length;
+  const capLen = Math.min(len, CRYPTO_OUTPUT_PREVIEW_CAP);
+  const StringClass = Java.use("java.lang.String");
+  const decoded = StringClass.$new(byteArray, 0, capLen, "UTF-8");
+  const text = decoded.toString();
+  // Java's String(byte[], charset) never throws on invalid UTF-8 — it
+  // substitutes U+FFFD instead. A high replacement-char ratio means this is
+  // binary data, not text, so a hex preview is more useful than a wall of
+  // replacement characters.
+  let replacementCount = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 0xfffd) replacementCount++;
+  }
+  if (text.length > 0 && replacementCount / text.length > 0.2) {
+    let hex = "";
+    for (let i = 0; i < capLen; i++) {
+      hex += (byteArray[i] & 0xff).toString(16).padStart(2, "0");
+    }
+    return "hex:" + hex + (len > capLen ? "..." : "");
+  }
+  return text + (len > capLen ? "..." : "");
+}
+
 function hookCrypto(Java) {
   try {
     const Cipher = Java.use("javax.crypto.Cipher");
     Cipher.doFinal.overload("[B").implementation = function (input) {
+      const output = this.doFinal(input);
       safeSend("crypto_invoked", this.getAlgorithm());
-      return this.doFinal(input);
+      try {
+        safeSend("crypto_output", previewCryptoBytes(Java, output), {
+          algorithm: this.getAlgorithm(),
+        });
+      } catch (e) {
+        // Preview extraction failing must not affect the real doFinal result.
+      }
+      return output;
     };
     safeSend("hook_installed", "crypto");
   } catch (e) {
     safeSend("hook_error", "crypto: " + e);
+  }
+
+  // Separate try/catch: an app whose Cipher usage doesn't match this exact
+  // init overload must not lose the doFinal hook above.
+  try {
+    const Cipher = Java.use("javax.crypto.Cipher");
+    Cipher.init.overload("int", "java.security.Key").implementation = function (opmode, key) {
+      // javax.crypto.Cipher.ENCRYPT_MODE=1, DECRYPT_MODE=2, WRAP_MODE=3, UNWRAP_MODE=4.
+      const modeName = opmode === 1 ? "encrypt" : opmode === 2 ? "decrypt" : "mode_" + opmode;
+      safeSend("crypto_mode", modeName, { algorithm: this.getAlgorithm() });
+      return this.init(opmode, key);
+    };
+    safeSend("hook_installed", "crypto_mode");
+  } catch (e) {
+    safeSend("hook_error", "crypto_mode: " + e);
   }
 }
 

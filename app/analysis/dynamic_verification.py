@@ -129,6 +129,15 @@ class DynamicVerificationOutcome:
     sms_destinations: list[str] = field(default_factory=list)
     accessibility_services: list[str] = field(default_factory=list)
     crypto_algorithms: list[str] = field(default_factory=list)
+    # Cheap substitute for real parameterized string-decryption (see
+    # hooks.js's hookCrypto): the actual doFinal() return value, captured
+    # live and truncated (CRYPTO_OUTPUT_PREVIEW_CAP in hooks.js), plus
+    # Cipher.init's encrypt/decrypt mode. Reported as independent
+    # observations, not correlated per-Cipher-instance — see hookCrypto's
+    # comment on why that correlation isn't attempted. Each entry:
+    # {"algorithm": ..., "preview": ...} or {"algorithm": ..., "mode": ...}.
+    crypto_outputs: list[dict] = field(default_factory=list)
+    crypto_modes_observed: list[str] = field(default_factory=list)
     # Incoming-SMS interception — the actual OTP-theft path this project is
     # aimed at (sms_api_invoked above only ever covered the app SENDING a
     # message). Non-empty means the app parsed an incoming SMS's sender
@@ -211,6 +220,8 @@ class DynamicVerificationOutcome:
             "sms_destinations": self.sms_destinations,
             "accessibility_services": self.accessibility_services,
             "crypto_algorithms": self.crypto_algorithms,
+            "crypto_outputs": self.crypto_outputs,
+            "crypto_modes_observed": self.crypto_modes_observed,
             "sms_intercepted": self.sms_intercepted,
             "overlay_detected": self.overlay_detected,
             "overlay_window_types": self.overlay_window_types,
@@ -870,7 +881,16 @@ def _run_capture_window_with_stimuli(timeout_s: int, sha256: str | None) -> str 
     time.sleep(settle)
 
     try:
-        _adb(["emu", "sms", "send", "+15551234567", "Your OTP code is 482913. Do not share it."], timeout=10)
+        # +91 98765 43210 is India's conventional placeholder mobile number —
+        # the same role US "555" numbers play — used ubiquitously in Indian
+        # docs/tutorials/examples, so it reads as obviously synthetic rather
+        # than a real subscriber number. Deliberately NOT a real bank's
+        # DLT-registered sender ID (e.g. "VM-SBIINB"): making the injected
+        # stimulus look like an authentic bank text would blur "we triggered
+        # this ourselves" into "this looks like a real SMS", which is a
+        # deception this project's screenshots must not risk — see the OTP
+        # text below, generic for the same reason.
+        _adb(["emu", "sms", "send", "+919876543210", "Your OTP code is 482913. Do not share it."], timeout=10)
     except _DynamicVerificationError as e:
         logger.warning(f"[Phase 8] simulated SMS injection failed (non-fatal): {e}")
 
@@ -1075,6 +1095,11 @@ def _diff_against_predictions(events: list[dict], static_predictions: dict) -> D
     outcome.accessibility_services = sorted({e["value"] for e in events if e.get("kind") == "accessibility_bound" and e.get("value")})
     outcome.crypto_invoked = any(e.get("kind") == "crypto_invoked" for e in events)
     outcome.crypto_algorithms = sorted({e["value"] for e in events if e.get("kind") == "crypto_invoked" and e.get("value")})
+    outcome.crypto_outputs = [
+        {"algorithm": e.get("algorithm", ""), "preview": e.get("value", "")}
+        for e in events if e.get("kind") == "crypto_output"
+    ]
+    outcome.crypto_modes_observed = sorted({e["value"] for e in events if e.get("kind") == "crypto_mode" and e.get("value")})
 
     loaded_libs = sorted({e["value"] for e in events if e.get("kind") == "native_library_loaded" and e.get("value")})
     outcome.native_libraries_loaded = loaded_libs

@@ -248,6 +248,12 @@ class DynamicVerificationResult(BaseModel):
     sms_destinations: list[str] = []
     accessibility_services: list[str] = []
     crypto_algorithms: list[str] = []
+    # Cheap substitute for real parameterized string-decryption — the actual
+    # Cipher.doFinal() return value, captured live and truncated (see
+    # hooks.js's hookCrypto), plus Cipher.init's encrypt/decrypt mode.
+    # Independent observations, not correlated per-Cipher-instance.
+    crypto_outputs: list[dict] = []
+    crypto_modes_observed: list[str] = []
     # Incoming-SMS interception (the real OTP-theft path — sms_api_invoked
     # above only ever covered the app SENDING a message). A simulated inbound
     # SMS is injected mid-capture (see dynamic_verification.py's

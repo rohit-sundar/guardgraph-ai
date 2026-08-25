@@ -1,5 +1,5 @@
 📦
-448749 /hooks.js
+450187 /hooks.js
 ✄
 var __defProp = Object.defineProperty;
 var __export = (target, all) => {
@@ -13591,16 +13591,54 @@ function hookAccessibility(Java) {
     safeSend("hook_error", "accessibility: " + e);
   }
 }
+var CRYPTO_OUTPUT_PREVIEW_CAP = 128;
+function previewCryptoBytes(Java, byteArray) {
+  const len = byteArray.length;
+  const capLen = Math.min(len, CRYPTO_OUTPUT_PREVIEW_CAP);
+  const StringClass = Java.use("java.lang.String");
+  const decoded = StringClass.$new(byteArray, 0, capLen, "UTF-8");
+  const text = decoded.toString();
+  let replacementCount = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 65533) replacementCount++;
+  }
+  if (text.length > 0 && replacementCount / text.length > 0.2) {
+    let hex = "";
+    for (let i = 0; i < capLen; i++) {
+      hex += (byteArray[i] & 255).toString(16).padStart(2, "0");
+    }
+    return "hex:" + hex + (len > capLen ? "..." : "");
+  }
+  return text + (len > capLen ? "..." : "");
+}
 function hookCrypto(Java) {
   try {
     const Cipher = Java.use("javax.crypto.Cipher");
     Cipher.doFinal.overload("[B").implementation = function(input) {
+      const output = this.doFinal(input);
       safeSend("crypto_invoked", this.getAlgorithm());
-      return this.doFinal(input);
+      try {
+        safeSend("crypto_output", previewCryptoBytes(Java, output), {
+          algorithm: this.getAlgorithm()
+        });
+      } catch (e) {
+      }
+      return output;
     };
     safeSend("hook_installed", "crypto");
   } catch (e) {
     safeSend("hook_error", "crypto: " + e);
+  }
+  try {
+    const Cipher = Java.use("javax.crypto.Cipher");
+    Cipher.init.overload("int", "java.security.Key").implementation = function(opmode, key) {
+      const modeName = opmode === 1 ? "encrypt" : opmode === 2 ? "decrypt" : "mode_" + opmode;
+      safeSend("crypto_mode", modeName, { algorithm: this.getAlgorithm() });
+      return this.init(opmode, key);
+    };
+    safeSend("hook_installed", "crypto_mode");
+  } catch (e) {
+    safeSend("hook_error", "crypto_mode: " + e);
   }
 }
 var OVERLAY_ATTACK_WINDOW_TYPES = /* @__PURE__ */ new Set([
