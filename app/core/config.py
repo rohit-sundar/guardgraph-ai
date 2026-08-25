@@ -69,6 +69,23 @@ def _default_adb_path() -> str:
     return "adb"
 
 
+def _default_emulator_path() -> str:
+    """
+    Best-effort locate the AVD launcher under ANDROID_HOME/ANDROID_SDK_ROOT,
+    mirroring _default_adb_path. `emulator` is even less reliably on PATH than
+    adb — the SDK ships it in its own `emulator/` directory rather than
+    `platform-tools/`, and it must be invoked from there (it resolves its
+    qemu binaries and system images relative to its own location).
+    """
+    sdk_root = os.environ.get("ANDROID_HOME") or os.environ.get("ANDROID_SDK_ROOT")
+    if sdk_root:
+        for name in ("emulator.exe", "emulator"):
+            candidate = os.path.join(sdk_root, "emulator", name)
+            if os.path.exists(candidate):
+                return candidate
+    return "emulator"
+
+
 class Settings(BaseSettings):
     neo4j_uri: str = "bolt://localhost:7687"
     neo4j_user: str = "neo4j"
@@ -125,6 +142,32 @@ class Settings(BaseSettings):
     # from this for every adb invocation rather than trusting the default.
     adb_server_port: int = 5039
     adb_path: str = _default_adb_path()
+    # ── AVD auto-boot ───────────────────────────────────────────────────────
+    # A booted AVD used to be a hard precondition a human had to satisfy by
+    # hand before every dynamic run. With this on, Phase 8 boots the AVD
+    # itself when no device is attached, so `enable_dynamic=true` is all a
+    # request needs. Set false to keep the old behaviour (fail fast with a
+    # coverage note instead of spending a minute booting) — e.g. on CI, or
+    # where the AVD is managed by something else.
+    dynamic_analysis_auto_boot: bool = True
+    # Which AVD to boot. Empty = auto-select, but ONLY when exactly one AVD
+    # exists; with several installed, Phase 8 refuses and names them rather
+    # than guessing. Guessing is genuinely unsafe here: a `google_apis_
+    # playstore` image looks identical in `-list-avds` but is Play-signed and
+    # silently blocks Frida from injecting, which would surface as a confusing
+    # "could not attach" much later. Name the `google_apis` one explicitly.
+    avd_name: str = ""
+    emulator_path: str = _default_emulator_path()
+    # swiftshader_indirect (software rendering) is the safe default: hardware
+    # GPU passthrough is the usual cause of an emulator that hangs or dies on
+    # boot, and nothing in this pipeline needs GPU speed — the screenshots are
+    # flat 2D UI. Set "host" for a faster boot on a machine with a known-good GPU.
+    emulator_gpu_mode: str = "swiftshader_indirect"
+    # Cold-booting an AVD is slow and varies hugely by machine (~20s on the dev
+    # machine's WHPX-accelerated x86_64 image, several minutes on an unaccelerated
+    # or ARM-translated one). Generous by default so a slow first boot reports a
+    # real result rather than a spurious timeout.
+    avd_boot_timeout_seconds: int = 300
     # None = whichever single USB/emulator device Frida finds (frida.get_usb_device).
     # Set explicitly (e.g. "emulator-5554") once more than one AVD/device could
     # be attached, so a stray second instance can't silently steal the target.

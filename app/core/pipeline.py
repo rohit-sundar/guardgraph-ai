@@ -814,7 +814,8 @@ class AnalysisPipeline:
         method has one clean early-return rather than duplicating that gate.
 
         static_predictions passed in only carries fields this module actually
-        uses (c2_indicators, dcl_targets, native_targets, intent_actions) —
+        uses (c2_indicators, dcl_targets, native_targets, intent_actions,
+        activities, services) —
         resolved_dcl_targets/resolved_native_targets are human-readable
         "ClassName(\"path\")" / 'System.loadLibrary("x") -> ...' describe()
         strings from dcl_tracing.py/native_bridge.py, so only a resolved
@@ -840,6 +841,11 @@ class AnalysisPipeline:
                 "dcl_targets": resolved_dcl_targets,
                 "native_targets": resolved_native_targets or [],
                 "intent_actions": ingestion.intent_actions,
+                # Declared activities/services let a sample with no LAUNCHER
+                # category still be started explicitly by component name —
+                # see _start_declared_components.
+                "activities": ingestion.activities,
+                "services": ingestion.services,
             },
             sha256=ingestion.sha256,
         )

@@ -3,12 +3,13 @@
 Android malware risk-scoring engine. CFG/ACFG graph features + XGBoost
 multi-label classification + Neo4j knowledge graph + local-LLM GraphRAG
 report generation (Ollama) on the static/default path, plus an **opt-in
-dynamic-analysis pass** (Android emulator + Frida) added 2026-08-24 that
-confirms/refutes specific static predictions at runtime — see
-`app/analysis/frida_scripts/README.md` for setup and
-`TEAM_CONTEXT.md`'s Session 14 for the full design writeup. The dynamic
-pass is currently **local, uncommitted work** — check `git status` /
-`git log` before assuming it's on whatever branch you've checked out.
+dynamic-analysis pass** (Android emulator + Frida) that confirms/refutes
+specific static predictions at runtime — see step 7 of the quickstart below,
+`app/analysis/frida_scripts/README.md` for the containment rules, and
+`TEAM_CONTEXT.md`'s Session 14 for the full design writeup.
+
+The dynamic pass is **opt-in per request** and off by default: nothing on the
+normal `/analyze` path touches an emulator unless you ask for it.
 
 ## Status
 This is a **skeleton**, not a finished product. Every module has a working
@@ -90,6 +91,58 @@ python scripts/download_yara_rules.py
 # 6. Run the API (leave running; --reload for development)
 uvicorn app.main:app --reload --port 8000
 ```
+
+```bash
+# 7. Dynamic analysis (Android emulator + Frida). 
+python scripts/setup_dynamic_analysis.py
+```
+
+The script is the whole setup: it finds your SDK and adb, downloads the
+frida-server build matching your installed `frida` client and the AVD's ABI,
+pushes and starts it, builds the Frida agent bundle, and checks the firewall
+containment rules. It exits non-zero and tells you the exact next step if
+anything is missing. Re-run it any time dynamic analysis misbehaves.
+
+Two things it cannot do for you:
+
+- **Create the AVD.** You need one API 30+ **`google_apis`** x86_64 image
+  (Android Studio → Device Manager). Not `google_apis_playstore` — that image is
+  Play-signed and silently blocks Frida from injecting, which shows up much later
+  as a confusing `could not attach to pid N`.
+- **Apply the host firewall rules** (needs Administrator). The pipeline probes
+  the AVD's egress before every install and **refuses to install an APK** if a
+  real outbound connection succeeds. Commands are in
+  `app/analysis/frida_scripts/README.md`.
+
+Then set `DYNAMIC_ANALYSIS_ENABLED=true` in `.env`. The AVD itself is booted
+automatically when no device is attached, so you do not need to start the
+emulator by hand. Per-machine settings — all optional, all documented in
+`.env.example`:
+
+| variable | what it's for |
+|---|---|
+| `AVD_NAME` | Which AVD to boot. Required **only** if you have more than one — with several installed the pipeline refuses to guess and names them. |
+| `DYNAMIC_ANALYSIS_AUTO_BOOT` | `true` (default) boots the AVD on demand. `false` fails fast instead. |
+| `EMULATOR_PATH` / `ADB_PATH` | Auto-detected from `ANDROID_HOME`; set only if detection fails. |
+| `ADB_SERVER_PORT` | Defaults to `5039`. adb's own default 5037 collides with Hyper-V's reserved port range on some Windows machines. |
+| `EMULATOR_GPU_MODE` | `swiftshader_indirect` (software) by default — hardware GPU passthrough is the usual cause of an emulator that hangs on boot. |
+| `AVD_BOOT_TIMEOUT_SECONDS` | Cold-boot budget, default 300. |
+
+Trigger it per request with `?enable_dynamic=true`, or tick **"🧪 Also run
+dynamic verification"** in the UI (the checkbox appears after you pick a file,
+above the analyse button — it is off by default):
+
+```bash
+curl -X POST "http://localhost:8000/analyze?enable_dynamic=true" \
+  -F "file=@data/ttp_apks/<sample>.apk"
+```
+
+Results render in the **🧪 Dynamic Verification** tab. `ran: false` there means
+the pass did not complete (no AVD, install failure, app crashed on launch) — it
+never means "no malicious behaviour found", and the coverage note says which.
+Note that an x86_64 AVD cannot install ARM-only APKs, and API 30+ refuses APKs
+whose `resources.arsc` is compressed; both are reported honestly rather than
+scored as clean.
 
 Then upload an APK. A sample ships with the repository:
 ```bash
