@@ -615,6 +615,27 @@ body {
   border: 1px solid rgba(239, 68, 68, 0.3);
 }
 
+.feedback-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+}
+
+.feedback-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-right: 0.25rem;
+}
+
+.feedback-status {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+}
+
 /* Specs Grid */
 .specs-grid {
   display: grid;

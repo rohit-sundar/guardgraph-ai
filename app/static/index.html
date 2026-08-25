@@ -219,6 +219,18 @@
             <span class="badge badge-zero-day hidden" id="zeroDayBadge">Zero-Day Anomaly Detected</span>
             <span class="badge badge-malware hidden" id="impersonationBadge"></span>
             <span class="badge badge-malware hidden" id="knownMalwareBadge">Known VirusTotal Signature Match</span>
+            <span class="badge badge-zero-day hidden" id="packerBadge"></span>
+          </div>
+          <!-- Analyst feedback — the first half of an active-learning loop
+               (see scripts/export_feedback_for_training.py for the second
+               half). Recording only, no live retraining: a correction here
+               becomes a training-ready row the next time that script runs,
+               a deliberate manual step, not something this click triggers. -->
+          <div class="feedback-row" id="feedbackRow">
+            <span class="feedback-label">Is this verdict right?</span>
+            <button type="button" class="btn btn-sm btn-control" id="btnFeedbackConfirmed" title="This verdict looks correct">👍 Correct</button>
+            <button type="button" class="btn btn-sm btn-control" id="btnFeedbackFalsePositive" title="This verdict is wrong">👎 False positive</button>
+            <span class="feedback-status hidden" id="feedbackStatus"></span>
           </div>
         </div>
 

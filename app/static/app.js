@@ -10,7 +10,46 @@ document.addEventListener('DOMContentLoaded', () => {
   if (refreshBtn) refreshBtn.addEventListener('click', loadHistory);
   const backBtn = document.getElementById('btnBackToUpload');
   if (backBtn) backBtn.addEventListener('click', goBackToUpload);
+  const confirmedBtn = document.getElementById('btnFeedbackConfirmed');
+  if (confirmedBtn) confirmedBtn.addEventListener('click', () => submitFeedback('confirmed'));
+  const falsePositiveBtn = document.getElementById('btnFeedbackFalsePositive');
+  if (falsePositiveBtn) falsePositiveBtn.addEventListener('click', () => submitFeedback('false_positive'));
 });
+
+// Analyst feedback — records a correction against the currently-rendered
+// report's sha256 (see POST /analyses/{sha256}/feedback). This only logs
+// the correction; scripts/export_feedback_for_training.py is the separate,
+// deliberate step that turns it into a training row, and nothing here
+// triggers retraining.
+async function submitFeedback(verdict) {
+  const statusEl = document.getElementById('feedbackStatus');
+  const sha256 = currentReportData && currentReportData.manifest && currentReportData.manifest.sha256;
+  if (!sha256) {
+    if (statusEl) {
+      statusEl.textContent = 'No sample loaded.';
+      statusEl.classList.remove('hidden');
+    }
+    return;
+  }
+  try {
+    const resp = await fetch(`/analyses/${encodeURIComponent(sha256)}/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verdict: verdict }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (statusEl) {
+      statusEl.textContent = verdict === 'confirmed' ? 'Thanks — recorded.' : 'Recorded — thanks for the correction.';
+      statusEl.classList.remove('hidden');
+    }
+  } catch (e) {
+    if (statusEl) {
+      statusEl.textContent = 'Could not record feedback (see console).';
+      statusEl.classList.remove('hidden');
+    }
+    console.error('submitFeedback failed:', e);
+  }
+}
 
 // Returns from a rendered report (fresh or historical) to the landing page.
 // Re-fetches history since the results just viewed may be a new analysis
@@ -532,13 +571,32 @@ function renderResults(data) {
   // was only ever called on the truthy branch.
   document.getElementById('zeroDayBadge').classList.add('hidden');
   document.getElementById('knownMalwareBadge').classList.add('hidden');
+  const feedbackStatusEl = document.getElementById('feedbackStatus');
+  if (feedbackStatusEl) feedbackStatusEl.classList.add('hidden');
   const impBadge = document.getElementById('impersonationBadge');
   if (impBadge) impBadge.classList.add('hidden');
+  const packerBadge = document.getElementById('packerBadge');
+  if (packerBadge) packerBadge.classList.add('hidden');
   if (risk.zero_day_indicator) {
     document.getElementById('zeroDayBadge').classList.remove('hidden');
   }
   if (manifest.signature_yara && manifest.signature_yara.is_known_malware) {
     document.getElementById('knownMalwareBadge').classList.remove('hidden');
+  }
+  // Packer detection is one YARA rule among dozens on a heavily-flagged sample —
+  // easy to miss scrolling the YARA tab. Pull it out to its own top-level badge,
+  // same treatment as the impersonation/zero-day findings above. The rule's
+  // description carries the specific family ("...matched: iJiami") since YARA
+  // itself only reports the generic rule name.
+  if (packerBadge && manifest.signature_yara) {
+    const packerMatch = (manifest.signature_yara.yara_matches || [])
+      .find(y => y.rule_name === 'AndroidPacker_KnownStubs');
+    if (packerMatch) {
+      const familyMatch = /matched:\s*(.+)$/.exec(packerMatch.description || '');
+      const family = familyMatch ? familyMatch[1].trim() : 'a known packer';
+      packerBadge.textContent = `Packed with ${family}`;
+      packerBadge.classList.remove('hidden');
+    }
   }
 
   // Metadata
