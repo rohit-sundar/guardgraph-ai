@@ -382,31 +382,35 @@ def labels_plausibly_match(label: str, listing_title: str) -> bool:
     name — "PhonePe UPI Payments, Loan App" for package com.phonepe.app,
     confirmed live 2026-08-25 — so a strict edit-distance comparison would
     misreport the genuine app as a mismatch. A normalized substring check
-    absorbs the tagline; edit distance is the fallback for short labels that
-    don't literally appear inside the listing title.
+    absorbs the tagline.
+
+    Deliberately EXACT/SUBSTRING ONLY — no edit-distance fallback, unlike the
+    static-table checks in impersonation.py. Confirmed live 2026-08-25:
+    "G-Droid" (org.gdroid.gdroid, a real F-Droid client) normalises to
+    "gdroid", which is edit-distance 1 from "godroid" ("GoDroid", an
+    unrelated real glider app) — the identical transformation shape as a
+    genuine typosquat like "Phonpe" -> "PhonePe". Edit distance alone cannot
+    tell a real typosquat apart from two unrelated apps that happen to share
+    a short name, and this function's search space is every real app on
+    Play, not a curated list — unlike impersonation.py's own inline
+    edit-distance check in _check_label(), which stays fuzzy because it only
+    ever compares against a small, hand-verified set of protected brands
+    where that ambiguity is bounded and worth the recall. Live label search
+    has no such bound, so it only fires on the unambiguous case.
 
     Imported lazily from app.analysis.impersonation (not at module level) to
     avoid a circular import: impersonation.py imports this module to run the
     live checks, and this function needs impersonation's string-normalisation
-    helpers to stay consistent with the static checks rather than duplicating
+    helper to stay consistent with the static checks rather than duplicating
     the confusable-character logic.
     """
-    from app.analysis.impersonation import (
-        LABEL_MAX_EDIT_DISTANCE,
-        MIN_LABEL_LEN_FOR_FUZZY,
-        edit_distance,
-        normalize_confusables,
-    )
+    from app.analysis.impersonation import normalize_confusables
 
     a = normalize_confusables(label)
     b = normalize_confusables(listing_title)
     if not a or not b:
         return False
-    if a == b or a in b or b in a:
-        return True
-    if len(a) >= MIN_LABEL_LEN_FOR_FUZZY and len(b) >= MIN_LABEL_LEN_FOR_FUZZY:
-        return edit_distance(a, b, LABEL_MAX_EDIT_DISTANCE) <= LABEL_MAX_EDIT_DISTANCE
-    return False
+    return a == b or a in b or b in a
 
 
 def fetch_icon_phash(icon_url: Optional[str], timeout: Optional[float] = None) -> Optional[int]:

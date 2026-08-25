@@ -276,3 +276,15 @@ def test_labels_plausibly_match_rejects_unrelated_names():
 
 def test_labels_plausibly_match_exact_equal():
     assert brand_lookup.labels_plausibly_match("WhatsApp", "WhatsApp")
+
+
+def test_labels_plausibly_match_rejects_short_name_collision():
+    """
+    Regression for a live false positive (2026-08-25): "G-Droid" (a real
+    F-Droid client, org.gdroid.gdroid) is edit-distance 1 from "GoDroid" (an
+    unrelated real glider app) after normalisation — the same transformation
+    shape as a genuine typosquat, but these are two different legitimate
+    apps. Edit distance can't disambiguate that, so the live check must not
+    either; only exact/substring matches should count.
+    """
+    assert not brand_lookup.labels_plausibly_match("G-Droid", "GoDroid")
