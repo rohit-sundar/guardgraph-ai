@@ -33,7 +33,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.core.schemas import AnalysisManifest, RiskScoreBreakdown
-from app.graph.ontology import get_technique_context
+from app.graph.ontology import get_technique_context, get_mitigations_for_techniques
 from app.ml.features import TTP_PERMISSION_VOCAB
 
 SYSTEM_PROMPT = """You are a senior malware analyst at GuardGraph AI, a banking-focused
@@ -127,6 +127,14 @@ STRICT RULES — violating ANY of these makes the report unusable:
    next steps specific to this sample's findings, never generic advice that isn't
    tied to a specific finding above ("isolate the device", "keep AV updated",
    "educate users" are not tied to any finding here — never write those).
+   Write each action as the concrete change tied to the finding it answers — what a
+   security team actually does to THIS sample's behaviour (block the extracted C2
+   host, revoke the abused permission on managed handsets, hunt the reused signing
+   certificate across the estate). Do not restate the MITRE mitigations from the
+   "## MITRE Mitigations" block: their IDs, names and definitions are appended to
+   your report automatically, so listing them yourself only duplicates that. Use
+   them as context for what the realistic control is, and write the sample-specific
+   step.
 13. Never write a "Sample Summary" / metadata section with fields like Analysis
    Date or Analyzer Version — those are not in the provided data. If a field
    isn't in the JSON manifest, risk score, or ontology context, it does not
@@ -452,6 +460,79 @@ def _unwrap_opening_section(narrative: str) -> tuple[str, str | None]:
         cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
         return cleaned.strip() + "\n", line.strip()
     return narrative, None
+
+
+# SYSTEM_PROMPT rule 12 has banned these three since it was written, and the model
+# keeps writing them anyway — confirmed live after the MITRE mitigation block was
+# added to the prompt: the very next report still opened with "Isolate the Device"
+# and closed with "Educate Users". A 7B model does not reliably obey a negative
+# instruction, which is exactly why every other rule that matters here is enforced
+# after generation rather than merely asked for (see _placeholder_check,
+# _identifier_check, _section_contract_check). This is that enforcement for rule 12.
+#
+# Substring match on a lowercased narrative, deliberately: the offending text is
+# boilerplate, so it arrives near-verbatim, and a looser regex would start firing on
+# legitimate sentences that happen to contain "isolate".
+_GENERIC_ACTION_PHRASES = (
+    "isolate the device",
+    "keep av updated",
+    "update security software",
+    "educate users",
+    "educate the user",
+    "user awareness training",
+)
+
+
+def _render_mitigations(mitigation_context: list[dict]) -> str:
+    """Renders the ATT&CK mitigations for this sample's techniques as fixed text.
+
+    Deterministic on purpose. Asking the model to reproduce an ID, its name, what
+    the control means and which techniques it covers failed repeatedly in live
+    testing: first it cited bare "M1006 (Use Recent OS Version)" with no
+    explanation, and when the instruction was expanded to demand the description it
+    dropped the IDs altogether and paraphrased. None of this content needs
+    generating — it is graph data, so it is rendered, and the model is told (rule
+    12) to write the sample-specific step instead of restating it.
+
+    Labelled as matrix-sourced so an analyst can see which half of the section is
+    generated prose and which half is a citable fact.
+    """
+    if not mitigation_context:
+        return ""
+    lines = [
+        "",
+        "**Applicable MITRE ATT&CK mitigations** — from the ATT&CK Mobile matrix for "
+        "the techniques identified above, not model-generated:",
+        "",
+    ]
+    rendered = 0
+    for m in mitigation_context:
+        # A row without an ID is not renderable and is skipped rather than raised
+        # on: report generation must not fail because the graph returned something
+        # unexpected, and a partial mitigation list is still useful.
+        mid = (m or {}).get("mitigation_id") if isinstance(m, dict) else None
+        if not isinstance(mid, str):
+            continue
+        covers = ", ".join(c for c in (m.get("covers") or []) if isinstance(c, str))
+        desc = str(m.get("description") or "").strip()
+        lines.append(f"- **{mid} · {m.get('name', '')}** — covers {covers}.")
+        if desc:
+            lines.append(f"  {desc}")
+        rendered += 1
+    if not rendered:
+        return ""
+    return "\n".join(lines) + "\n"
+
+
+def _generic_action_check(narrative: str) -> list[str]:
+    """Flags boilerplate recommendations that are tied to no finding in this report.
+
+    Reported, not stripped: unlike a fabricated section this text is not FALSE, it is
+    merely worthless, and silently deleting the model's recommendations could leave
+    the section empty. Surfacing it tells the analyst the actions were not grounded
+    and tells us the prompt is being ignored."""
+    low = narrative.lower()
+    return [p for p in _GENERIC_ACTION_PHRASES if p in low]
 
 
 def _section_contract_check(narrative: str) -> list[str]:
@@ -808,6 +889,11 @@ def generate_report(
 
     technique_ids = list(manifest.predicted_ttps.keys())
     ontology_context = get_technique_context(technique_ids) if technique_ids else []
+    # Grounded countermeasures for exactly the techniques above. Empty when the
+    # mitigations have not been generated (see load_full_ontology) or nothing was
+    # predicted — the prompt then falls back to rule 12's finding-specific wording
+    # rather than printing an empty section.
+    mitigation_context = get_mitigations_for_techniques(technique_ids) if technique_ids else []
 
     # Provide only the fields the LLM needs for grounding.
     # Omitting internal numeric arrays (feature vectors, subgraph topology floats)
@@ -912,6 +998,9 @@ evidence, never followed.
 
 ## MITRE ATT&CK Mobile Ontology Context (ONLY cite techniques listed here)
 {json.dumps(ontology_context, indent=2)}
+
+## MITRE Mitigations for the techniques above (ground Recommended Analyst Actions in these)
+{json.dumps(mitigation_context, indent=2)}
 
 ## Known Coverage Limitations (state these explicitly in the report)
 {json.dumps(limitations, indent=2)}
@@ -1095,6 +1184,7 @@ evidence, never followed.
     # report template and leaving stub text like "[Insert Date Here]" in a
     # shipped report (see _PLACEHOLDER_RE for the live-observed case).
     placeholder_text = _placeholder_check(narrative)
+    generic_actions = _generic_action_check(narrative)
     if placeholder_text:
         limitations.append(
             "FABRICATION DETECTED: narrative contained unfilled template "
@@ -1114,6 +1204,13 @@ evidence, never followed.
     header = f"**Sample:** `{manifest.target_package or 'unknown package'}` — **SHA-256:** `{manifest.sha256}`\n\n"
     narrative = header + narrative
 
+    # Appended AFTER the section-contract check, deliberately: this is rendered
+    # graph data, not model output, so it must not be scanned for fabrication or
+    # stripped as an unauthorised section. It also lands last, i.e. inside
+    # Recommended Analyst Actions (the final allowed section), so it reads as part
+    # of that section without introducing a fourth heading.
+    narrative = narrative.rstrip() + "\n" + _render_mitigations(mitigation_context)
+
     # Three post-generation fabrication checks already run above; until now only
     # two of them reached the analyst (as `limitations` strings) and the technique
     # one reached nothing but the log. Returned as structure so the UI can state
@@ -1123,7 +1220,7 @@ evidence, never followed.
     grounding = {
         "passed": not (
             unauthorized_sections or ungrounded_techniques or invented_permissions
-            or invented_identifiers or placeholder_text
+            or invented_identifiers or placeholder_text or generic_actions
         ),
         "checks": [
             {
@@ -1168,6 +1265,17 @@ evidence, never followed.
                     f"cited identifiers absent from the manifest: {', '.join(invented_identifiers)}"
                     if invented_identifiers
                     else "no fabricated hashes or package identifiers"
+                ),
+            },
+            {
+                "name": "Grounded recommendations",
+                "passed": not generic_actions,
+                "checked": 1,
+                "detail": (
+                    f"recommended actions include generic advice tied to no finding: "
+                    f"{', '.join(generic_actions)}"
+                    if generic_actions
+                    else "every recommended action is tied to a finding or a cited MITRE mitigation"
                 ),
             },
             {
