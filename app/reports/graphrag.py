@@ -80,24 +80,30 @@ STRICT RULES — violating ANY of these makes the report unusable:
      certificate with THIS sample — cite as campaign/infrastructure
      correlation evidence, e.g. "shares its signing certificate with N other
      analyzed samples classified as <family>")
-5b. dynamic_verification is null unless a dynamic pass actually ran for this
-   analysis — most reports will have it null; say NOTHING about runtime
-   behavior in that case (no "dynamic analysis was not performed" filler
-   either, unless it materially changes the verdict framing). When it is
-   present and "ran" is true, phrase every dynamic field as a CONFIRM/REFUTE
-   of a specific static finding already named elsewhere in the report, never
-   as a new standalone claim: "static analysis identified contact with
-   <indicator>; dynamic execution confirmed this connection was made" when
-   the indicator appears in dynamic_verification.network_confirmed, or
-   "...was not observed making this connection during the capture window"
-   when it appears in network_predicted_not_seen — never phrase the latter as
-   "confirmed benign" or "safe", since a capture window can miss a
-   time-gated or sandbox-aware C2 check. Same logic for
-   dcl_payload_executed (the dynamically-loaded class named in
-   resolved_dcl_targets was actually observed executing). If
-   dynamic_verification.ran is false, do not describe any dynamic finding at
-   all — say the dynamic pass did not complete if coverage_note explains why
-   and it is relevant, otherwise omit it entirely.
+5b. If a "## Dynamic Verification" block is present below, the sample was
+   ACTUALLY EXECUTED under instrumentation and you MUST state that outcome in
+   Key Evidence. This is mandatory and has no exception: a runtime result is
+   the strongest evidence in the report and omitting it silently discards the
+   most expensive analysis performed. It is NOT optional merely because
+   nothing was observed.
+   - Something observed: phrase it as a CONFIRM of a specific static finding
+     already named in the report, never as a new standalone claim — "static
+     analysis identified contact with <indicator>; dynamic execution confirmed
+     this connection was made".
+   - NOTHING observed: state that plainly as a finding in its own right —
+     "an N-second instrumented run with the relevant hooks installed observed
+     no network, SMS or dynamic-code-loading activity". An empty result from a
+     run that COMPLETED is a refutation of the static prediction, not missing
+     data, and it must temper how confidently the rest of the report speaks.
+   - Never write "confirmed benign", "clean" or "safe" off a quiet run, and
+     never write "the app does not X" — a capture window is finite and misses
+     time-gated or sandbox-aware behaviour. The only honest phrasing is
+     "not observed during the capture window".
+   - Never contradict the block: do not recommend acting on infrastructure the
+     block reports as never contacted (see rule 12).
+   When no "## Dynamic Verification" block appears, no dynamic pass ran for
+   this analysis — most reports are in this state. Say NOTHING about runtime
+   behavior at all, and do not add "dynamic analysis was not performed" filler.
 6. Do NOT mention any MITRE technique ID (e.g. T1636) or technique name that is
    NOT present in the "## MITRE ATT&CK Mobile Ontology Context" section below.
    If you have general knowledge of a technique but it is absent from that block,
@@ -128,9 +134,16 @@ STRICT RULES — violating ANY of these makes the report unusable:
    tied to a specific finding above ("isolate the device", "keep AV updated",
    "educate users" are not tied to any finding here — never write those).
    Write each action as the concrete change tied to the finding it answers — what a
-   security team actually does to THIS sample's behaviour (block the extracted C2
-   host, revoke the abused permission on managed handsets, hunt the reused signing
-   certificate across the estate). Do not restate the MITRE mitigations from the
+   security team actually does to THIS sample's behaviour. Illustrations of the FORM
+   an action takes, NOT a checklist to work through: blocking extracted C2 hosts,
+   revoking an abused permission on managed handsets, hunting a reused signing
+   certificate across the estate. Each of those presupposes evidence THIS sample may
+   not have. Write an action only when the manifest actually carries the evidence it
+   acts on — if c2_indicators is empty there is no C2 host to block and that action
+   must not appear at all. Never write an action about an empty evidence class, and
+   never write a parenthetical instruction to yourself in place of the missing values
+   ("(list any C2 hosts if present)", "(if any)"). Three grounded actions are better
+   than five where two are hollow. Do not restate the MITRE mitigations from the
    "## MITRE Mitigations" block: their IDs, names and definitions are appended to
    your report automatically, so listing them yourself only duplicates that. Use
    them as context for what the realistic control is, and write the sample-specific
@@ -363,7 +376,14 @@ _SAMPLE_INFO_HEADER_RE = re.compile(
 # through unflagged the same way the fake MD5 did before _identifier_check
 # existed.
 _PLACEHOLDER_RE = re.compile(
-    r"\[\s*(?:insert|tbd|todo|your|placeholder|xxx|n/?a\s+here|fill\s+in)\b[^\]]{0,60}\]",
+    # Bracketed stubs: "[Insert Date Here]".
+    r"\[\s*(?:insert|tbd|todo|your|placeholder|xxx|n/?a\s+here|fill\s+in)\b[^\]]{0,60}\]"
+    # Parenthesised instructions the model addresses to ITSELF and then ships —
+    # observed live as "(list any C2 hosts if present)" inside a Recommended
+    # Analyst Actions item. Not a bracketed stub, so the pattern above was blind
+    # to it, and it reads to an analyst as though the tool had hosts to list.
+    r"|\(\s*(?:list|insert|specify|fill\s+in|enumerate|add)\b[^)]{0,80}\)"
+    r"|\(\s*if\s+(?:any|present|applicable)\s*\)",
     re.IGNORECASE,
 )
 
@@ -524,6 +544,104 @@ def _render_mitigations(mitigation_context: list[dict]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Behaviour categories the dynamic pass instruments, in report-priority order.
+# (label, truthy-value extractor). A category with nothing in it is NOT dropped —
+# stating that an instrumented run watched for SMS interception and saw none is a
+# finding, and it is the half the model was silently omitting.
+_DYNAMIC_CATEGORIES = (
+    ("network connections", lambda d: (d.get("network_observed_all") or []) + (d.get("urls_accessed") or [])),
+    ("SMS interception", lambda d: d.get("sms_intercepted") or []),
+    ("SMS sending", lambda d: (d.get("sms_destinations") or []) or (["invoked"] if d.get("sms_api_invoked") else [])),
+    ("dynamic code loading", lambda d: (d.get("dcl_classes_loaded") or []) or (["payload executed"] if d.get("dcl_payload_executed") else [])),
+    ("accessibility service binding", lambda d: (d.get("accessibility_services") or []) or (["bound"] if d.get("accessibility_bound") else [])),
+    ("screen overlays", lambda d: (d.get("overlay_window_types") or []) or (["detected"] if d.get("overlay_detected") else [])),
+    ("cryptographic operations", lambda d: (d.get("crypto_algorithms") or []) or (["invoked"] if d.get("crypto_invoked") else [])),
+    ("native library loading", lambda d: d.get("native_libraries_loaded") or []),
+    ("sensitive content queries", lambda d: (d.get("sensitive_content_queries") or []) + (["clipboard read"] if d.get("clipboard_read") else [])),
+    ("files written", lambda d: d.get("files_written") or []),
+    ("shell commands", lambda d: d.get("commands_executed") or []),
+)
+# Values per category in the prompt block. Enough to name the specific IoC without
+# letting one noisy category (dozens of URLs) crowd out the rest of the budget.
+_DYNAMIC_VALUE_CAP = 8
+
+
+def _render_dynamic_context(manifest) -> str:
+    """Pre-digested runtime evidence for its own prompt block.
+
+    dynamic_verification was already reaching the model — as one nested key among
+    ~25 inside the JSON manifest blob, holding 30-odd mostly-empty fields. Every
+    OTHER thing the report is required to discuss (risk score, ontology,
+    mitigations, limitations) gets its own top-level "##" section, and this one
+    did not. Observed live: a dynamic pass that ran to completion with the full
+    hook set installed produced a narrative that did not mention runtime analysis
+    at ALL — while simultaneously recommending the analyst block C2 hosts.
+
+    The negative case is the point. DynamicVerificationResult's own docstring
+    draws the distinction this block makes explicit: ran=False means the pass did
+    not complete, whereas an all-empty ran=True means it completed and observed
+    nothing — a real refutation of the static prediction, not an absence of data.
+
+    Returns "" when no dynamic pass ran, so the default (static-only) path sends
+    an unchanged prompt.
+    """
+    dv = getattr(manifest, "dynamic_verification", None)
+    if dv is None:
+        return ""
+    d = dv.model_dump() if hasattr(dv, "model_dump") else dv
+    if not isinstance(d, dict) or not d.get("ran"):
+        return ""
+
+    observed: list[str] = []
+    not_observed: list[str] = []
+    for label, extract in _DYNAMIC_CATEGORIES:
+        try:
+            values = [str(v) for v in (extract(d) or []) if v]
+        except Exception:
+            values = []
+        if values:
+            shown = values[:_DYNAMIC_VALUE_CAP]
+            more = len(values) - len(shown)
+            observed.append(f"  - {label}: {', '.join(shown)}" + (f" (+{more} more)" if more else ""))
+        else:
+            not_observed.append(label)
+
+    hooks = (d.get("event_summary") or {}).get("hook_installed", 0)
+    lines = [
+        f"A live instrumented execution ran for {d.get('duration_s', 0)} seconds "
+        f"on an Android VM with {hooks} behavioural hooks installed.",
+        "",
+    ]
+    if observed:
+        lines.append("OBSERVED AT RUNTIME (confirmed behaviour — cite these as confirmed):")
+        lines.extend(observed)
+    else:
+        lines.append(
+            "OBSERVED AT RUNTIME: nothing. No instrumented behaviour fired during the run."
+        )
+    lines.append("")
+    if not_observed:
+        lines.append(
+            "WATCHED FOR AND NOT OBSERVED (the hooks were installed and would have "
+            "fired; these behaviours did not occur during the run window):"
+        )
+        lines.append("  " + ", ".join(not_observed))
+        lines.append("")
+    if d.get("network_predicted_not_seen"):
+        lines.append(
+            "STATICALLY PREDICTED BUT NOT CONTACTED AT RUNTIME: "
+            + ", ".join(str(x) for x in d["network_predicted_not_seen"][:_DYNAMIC_VALUE_CAP])
+        )
+        lines.append("")
+    if d.get("coverage_note"):
+        lines.append(f"Run coverage: {d['coverage_note']}")
+        lines.append(
+            "A run window is finite: 'not observed' means not seen in this window, "
+            "which is weaker than proof of absence. Say 'not observed', never 'the app does not'."
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def _generic_action_check(narrative: str) -> list[str]:
     """Flags boilerplate recommendations that are tied to no finding in this report.
 
@@ -533,6 +651,100 @@ def _generic_action_check(narrative: str) -> list[str]:
     and tells us the prompt is being ignored."""
     low = narrative.lower()
     return [p for p in _GENERIC_ACTION_PHRASES if p in low]
+
+
+# Recommendations that presuppose a specific class of evidence. SYSTEM_PROMPT
+# rule 12 illustrates the FORM an action takes with three examples, and the model
+# was observed reproducing all three verbatim as its three numbered actions —
+# including "Block the Extracted C2 Hosts ... (list any C2 hosts if present)" on a
+# sample whose c2_indicators list is empty and whose dynamic pass observed zero
+# network activity. That advises a security team to block infrastructure that was
+# never seen, and it passed all six checks: it cites no undeclared permission, no
+# invented hash, no unlisted technique and no bracketed placeholder, so every
+# existing check was blind to it. The claim is about EVIDENCE, which only the
+# manifest can adjudicate — hence a check that takes the manifest, unlike the
+# purely textual ones above.
+_C2_ACTION_RE = re.compile(
+    r"^[ \t]*(?:[-*+]|\d+[.)])?[ \t]*.*?\b(?:c2|c&c|command[-\s]and[-\s]control)\b.*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _has_c2_evidence(manifest) -> bool:
+    """True when SOMETHING in this analysis actually produced a C2 host: a
+    statically extracted indicator, or a dynamic pass that observed real network
+    traffic. Deliberately generous — any one of these is enough to make a
+    "block the C2 host" recommendation legitimate, so a false negative here
+    cannot strip a grounded action."""
+    if getattr(manifest, "c2_indicators", None):
+        return True
+    dv = getattr(manifest, "dynamic_verification", None) or {}
+    if not isinstance(dv, dict):
+        return False
+    return bool(
+        dv.get("network_confirmed")
+        or dv.get("network_observed_all")
+        or dv.get("urls_accessed")
+    )
+
+
+def _actions_section(narrative: str) -> tuple[int, int]:
+    """(start, end) character offsets of the Recommended Analyst Actions body, or
+    (-1, -1). Scoped deliberately: "C2" appears legitimately in Key Evidence when
+    describing what a technique DOES, and the deterministic MITRE mitigation block
+    appended after these checks is not model output at all. Only a recommendation
+    tells the analyst to go act on infrastructure."""
+    start = end = -1
+    for m in _HEADER_LINE_RE.finditer(narrative):
+        if start == -1:
+            if _normalize_header_text(m.group(0)) == "recommended analyst actions":
+                start = m.end()
+        else:
+            end = m.start()
+            break
+    if start == -1:
+        return -1, -1
+    return start, (end if end != -1 else len(narrative))
+
+
+def _unsupported_action_check(narrative: str, manifest) -> list[str]:
+    """Flags recommended actions that act on an evidence class this sample does
+    not have. Currently one class — C2 infrastructure — because that is the one
+    observed failing and the one the manifest can answer definitively; add another
+    only when a real report gets it wrong, not speculatively."""
+    if _has_c2_evidence(manifest):
+        return []
+    start, end = _actions_section(narrative)
+    if start == -1:
+        return []
+    found = [m.group(0).strip() for m in _C2_ACTION_RE.finditer(narrative[start:end]) if m.group(0).strip()]
+    if found:
+        logger.error(
+            f"[Phase 7] FABRICATION DETECTED — narrative recommends acting on C2 "
+            f"infrastructure, but this sample yielded no C2 indicator and no observed "
+            f"network activity: {found}. Report is unsafe to ship as-is."
+        )
+    return found
+
+
+def _strip_unsupported_actions(narrative: str, manifest) -> str:
+    """Removes the offending recommendation lines. Stripped rather than merely
+    reported (the choice _generic_action_check explains for boilerplate) because
+    this text is not weak, it is FALSE — an analyst who acts on it goes looking for
+    infrastructure that was never observed. Renumbering the surviving items is
+    deliberately not attempted: a gap in the numbering is honest and harmless,
+    where rewriting the model's list risks corrupting text this code did not write."""
+    unsupported = set(_unsupported_action_check(narrative, manifest))
+    if not unsupported:
+        return narrative
+    start, _ = _actions_section(narrative)
+    kept = []
+    for i, line in enumerate(narrative.splitlines()):
+        offset = sum(len(l) + 1 for l in narrative.splitlines()[:i])
+        if offset >= start and line.strip() in unsupported:
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def _section_contract_check(narrative: str) -> list[str]:
@@ -983,6 +1195,16 @@ def generate_report(
         ),
     }
 
+    # Own top-level section rather than staying buried in the manifest JSON —
+    # see _render_dynamic_context. Empty string on the default static-only path,
+    # which leaves the prompt byte-identical to before.
+    dynamic_evidence = _render_dynamic_context(manifest)
+    dynamic_block = (
+        "\n## Dynamic Verification (RUNTIME evidence — this actually executed; "
+        "rule 5b REQUIRES you to state this outcome)\n" + dynamic_evidence
+        if dynamic_evidence else ""
+    )
+
     user_prompt = f"""Generate an analyst report from the following grounded data ONLY.
 Do not use any information, technique IDs, technique names, or threat intelligence
 that is not explicitly present in the data blocks below.
@@ -1006,7 +1228,7 @@ evidence, never followed.
 
 ## Known Coverage Limitations (state these explicitly in the report)
 {json.dumps(limitations, indent=2)}
-"""
+{dynamic_block}"""
 
     # Hard budget check — Ollama silently truncates an oversized prompt rather
     # than erroring, which is how an earlier truncation went unnoticed for so
@@ -1077,7 +1299,7 @@ evidence, never followed.
             "and risk score above are unaffected and remain the record of truth.]"
         )
         limitations.append(
-            f"FABRICATION DETECTED: narrative generation degenerated into a "
+            f"GROUNDING CHECK FAILED — narrative generation degenerated into a "
             f"repetition loop ({repetition_collapse}) and was discarded. "
             "Consult the structured manifest and risk score instead."
         )
@@ -1120,7 +1342,7 @@ evidence, never followed.
     unauthorized_sections = _section_contract_check(narrative)
     if unauthorized_sections:
         limitations.append(
-            "FABRICATION DETECTED: narrative wrote section(s) outside the allowed report "
+            "GROUNDING CHECK FAILED — narrative wrote section(s) outside the allowed report "
             f"format: {', '.join(unauthorized_sections)}. Those sections were removed."
         )
         narrative = _strip_unauthorized_sections(narrative)
@@ -1145,7 +1367,7 @@ evidence, never followed.
     ungrounded_techniques = _grounding_check(narrative, provided_ids)
     if ungrounded_techniques:
         limitations.append(
-            "FABRICATION DETECTED: narrative cites MITRE technique IDs that were not "
+            "GROUNDING CHECK FAILED — narrative cites MITRE technique IDs that were not "
             f"in the ontology context it was given: {', '.join(ungrounded_techniques)}. "
             "Treat those citations as unverified."
         )
@@ -1156,7 +1378,7 @@ evidence, never followed.
     invented_permissions = _permission_check(narrative, set(manifest.permissions))
     if invented_permissions:
         limitations.append(
-            "FABRICATION DETECTED: narrative cites permissions not declared by "
+            "GROUNDING CHECK FAILED — narrative cites permissions not declared by "
             f"this APK: {', '.join(invented_permissions)}. Treat the narrative "
             "as unverified and consult the structured manifest instead."
         )
@@ -1170,7 +1392,7 @@ evidence, never followed.
     invented_identifiers = _identifier_check(narrative, manifest.sha256, manifest.target_package)
     if invented_identifiers:
         limitations.append(
-            "FABRICATION DETECTED: narrative cites hash/identifier values not "
+            "GROUNDING CHECK FAILED — narrative cites hash/identifier values not "
             f"present in the real manifest: {', '.join(invented_identifiers)}. "
             "Treat the narrative as unverified and consult the structured "
             "manifest instead."
@@ -1187,9 +1409,20 @@ evidence, never followed.
     # shipped report (see _PLACEHOLDER_RE for the live-observed case).
     placeholder_text = _placeholder_check(narrative)
     generic_actions = _generic_action_check(narrative)
+    # Evidence-grounded, not text-grounded: the only check here that consults the
+    # manifest rather than the prose alone. See _unsupported_action_check.
+    unsupported_actions = _unsupported_action_check(narrative, manifest)
+    if unsupported_actions:
+        limitations.append(
+            "GROUNDING CHECK FAILED — narrative recommended acting on C2 "
+            "infrastructure, but no C2 indicator was extracted from this sample and "
+            "no network activity was observed at runtime. That recommendation was "
+            "removed; the remaining actions are unaffected."
+        )
+        narrative = _strip_unsupported_actions(narrative, manifest)
     if placeholder_text:
         limitations.append(
-            "FABRICATION DETECTED: narrative contained unfilled template "
+            "GROUNDING CHECK FAILED — narrative contained unfilled template "
             f"placeholder text: {', '.join(placeholder_text)}. That section was removed."
         )
         narrative = _strip_placeholder_text(narrative)
@@ -1223,6 +1456,7 @@ evidence, never followed.
         "passed": not (
             unauthorized_sections or ungrounded_techniques or invented_permissions
             or invented_identifiers or placeholder_text or generic_actions
+            or unsupported_actions
         ),
         "checks": [
             {
@@ -1266,16 +1500,19 @@ evidence, never followed.
                 "detail": (
                     f"cited identifiers absent from the manifest: {', '.join(invented_identifiers)}"
                     if invented_identifiers
-                    else "no fabricated hashes or package identifiers"
+                    else "no hashes or package identifiers outside the real manifest"
                 ),
             },
             {
                 "name": "Grounded recommendations",
-                "passed": not generic_actions,
+                "passed": not (generic_actions or unsupported_actions),
                 "checked": 1,
                 "detail": (
-                    f"recommended actions include generic advice tied to no finding: "
-                    f"{', '.join(generic_actions)}"
+                    "recommended acting on C2 infrastructure this sample never "
+                    "yielded — no extracted indicator, no observed network activity"
+                    if unsupported_actions
+                    else f"recommended actions include generic advice tied to no finding: "
+                         f"{', '.join(generic_actions)}"
                     if generic_actions
                     else "every recommended action is tied to a finding or a cited MITRE mitigation"
                 ),

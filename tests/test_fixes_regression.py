@@ -812,6 +812,209 @@ class TestPlaceholderCheckLogic(unittest.TestCase):
         self.assertEqual(result, [])
 
 
+# ─── Bug: a recommendation acting on evidence the sample never produced ─────
+# Observed live (2026-08-26): a report's first Recommended Analyst Action was
+# "Block the Extracted C2 Hosts ... (list any C2 hosts if present)" on a sample
+# whose c2_indicators list is empty and whose dynamic pass observed zero network
+# activity. It passed all
+# six grounding checks — it cites no undeclared permission, no invented hash, no
+# unlisted technique and no BRACKETED placeholder, so every check was blind to
+# it. Root cause was SYSTEM_PROMPT rule 12, whose three illustrative examples the
+# model reproduced verbatim as its three actions.
+
+
+class _FakeManifest:
+    """Only the two attributes _has_c2_evidence reads."""
+
+    def __init__(self, c2=None, dynamic=None):
+        self.c2_indicators = c2 or []
+        self.dynamic_verification = dynamic
+
+
+_C2_NARRATIVE = (
+    "Verdict sentence.\n\n"
+    "### Key Evidence\n"
+    "The sample matches a C2 beaconing pattern typical of banking trojans.\n\n"
+    "### Recommended Analyst Actions\n"
+    "1. **Block the Extracted C2 Hosts**: Monitor and block any network "
+    "connections to the following hosts: (list any C2 hosts if present).\n"
+    "2. **Revoke the Abused Permission**: Remove the BIND_VPN_SERVICE permission.\n"
+)
+
+
+# ─── Bug: a completed dynamic run never reached the narrative ───────────────
+# Observed live (2026-08-26) on the same sample: a dynamic pass that ran to
+# completion with the full hook set installed produced a report that did not
+# mention runtime analysis at all. It WAS being sent to the model, but as one key
+# among ~25 inside the JSON manifest blob, while every other thing the report must
+# discuss (risk score, ontology, mitigations, limitations) had its own "##" block.
+# The all-empty ran=True case is a refutation of the static prediction, not
+# missing data — see DynamicVerificationResult's docstring — and it was exactly
+# the half being dropped.
+
+
+class _DynManifest:
+    def __init__(self, dv=None):
+        self.dynamic_verification = dv
+
+
+class TestRenderDynamicContext(unittest.TestCase):
+
+    def test_empty_when_no_dynamic_pass(self):
+        """The default static-only path must send a byte-identical prompt."""
+        from app.reports.graphrag import _render_dynamic_context
+        self.assertEqual(_render_dynamic_context(_DynManifest(None)), "")
+
+    def test_empty_when_run_did_not_complete(self):
+        """ran=False is 'the pass failed', not 'nothing was found' — there is no
+        runtime outcome to report."""
+        from app.reports.graphrag import _render_dynamic_context
+        from app.core.schemas import DynamicVerificationResult
+        m = _DynManifest(DynamicVerificationResult(ran=False))
+        self.assertEqual(_render_dynamic_context(m), "")
+
+    def test_quiet_completed_run_is_stated_explicitly(self):
+        from app.reports.graphrag import _render_dynamic_context
+        from app.core.schemas import DynamicVerificationResult
+        m = _DynManifest(DynamicVerificationResult(
+            ran=True, duration_s=122.34,
+            event_summary={"hook_installed": 15},
+            coverage_note="16 events observed over the run window",
+        ))
+        out = _render_dynamic_context(m)
+        self.assertIn("122.34", out)
+        self.assertIn("nothing", out.lower())
+        # The categories that were watched must be named, not silently omitted.
+        self.assertIn("network connections", out)
+        self.assertIn("SMS interception", out)
+
+    def test_observed_behaviour_is_named(self):
+        from app.reports.graphrag import _render_dynamic_context
+        from app.core.schemas import DynamicVerificationResult
+        m = _DynManifest(DynamicVerificationResult(
+            ran=True, duration_s=60.0,
+            network_observed_all=["evil.example.com:443"],
+            sms_intercepted=["OTP 123456"],
+            dcl_classes_loaded=["com.payload.Stage2"],
+            event_summary={"hook_installed": 15},
+        ))
+        out = _render_dynamic_context(m)
+        self.assertIn("evil.example.com:443", out)
+        self.assertIn("OTP 123456", out)
+        self.assertIn("com.payload.Stage2", out)
+        # Quiet categories are still enumerated alongside the loud ones.
+        self.assertIn("screen overlays", out)
+
+    def test_predicted_but_not_contacted_is_carried(self):
+        from app.reports.graphrag import _render_dynamic_context
+        from app.core.schemas import DynamicVerificationResult
+        m = _DynManifest(DynamicVerificationResult(
+            ran=True, duration_s=60.0,
+            network_predicted_not_seen=["dormant.example.org"],
+            event_summary={"hook_installed": 15},
+        ))
+        self.assertIn("dormant.example.org", _render_dynamic_context(m))
+
+    def test_one_noisy_category_cannot_flood_the_prompt(self):
+        from app.reports.graphrag import _render_dynamic_context
+        from app.core.schemas import DynamicVerificationResult
+        m = _DynManifest(DynamicVerificationResult(
+            ran=True, duration_s=60.0,
+            urls_accessed=["http://h%d.example.com/a" % i for i in range(40)],
+            event_summary={"hook_installed": 15},
+        ))
+        line = [l for l in _render_dynamic_context(m).splitlines()
+                if "network connections" in l][0]
+        self.assertIn("+32 more", line)
+
+    def test_never_claims_proof_of_absence(self):
+        """A finite capture window cannot prove a behaviour does not exist."""
+        from app.reports.graphrag import _render_dynamic_context
+        from app.core.schemas import DynamicVerificationResult
+        m = _DynManifest(DynamicVerificationResult(
+            ran=True, duration_s=60.0,
+            event_summary={"hook_installed": 15},
+            coverage_note="16 events observed",
+        ))
+        out = _render_dynamic_context(m).lower()
+        for banned in ("confirmed benign", "is safe", "is clean"):
+            self.assertNotIn(banned, out)
+        self.assertIn("not observed", out)
+
+
+class TestUnsupportedActionCheck(unittest.TestCase):
+    """Denied case: no C2 evidence anywhere, so the action must be flagged."""
+
+    def test_flags_c2_action_when_no_evidence(self):
+        from app.reports.graphrag import _unsupported_action_check
+        found = _unsupported_action_check(_C2_NARRATIVE, _FakeManifest())
+        self.assertEqual(len(found), 1)
+        self.assertIn("Block the Extracted C2 Hosts", found[0])
+
+    def test_allowed_when_static_indicator_present(self):
+        from app.reports.graphrag import _unsupported_action_check
+        m = _FakeManifest(c2=["firebase:evil.firebaseio.com"])
+        self.assertEqual(_unsupported_action_check(_C2_NARRATIVE, m), [])
+
+    def test_allowed_when_dynamic_observed_network(self):
+        from app.reports.graphrag import _unsupported_action_check
+        m = _FakeManifest(dynamic={"network_observed_all": ["1.2.3.4:443"]})
+        self.assertEqual(_unsupported_action_check(_C2_NARRATIVE, m), [])
+
+    def test_key_evidence_mention_is_not_flagged(self):
+        """"C2" legitimately describes what a technique DOES; only a
+        recommendation tells the analyst to go act on infrastructure."""
+        from app.reports.graphrag import _unsupported_action_check
+        narrative = (
+            "### Key Evidence\nThe sample matches a C2 beaconing pattern.\n\n"
+            "### Recommended Analyst Actions\n1. Revoke the SEND_SMS permission.\n"
+        )
+        self.assertEqual(_unsupported_action_check(narrative, _FakeManifest()), [])
+
+    def test_no_false_positive_on_substring_token(self):
+        from app.reports.graphrag import _unsupported_action_check
+        narrative = (
+            "### Recommended Analyst Actions\n"
+            "1. Inspect the dc2000 native module and libc2x.so.\n"
+        )
+        self.assertEqual(_unsupported_action_check(narrative, _FakeManifest()), [])
+
+
+class TestStripUnsupportedActions(unittest.TestCase):
+
+    def test_removes_only_the_ungrounded_action(self):
+        from app.reports.graphrag import _strip_unsupported_actions
+        out = _strip_unsupported_actions(_C2_NARRATIVE, _FakeManifest())
+        self.assertNotIn("Block the Extracted C2 Hosts", out)
+        # The grounded action and the Key Evidence prose must survive.
+        self.assertIn("BIND_VPN_SERVICE", out)
+        self.assertIn("C2 beaconing pattern", out)
+
+    def test_leaves_narrative_untouched_when_evidence_exists(self):
+        from app.reports.graphrag import _strip_unsupported_actions
+        m = _FakeManifest(c2=["1.2.3.4:8080"])
+        self.assertEqual(_strip_unsupported_actions(_C2_NARRATIVE, m), _C2_NARRATIVE)
+
+
+class TestParentheticalPlaceholder(unittest.TestCase):
+    """The bracket pattern could never match the parenthesised form the model
+    actually shipped."""
+
+    def test_flags_parenthetical_list_instruction(self):
+        from app.reports.graphrag import _placeholder_check
+        found = _placeholder_check("block these hosts: (list any C2 hosts if present).")
+        self.assertTrue(any("list any C2 hosts" in f for f in found))
+
+    def test_flags_if_any(self):
+        from app.reports.graphrag import _placeholder_check
+        self.assertTrue(_placeholder_check("Observed endpoints (if any)."))
+
+    def test_no_false_positive_on_ordinary_parentheses(self):
+        from app.reports.graphrag import _placeholder_check
+        clean = "The app declares 43 permissions (see the manifest panel above)."
+        self.assertEqual(_placeholder_check(clean), [])
+
+
 class TestStripPlaceholderText(unittest.TestCase):
 
     def test_removes_line_with_placeholder(self):
