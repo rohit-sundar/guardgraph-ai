@@ -1825,40 +1825,6 @@ body {
   display: none !important;
 }
 
-/* ── Grounding panel (anti-fabrication checks) ────────────────────────────── */
-.grounding-panel {
-  margin: 0.75rem 0 1rem;
-  padding: 0.85rem 1rem;
-  border: 1px solid rgba(148, 163, 184, 0.22);
-  border-radius: 8px;
-  background: rgba(15, 23, 42, 0.35);
-}
-.grounding-head { display: flex; align-items: baseline; gap: 0.7rem; flex-wrap: wrap; }
-.grounding-caption { font-size: 0.8rem; color: #94a3b8; flex: 1 1 18rem; }
-.grounding-pill {
-  font-family: var(--font-mono);
-  font-size: 0.75rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  padding: 0.2rem 0.6rem;
-  border-radius: 999px;
-  white-space: nowrap;
-}
-.grounding-pass { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.35); }
-.grounding-warn { background: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.35); }
-.grounding-none { background: rgba(148, 163, 184, 0.12); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3); }
-.grounding-checks { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.7rem; }
-.grounding-check {
-  display: flex;
-  gap: 0.55rem;
-  align-items: baseline;
-  font-size: 0.82rem;
-  color: #cbd5e1;
-}
-.grounding-check .mark { font-family: var(--font-mono); font-weight: 700; }
-.grounding-check.ok .mark { color: #4ade80; }
-.grounding-check.bad .mark { color: #f87171; }
-.grounding-check .detail { color: #94a3b8; }
 
 /* ── MITRE per-technique threshold tick ───────────────────────────────────── */
 .mitre-bar-container { position: relative; overflow: visible; }

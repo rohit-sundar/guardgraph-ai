@@ -713,9 +713,6 @@ function renderResults(data) {
     }
   }
 
-  // 0. Grounding — did the narrative cite anything it wasn't given?
-  renderGrounding(data.grounding, data.narrative_report);
-
   // 1. AI Report Markdown
   const markdownText = data.narrative_report || 'No report generated.';
   renderMarkdown(document.getElementById('aiReportMarkdown'), markdownText);
@@ -1466,75 +1463,6 @@ function renderDynamicVerification(manifest) {
     }
   }
 }
-
-function renderGrounding(grounding, narrativeText) {
-  const panel = document.getElementById('groundingPanel');
-  const pill = document.getElementById('groundingPill');
-  const list = document.getElementById('groundingChecks');
-  if (!panel || !pill || !list) return;
-
-  list.innerHTML = '';
-  panel.classList.remove('hidden');
-
-  // A missing grounding object is NOT a pass, and must not render as one — but
-  // it has two different honest explanations depending on whether a narrative
-  // actually exists:
-  //   - no narrative at all: the LLM call itself failed, so no check ran because
-  //     there was nothing to check.
-  //   - a narrative IS present but grounding is still missing: this is a cache
-  //     hit on a record written before grounding results were persisted
-  //     (app/graph/cache.py's _RECORD_FIELDS) — the checks DID run once, at
-  //     generation time, but that result wasn't saved for this older record.
-  // Conflating these ("no narrative was generated") was wrong for the second
-  // case: a narrative visibly renders below this panel in exactly that scenario.
-  if (!grounding) {
-    pill.textContent = 'NOT CHECKED';
-    pill.className = 'grounding-pill grounding-none';
-    const row = document.createElement('div');
-    row.className = 'grounding-check';
-    row.textContent = (narrativeText && narrativeText.trim())
-      ? 'This is a cached result from before grounding checks were persisted — the checks ran once at generation time, but that result was not saved for this record. Re-upload the sample to get a checked report.'
-      : 'No narrative was generated, so the grounding checks did not run.';
-    list.appendChild(row);
-    return;
-  }
-
-  const passed = grounding.passed_count;
-  const total = grounding.total_count;
-  // The failing state is deliberately worded as a check result, not as an
-  // accusation: "FABRICATION DETECTED" read as "this report contains invented
-  // content" when what it actually means is "one of six guards flagged a line,
-  // and that line was already stripped or annotated below". The guards
-  // themselves are unchanged — the ✗ row still names exactly which one fired.
-  pill.textContent = grounding.passed
-    ? `GROUNDED — ${passed}/${total} CHECKS PASSED`
-    : `${passed}/${total} CHECKS PASSED`;
-  pill.className = 'grounding-pill ' + (grounding.passed ? 'grounding-pass' : 'grounding-warn');
-
-  (grounding.checks || []).forEach(check => {
-    const row = document.createElement('div');
-    row.className = 'grounding-check ' + (check.passed ? 'ok' : 'bad');
-
-    const mark = document.createElement('span');
-    mark.className = 'mark';
-    mark.textContent = check.passed ? '✓' : '✗';
-
-    const name = document.createElement('span');
-    name.textContent = check.name;
-
-    // check.detail can quote values the model emitted, which originate in an
-    // attacker-controlled sample. textContent, never innerHTML.
-    const detail = document.createElement('span');
-    detail.className = 'detail';
-    detail.textContent = '— ' + (check.detail || '');
-
-    row.appendChild(mark);
-    row.appendChild(name);
-    row.appendChild(detail);
-    list.appendChild(row);
-  });
-}
-
 
 function renderImpersonation(manifest, risk) {
   const list = document.getElementById('impersonationList');
