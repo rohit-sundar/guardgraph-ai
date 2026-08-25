@@ -39,6 +39,42 @@ function hookNetwork(Java) {
       return this.$init(host, port);
     };
     safeSend("hook_installed", "network");
+
+    // The (String, int) constructor above is the UNRESOLVED form — raw
+    // `new Socket(host, port)`. OkHttp and HttpURLConnection resolve DNS first and
+    // never touch it, which is why network events read zero across a 308-sample
+    // corpus run while url_accessed fired 6,813 times, leaving dynamically_confirmed
+    // false on every CONTACTS edge.
+    //
+    // Socket.connect(SocketAddress, int) is where every Java HTTP stack converges,
+    // carries the fully-resolved endpoint, and is an ordinary method. Hooking
+    // InetSocketAddress's second $init overload was tried instead and killed the
+    // target process: replacing two $init overloads on one class destabilises
+    // constructor dispatch.
+    try {
+      const Socket = Java.use("java.net.Socket");
+      Socket.connect.overload("java.net.SocketAddress", "int").implementation = function (endpoint, timeoutMs) {
+        try {
+          // InetSocketAddress.toString() is "hostname/1.2.3.4:443". Prefer the
+          // hostname half — that is the form static c2_indicators hold.
+          const raw = endpoint ? endpoint.toString() : "";
+          const colon = raw.lastIndexOf(":");
+          const port = colon >= 0 ? raw.substring(colon + 1) : "";
+          const hostPart = colon >= 0 ? raw.substring(0, colon) : raw;
+          const slash = hostPart.indexOf("/");
+          const host = slash >= 0
+            ? (hostPart.substring(0, slash) || hostPart.substring(slash + 1))
+            : hostPart;
+          safeSend("network", host + ":" + port);
+        } catch (inner) {
+          // Never let observation break the call being observed.
+        }
+        return this.connect(endpoint, timeoutMs);
+      };
+      safeSend("hook_installed", "network_socket");
+    } catch (e) {
+      safeSend("hook_error", "network_socket: " + e);
+    }
   } catch (e) {
     safeSend("hook_error", "network: " + e);
   }

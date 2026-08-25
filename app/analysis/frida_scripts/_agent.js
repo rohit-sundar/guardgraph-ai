@@ -1,5 +1,5 @@
 📦
-448749 /hooks.js
+449610 /hooks.js
 ✄
 var __defProp = Object.defineProperty;
 var __export = (target, all) => {
@@ -13510,6 +13510,25 @@ function hookNetwork(Java) {
       return this.$init(host, port);
     };
     safeSend("hook_installed", "network");
+    try {
+      const Socket = Java.use("java.net.Socket");
+      Socket.connect.overload("java.net.SocketAddress", "int").implementation = function(endpoint, timeoutMs) {
+        try {
+          const raw = endpoint ? endpoint.toString() : "";
+          const colon = raw.lastIndexOf(":");
+          const port = colon >= 0 ? raw.substring(colon + 1) : "";
+          const hostPart = colon >= 0 ? raw.substring(0, colon) : raw;
+          const slash = hostPart.indexOf("/");
+          const host = slash >= 0 ? hostPart.substring(0, slash) || hostPart.substring(slash + 1) : hostPart;
+          safeSend("network", host + ":" + port);
+        } catch (inner) {
+        }
+        return this.connect(endpoint, timeoutMs);
+      };
+      safeSend("hook_installed", "network_socket");
+    } catch (e) {
+      safeSend("hook_error", "network_socket: " + e);
+    }
   } catch (e) {
     safeSend("hook_error", "network: " + e);
   }
