@@ -121,14 +121,14 @@ class TestAnalysesListEndpoint(unittest.TestCase):
         self.client = TestClient(app)
 
     def test_empty_history_returns_empty_list(self):
-        with patch.object(routes_module, "list_recent_samples", return_value=[]):
+        with patch.object(routes_module, "list_history", return_value=[]):
             resp = self.client.get("/analyses")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), [])
 
     def test_row_shape_and_band_derivation(self):
-        with patch.object(routes_module, "list_recent_samples", return_value=[
-            {"sha256": "aa" * 32, "app_name": "evil.apk", "package_name": "com.evil",
+        with patch.object(routes_module, "list_history", return_value=[
+            {"sha256": "aa" * 32, "app_name": "evil.apk",
              "family": "banker", "risk_score": 76.94, "analyzed_at": 1700000000000},
         ]):
             resp = self.client.get("/analyses")
@@ -137,23 +137,34 @@ class TestAnalysesListEndpoint(unittest.TestCase):
         self.assertEqual(row["app_name"], "evil.apk")
         self.assertEqual(row["verdict_band"], "malicious")
 
-    def test_falls_back_to_package_name_then_sha_when_app_name_is_missing(self):
-        with patch.object(routes_module, "list_recent_samples", return_value=[
-            {"sha256": "bb" * 32, "app_name": None, "package_name": "com.x",
+    def test_falls_back_to_the_sha_when_no_name_was_recovered(self):
+        """An APK that failed to parse has no package name to record, so the row
+        still has to identify itself — by hash rather than by a blank cell."""
+        with patch.object(routes_module, "list_history", return_value=[
+            {"sha256": "bb" * 32, "app_name": None,
              "family": None, "risk_score": 10.0, "analyzed_at": None},
         ]):
             resp = self.client.get("/analyses")
-        self.assertEqual(resp.json()[0]["app_name"], "com.x")
+        self.assertEqual(resp.json()[0]["app_name"], "bb" * 32)
 
     def test_no_score_yields_no_band_rather_than_a_default_low(self):
-        """A None risk_score (should not happen given the WHERE clause in
-        list_recent_samples, but defend anyway) must not silently render `low`."""
-        with patch.object(routes_module, "list_recent_samples", return_value=[
-            {"sha256": "cc" * 32, "app_name": "x", "package_name": None,
+        """A None risk_score must not silently render as `low` — the mildest
+        verdict is the worst possible thing to show for an unknown one."""
+        with patch.object(routes_module, "list_history", return_value=[
+            {"sha256": "cc" * 32, "app_name": "x",
              "family": None, "risk_score": None, "analyzed_at": None},
         ]):
             resp = self.client.get("/analyses")
         self.assertIsNone(resp.json()[0]["verdict_band"])
+
+    def test_history_is_not_backed_by_the_whole_graph(self):
+        """The panel must show what THIS instance analysed, not every Sample node.
+        The graph also holds bulk-loaded corpus samples nobody uploaded here, and
+        listing those claimed hundreds of analyses that never happened."""
+        with patch.object(routes_module, "list_history", return_value=[]) as listed:
+            self.client.get("/analyses?limit=5")
+        listed.assert_called_once_with(limit=5)
+        self.assertFalse(hasattr(routes_module, "list_recent_samples"))
 
 
 class TestGetAnalysisEndpoint(unittest.TestCase):
@@ -223,6 +234,113 @@ class TestGetAnalysisEndpoint(unittest.TestCase):
              patch.object(routes_module, "get_technique_context", return_value=[]):
             resp = self.client.get(f"/analyses/{self.sha}")
         self.assertIn("No narrative stored", resp.json()["narrative_report"])
+
+
+# ─── The on-disk history log (app/core/history.py) ──────────────────────────
+# Split out of Neo4j because the graph answers a different question. It holds a
+# Sample node for every corpus APK the population scripts loaded, so using it to
+# populate "Analysis History" told the operator they had analysed hundreds of
+# files they had never uploaded — and restarting the server changed nothing,
+# since the graph is persistent by design.
+
+class TestHistoryStore(unittest.TestCase):
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from app.core import history as history_module
+        self.history = history_module
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self._patch = patch.object(
+            history_module, "_HISTORY_PATH", Path(self._tmp.name) / "analysis_history.json"
+        )
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+
+    def test_missing_file_reads_as_empty_not_an_error(self):
+        self.assertEqual(self.history.list_history(), [])
+
+    def test_records_and_returns_newest_first(self):
+        self.history.record_analysis("aa" * 32, "com.first", None, 10.0)
+        self.history.record_analysis("bb" * 32, "com.second", "Cerberus", 80.0)
+        rows = self.history.list_history()
+        self.assertEqual([r["app_name"] for r in rows], ["com.second", "com.first"])
+
+    def test_reanalysis_moves_the_row_up_without_duplicating_it(self):
+        """The panel answers 'what have I looked at', not 'how many times did I
+        press upload'."""
+        self.history.record_analysis("aa" * 32, "com.first", None, 10.0)
+        self.history.record_analysis("bb" * 32, "com.second", None, 20.0)
+        self.history.record_analysis("aa" * 32, "com.first", None, 55.0)
+        rows = self.history.list_history()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["sha256"], "aa" * 32)
+        self.assertEqual(rows[0]["risk_score"], 55.0)
+
+    def test_survives_a_corrupt_file_instead_of_failing_the_analysis(self):
+        """Recording history is best-effort by contract: a damaged log must never
+        take down an analysis that has otherwise fully succeeded."""
+        self.history._HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        self.history._HISTORY_PATH.write_text("{not json at all", encoding="utf-8")
+        self.assertEqual(self.history.list_history(), [])
+        self.history.record_analysis("aa" * 32, "com.x", None, 1.0)
+        self.assertEqual(len(self.history.list_history()), 1)
+
+    def test_entry_count_is_bounded(self):
+        for i in range(self.history._MAX_ENTRIES + 25):
+            self.history.record_analysis(f"{i:064x}", f"com.app{i}", None, float(i))
+        self.assertEqual(len(self.history.list_history(limit=10_000)),
+                         self.history._MAX_ENTRIES)
+
+    def test_clear_empties_the_log_and_reports_what_it_held(self):
+        """The returned hashes are what lets the caller drop the matching cached
+        verdicts — clearing the list alone would leave an empty panel whose
+        samples still answer from cache."""
+        self.history.record_analysis("aa" * 32, "com.first", None, 10.0)
+        self.history.record_analysis("bb" * 32, "com.second", None, 20.0)
+        cleared = self.history.clear_history()
+        self.assertCountEqual(cleared, ["aa" * 32, "bb" * 32])
+        self.assertEqual(self.history.list_history(), [])
+
+    def test_clearing_an_empty_log_is_not_an_error(self):
+        self.assertEqual(self.history.clear_history(), [])
+
+
+class TestClearAnalysesEndpoint(unittest.TestCase):
+    """DELETE /analyses — clears the panel AND the cached verdicts behind it."""
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_drops_the_cached_verdict_for_every_cleared_row(self):
+        with patch.object(routes_module, "clear_history",
+                          return_value=["aa" * 32, "bb" * 32]), \
+             patch.object(routes_module, "delete_sample", return_value=True) as deleted:
+            resp = self.client.delete("/analyses")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"cleared": 2, "cached_verdicts_dropped": 2})
+        self.assertEqual(deleted.call_count, 2)
+
+    def test_one_failed_deletion_does_not_abort_the_rest(self):
+        """The log is emptied before any node is dropped, so bailing out midway
+        would strand cached verdicts with no list left pointing at them."""
+        with patch.object(routes_module, "clear_history",
+                          return_value=["aa" * 32, "bb" * 32, "cc" * 32]), \
+             patch.object(routes_module, "delete_sample",
+                          side_effect=[True, RuntimeError("neo4j down"), True]) as deleted:
+            resp = self.client.delete("/analyses")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["cleared"], 3)
+        self.assertEqual(resp.json()["cached_verdicts_dropped"], 2)
+        self.assertEqual(deleted.call_count, 3)
+
+    def test_clearing_an_empty_history_succeeds(self):
+        with patch.object(routes_module, "clear_history", return_value=[]), \
+             patch.object(routes_module, "delete_sample") as deleted:
+            resp = self.client.delete("/analyses")
+        self.assertEqual(resp.json(), {"cleared": 0, "cached_verdicts_dropped": 0})
+        deleted.assert_not_called()
 
 
 if __name__ == "__main__":

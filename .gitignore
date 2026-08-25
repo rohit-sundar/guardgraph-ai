@@ -73,6 +73,11 @@ data/corpus_scores*.json
 # manifest state each run, regeneratable
 data/family_caps.json
 
+# Analysis History log (app/core/history.py) — the record of what THIS instance
+# analysed. Per-machine runtime state, like the Neo4j volume it sits beside:
+# committing it would ship one operator's session into everyone else's panel.
+data/analysis_history.json
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HACKATHON ARRANGEMENT — revert after the event.
 #

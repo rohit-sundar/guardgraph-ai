@@ -333,6 +333,30 @@ def list_feedback_samples() -> list[dict]:
         return []
 
 
+def delete_sample(sha256: str) -> bool:
+    """Drops one cached verdict so the next upload of that APK runs the full cold
+    path. Returns whether a node was actually removed.
+
+    DETACH DELETE, so the sample's relationships go with it while the nodes on the
+    other end (techniques, families, certificates, C2 indicators) survive — those
+    are shared ontology and correlation vertices, and other samples still point at
+    them. Also evicts the in-process copy, which would otherwise keep answering
+    for a sample the graph no longer has (see lookup_signature).
+    """
+    _MEMORY_CACHE.pop(sha256, None)
+    try:
+        rows = neo4j_client.run(
+            "MATCH (s:Sample {sha256: $sha256}) RETURN s.sha256 AS sha256", sha256=sha256
+        )
+        if not rows:
+            return False
+        neo4j_client.run("MATCH (s:Sample {sha256: $sha256}) DETACH DELETE s", sha256=sha256)
+        return True
+    except Exception as e:
+        logger.warning(f"[cache] delete_sample failed for {sha256[:12]}: {e}")
+        return False
+
+
 def list_recent_samples(limit: int = 30) -> list[dict]:
     """
     Summary rows for the Analysis History panel — most-recently-touched first.

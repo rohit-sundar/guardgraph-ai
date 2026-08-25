@@ -34,7 +34,8 @@ from loguru import logger
 
 from app.analysis.ingest import compute_sha256
 from app.analysis.signatures import deterministic_family
-from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape, list_recent_samples, record_feedback
+from app.core.history import record_analysis, list_history, clear_history
+from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape, delete_sample, record_feedback
 from app.graph.ontology import get_technique_context
 from app.ml.classifier import ttp_classifier
 from app.reports.scoring import (
@@ -197,15 +198,26 @@ async def model_metrics():
 @router.get("/analyses")
 async def list_analyses(limit: int = 30):
     """
-    Summary rows for the Analysis History panel — every sample this instance has
-    ever produced a verdict for, most-recently-touched first. Backed entirely by
-    Neo4j Sample nodes; no APK needs to still exist on disk.
+    Summary rows for the Analysis History panel — the analyses THIS instance
+    actually ran, most recent first, read from the on-disk history log.
+
+    Previously this returned every Neo4j Sample node with a risk score, which
+    conflated two different questions. The graph also holds every corpus sample
+    loaded by the population scripts, so the panel listed hundreds of APKs the
+    operator had never uploaded and kept listing them across restarts, since the
+    graph is persistent by design. The graph is still the record of truth for any
+    individual verdict — GET /analyses/{sha256} reads it, and a sample missing
+    from this list is still reachable there by hash.
+
+    verdict_band is derived here rather than stored, so a band boundary change
+    applies to old rows immediately instead of freezing whatever was true when
+    the row was written.
     """
-    rows = list_recent_samples(limit=limit)
+    rows = list_history(limit=limit)
     return [
         {
-            "sha256": r["sha256"],
-            "app_name": r.get("app_name") or r.get("package_name") or r["sha256"],
+            "sha256": r.get("sha256"),
+            "app_name": r.get("app_name") or r.get("sha256"),
             "family": r.get("family") or None,
             "risk_score": r.get("risk_score"),
             "verdict_band": _band_for(r["risk_score"]) if r.get("risk_score") is not None else None,
@@ -213,6 +225,36 @@ async def list_analyses(limit: int = 30):
         }
         for r in rows
     ]
+
+
+@router.delete("/analyses")
+async def clear_analyses():
+    """
+    Empties the Analysis History panel and drops the cached verdict for each
+    sample in it, so re-uploading any of them runs the full pipeline again
+    instead of replaying a cache hit with every static phase marked skipped.
+
+    Scope is deliberately the analyses this instance ran, NOT the whole graph.
+    The corpus samples that back correlation, related-samples and the threat
+    landscape are left alone — they took hours to populate and clearing a UI list
+    is no reason to destroy them. The ontology is untouched for the same reason.
+
+    One consequence worth knowing: a sample that is BOTH corpus and
+    operator-analysed loses its cached verdict here like any other, so it drops
+    out of correlation until it is analysed again.
+    """
+    shas = clear_history()
+    dropped = 0
+    for sha in shas:
+        try:
+            if delete_sample(sha):
+                dropped += 1
+        except Exception as e:
+            # A failure to drop one cached verdict must not abort the clear —
+            # the history file is already emptied and the rest still deserve to go.
+            logger.warning(f"[history] could not drop cached verdict {sha[:12]}: {e}")
+    logger.info(f"[history] cleared {len(shas)} history row(s), dropped {dropped} cached verdict(s).")
+    return {"cleared": len(shas), "cached_verdicts_dropped": dropped}
 
 
 @router.get("/analyses/{sha256}", response_model=AnalysisReport)
@@ -629,6 +671,10 @@ def _unparseable_report(filepath: str, exc: BaseException, skip_report: bool = F
     )
     limitations = limitations + report_limitations
 
+    # An upload that could not be parsed is still an analysis that was run and
+    # still returns a verdict, so it belongs in the history. No package name or
+    # family is recoverable — the parse is what would have produced them.
+    record_analysis(manifest.sha256, None, None, risk_score.total_score)
     return AnalysisReport(
         manifest=manifest,
         risk_score=risk_score,
@@ -950,6 +996,13 @@ def _run_analysis(
                 "APK again."
             ]
 
+        # A cache hit is still an analysis this operator ran — it belongs in the
+        # history for the same reason a cold run does. Recording it moves the row
+        # back to the top rather than duplicating it.
+        record_analysis(
+            ingestion.sha256, ingestion.package_name,
+            cached.get("family") or None, risk_score.total_score,
+        )
         return AnalysisReport(
             manifest=manifest,
             risk_score=risk_score,
@@ -1162,6 +1215,10 @@ def _run_analysis(
             dynamic_verification=dynamic_result if dynamic_enabled else None,
         )
 
+    record_analysis(
+        ingestion.sha256, ingestion.package_name,
+        predicted_family or None, risk_score.total_score,
+    )
     return AnalysisReport(
         manifest=manifest,
         risk_score=risk_score,
