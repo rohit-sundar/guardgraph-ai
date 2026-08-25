@@ -1494,17 +1494,22 @@ function renderGrounding(grounding, narrativeText) {
     row.className = 'grounding-check';
     row.textContent = (narrativeText && narrativeText.trim())
       ? 'This is a cached result from before grounding checks were persisted — the checks ran once at generation time, but that result was not saved for this record. Re-upload the sample to get a checked report.'
-      : 'No narrative was generated, so the fabrication checks did not run.';
+      : 'No narrative was generated, so the grounding checks did not run.';
     list.appendChild(row);
     return;
   }
 
   const passed = grounding.passed_count;
   const total = grounding.total_count;
+  // The failing state is deliberately worded as a check result, not as an
+  // accusation: "FABRICATION DETECTED" read as "this report contains invented
+  // content" when what it actually means is "one of six guards flagged a line,
+  // and that line was already stripped or annotated below". The guards
+  // themselves are unchanged — the ✗ row still names exactly which one fired.
   pill.textContent = grounding.passed
     ? `GROUNDED — ${passed}/${total} CHECKS PASSED`
-    : `FABRICATION DETECTED — ${passed}/${total} PASSED`;
-  pill.className = 'grounding-pill ' + (grounding.passed ? 'grounding-pass' : 'grounding-fail');
+    : `${passed}/${total} CHECKS PASSED`;
+  pill.className = 'grounding-pill ' + (grounding.passed ? 'grounding-pass' : 'grounding-warn');
 
   (grounding.checks || []).forEach(check => {
     const row = document.createElement('div');
