@@ -2006,6 +2006,17 @@ body {
   align-items: center;
   margin-bottom: 1rem;
 }
+.history-actions { display: flex; gap: 0.4rem; }
+/* Muted until hovered: this drops cached verdicts, so it should be findable
+   without competing with Refresh for attention during a demo. */
+.btn-danger {
+  border-color: rgba(239, 68, 68, 0.35);
+  color: #f87171;
+}
+.btn-danger:hover {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.55);
+}
 .history-header h4 {
   font-size: 0.78rem;
   font-weight: 600;

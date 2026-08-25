@@ -8,6 +8,8 @@ document.addEventListener('DOMContentLoaded', () => {
   refreshHealth();
   const refreshBtn = document.getElementById('btnRefreshHistory');
   if (refreshBtn) refreshBtn.addEventListener('click', loadHistory);
+  const clearBtn = document.getElementById('btnClearHistory');
+  if (clearBtn) clearBtn.addEventListener('click', clearHistory);
   const backBtn = document.getElementById('btnBackToUpload');
   if (backBtn) backBtn.addEventListener('click', goBackToUpload);
   const confirmedBtn = document.getElementById('btnFeedbackConfirmed');
@@ -140,9 +142,39 @@ const HISTORY_BAND_VARS = {
   high: '--band-high', malicious: '--band-malicious',
 };
 
-// Every verdict this instance has ever reached, reopenable without
-// re-uploading the sample — backed by Neo4j Sample nodes (GET /analyses), not
-// tied to the current browser session.
+// Empties the history and drops the cached verdict behind each row, so the
+// next upload of any of them runs the full pipeline instead of replaying a cache
+// hit. Confirmed first: it is destructive, and the rows it clears are the record
+// of what was analysed here.
+async function clearHistory() {
+  const listEl = document.getElementById('historyList');
+  const btn = document.getElementById('btnClearHistory');
+  if (!confirm(
+    'Clear analysis history?\n\n' +
+    'This also drops the cached verdict for each listed sample, so re-uploading ' +
+    'one runs the full analysis again instead of answering from cache.\n\n' +
+    'The corpus knowledge base and MITRE ontology are not affected.'
+  )) return;
+
+  if (btn) { btn.disabled = true; btn.textContent = 'Clearing…'; }
+  try {
+    const resp = await fetch('/analyses', { method: 'DELETE' });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    await loadHistory();
+  } catch (err) {
+    if (listEl) {
+      listEl.innerHTML =
+        '<div class="graph-placeholder-text">Could not clear history — is the server running?</div>';
+    }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Clear'; }
+  }
+}
+
+
+// The analyses this instance actually ran, reopenable without re-uploading the
+// sample — backed by the on-disk history log (GET /analyses), not by every
+// Sample node in the graph. Not tied to the current browser session.
 async function loadHistory() {
   const listEl = document.getElementById('historyList');
   if (!listEl) return;

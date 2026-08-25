@@ -101,12 +101,17 @@
       </div>
 
       <!-- Analysis History — every verdict this instance has ever reached,
-           reopenable without re-uploading. Backed by /analyses (Neo4j Sample
-           nodes), not tied to the current session. -->
+           reopenable without re-uploading. Backed by /analyses, which reads the
+           on-disk log of analyses THIS instance ran — not every Sample node in
+           the graph, which also holds bulk-loaded corpus samples nobody here
+           uploaded. Not tied to the current browser session. -->
       <div class="glass-card history-card">
         <div class="history-header">
           <h4>Analysis History</h4>
-          <button type="button" class="btn btn-sm btn-control" id="btnRefreshHistory">Refresh</button>
+          <div class="history-actions">
+            <button type="button" class="btn btn-sm btn-control" id="btnRefreshHistory">Refresh</button>
+            <button type="button" class="btn btn-sm btn-control btn-danger" id="btnClearHistory">Clear</button>
+          </div>
         </div>
         <div class="history-list" id="historyList">
           <div class="graph-placeholder-text">Loading&hellip;</div>
