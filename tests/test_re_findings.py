@@ -189,6 +189,63 @@ def _minimal_elf_with_dynsym() -> bytes:
     return b"\x7fELF" + b"\x00" * 60
 
 
+def _real_elf_with_dynsym(defined: list[str], undefined: list[str]) -> bytes:
+    """
+    A genuine, minimal, parseable 64-bit little-endian ELF with a real section
+    header table and a real .dynsym/.dynstr pair — unlike
+    `_minimal_elf_with_dynsym()` above (magic bytes only), this exercises
+    pyelftools' actual section-walking path, which is what
+    `_parse_elf_dynsym`'s import/export split depends on.
+
+    `defined` symbols get a non-zero, non-special st_shndx (an ordinary
+    section index — the value itself doesn't matter to the parser, only that
+    it isn't SHN_UNDEF). `undefined` symbols get st_shndx=0 (SHN_UNDEF),
+    which pyelftools decodes back to the string "SHN_UNDEF" — confirmed live
+    against a real pyelftools install before writing this fixture.
+    """
+    def sym(name_off: int, shndx: int) -> bytes:
+        STB_GLOBAL, STT_FUNC = 1, 2
+        info = (STB_GLOBAL << 4) | STT_FUNC
+        return struct.pack("<IBBHQQ", name_off, info, 0, shndx, 0, 0)
+
+    dynstr = b"\x00"
+    offsets = []
+    for name in defined + undefined:
+        offsets.append(len(dynstr))
+        dynstr += name.encode() + b"\x00"
+
+    dynsym = sym(0, 0)  # mandatory null symbol at index 0
+    for name, off in zip(defined, offsets):
+        dynsym += sym(off, shndx=1)
+    for name, off in zip(undefined, offsets[len(defined):]):
+        dynsym += sym(off, shndx=0)
+
+    shstrtab = b"\x00.dynsym\x00.dynstr\x00.shstrtab\x00"
+    off_dynsym_name, off_dynstr_name, off_shstrtab_name = 1, 9, 17
+
+    ehsize = 64
+    dynsym_off = ehsize
+    dynstr_off = dynsym_off + len(dynsym)
+    shstrtab_off = dynstr_off + len(dynstr)
+    shoff = shstrtab_off + len(shstrtab)
+
+    def shdr(name, type_, link, entsize, offset, size) -> bytes:
+        return struct.pack("<IIQQQQIIQQ", name, type_, 0, 0, offset, size, link, 1, 8, entsize)
+
+    SHT_NULL, SHT_DYNSYM, SHT_STRTAB = 0, 11, 3
+    sh_null = shdr(0, SHT_NULL, 0, 0, 0, 0)
+    sh_dynsym = shdr(off_dynsym_name, SHT_DYNSYM, 2, 24, dynsym_off, len(dynsym))
+    sh_dynstr = shdr(off_dynstr_name, SHT_STRTAB, 0, 0, dynstr_off, len(dynstr))
+    sh_shstrtab = shdr(off_shstrtab_name, SHT_STRTAB, 0, 0, shstrtab_off, len(shstrtab))
+
+    e_ident = b"\x7fELF" + bytes([2, 1, 1, 0]) + b"\x00" * 8
+    ehdr = e_ident + struct.pack(
+        "<HHIQQQIHHHHHH",
+        3, 0x3E, 1, 0, 0, shoff, 0, ehsize, 0, 0, 64, 4, 3,
+    )
+    return ehdr + dynsym + dynstr + shstrtab + sh_null + sh_dynsym + sh_dynstr + sh_shstrtab
+
+
 def test_load_library_with_non_elf_payload_is_flagged_not_valid():
     g = _build_graph({
         "0": [
@@ -216,6 +273,47 @@ def test_load_library_with_no_matching_so_reports_not_found():
 
     assert findings[0].resolved_so_path is None
     assert findings[0].is_valid_elf is None
+
+
+def test_native_library_flags_risky_imports_and_ignores_unlisted_ones():
+    """
+    Cheap substitute for real .so disassembly (see native_bridge.py's module
+    docstring): a `connect` import is a real network-capability signal even
+    without disassembling what the library does with it. `some_helper` isn't
+    on the curated allowlist and must not show up as a "risky" finding.
+    """
+    g = _build_graph({
+        "0": [
+            _FakeInstruction("const-string", 'v0, "native9"'),
+            _FakeInstruction("invoke-static", "v0, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V"),
+        ],
+    })
+    raw = _real_elf_with_dynsym(
+        defined=["Java_com_test_Foo_bar"],
+        undefined=["connect", "some_helper"],
+    )
+    apk_obj = _FakeApkObj({"assets/libnative9.so": raw})
+    findings = resolve_native_bridges({"Lcom/test/Fake;->m()V": g}, apk_obj=apk_obj, analysis_obj=None)
+
+    assert findings[0].is_valid_elf is True
+    assert findings[0].java_prefixed_symbols == ["Java_com_test_Foo_bar"]
+    assert findings[0].risky_imports == ["connect"]
+    assert "imports: connect" in findings[0].describe()
+
+
+def test_native_library_with_no_risky_imports_omits_imports_note():
+    g = _build_graph({
+        "0": [
+            _FakeInstruction("const-string", 'v0, "native9"'),
+            _FakeInstruction("invoke-static", "v0, Ljava/lang/System;->loadLibrary(Ljava/lang/String;)V"),
+        ],
+    })
+    raw = _real_elf_with_dynsym(defined=["Java_com_test_Foo_bar"], undefined=["some_helper"])
+    apk_obj = _FakeApkObj({"assets/libnative9.so": raw})
+    findings = resolve_native_bridges({"Lcom/test/Fake;->m()V": g}, apk_obj=apk_obj, analysis_obj=None)
+
+    assert findings[0].risky_imports == []
+    assert "imports:" not in findings[0].describe()
 
 
 if __name__ == "__main__":
