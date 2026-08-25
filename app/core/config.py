@@ -115,6 +115,21 @@ class Settings(BaseSettings):
     # turns this OFF by default and paces itself behind --online.
     online_lookups_enabled: bool = True
 
+    # Master switch for live Google Play identity verification
+    # (app/analysis/brand_lookup.py) — a fifth, independent impersonation
+    # signal alongside the static data/reference/protected_brands.json table
+    # in app/analysis/impersonation.py. Needs no API key (unlike the two
+    # lookups above), so unlike those it has no natural gate protecting a
+    # test/CI run from touching the real network — the test suite disables
+    # this by default (tests/conftest.py) and re-enables it only in tests
+    # that explicitly mock the HTTP seam. Off has no effect on the
+    # certificate/icon checks, which stay table-driven. Results are cached
+    # locally (data/cache/play_lookup_cache.json, 30-day TTL) so this only
+    # costs a network round trip once per never-before-seen package/title,
+    # ever — not once per upload.
+    brand_live_lookup_enabled: bool = True
+    brand_live_lookup_timeout_seconds: float = 5.0
+
     entropy_high_threshold: float = 7.2
     flattening_degree_outlier_zscore: float = 3.0
 

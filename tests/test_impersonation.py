@@ -21,6 +21,7 @@ import io
 
 import pytest
 
+from app.analysis import brand_lookup
 from app.analysis.impersonation import (
     ICON_MATCH_MAX_DISTANCE,
     Brand,
@@ -30,6 +31,7 @@ from app.analysis.impersonation import (
     normalize_confusables,
     perceptual_hash,
 )
+from app.core.config import settings
 
 PIL = pytest.importorskip("PIL", reason="Pillow is required for icon hashing")
 
@@ -617,3 +619,176 @@ def test_a_disproven_owner_stops_silencing_the_other_brands():
         cert_sha256=CLONE_CERT, brands=[phonepe, paytm],
     )
     assert [f.kind for f in result.findings] == ["certificate_mismatch", "label_impersonation"]
+
+
+# ── live Play Store check (fifth signal) ───────────────────────────────────────
+# app.analysis.brand_lookup's HTTP seam is monkeypatched in every test below —
+# tests/conftest.py disables brand_live_lookup_enabled suite-wide by default, and
+# each of these re-enables it deliberately alongside the mock, so nothing here
+# ever touches the real network.
+
+def test_live_lookup_skipped_when_a_static_finding_already_fired(monkeypatch):
+    monkeypatch.setattr(settings, "brand_live_lookup_enabled", True)
+    calls = []
+    monkeypatch.setattr(
+        brand_lookup, "fetch_play_listing",
+        lambda pkg, timeout=None: (calls.append(("listing", pkg)), (None, "not_found"))[1],
+    )
+    monkeypatch.setattr(
+        brand_lookup, "search_play_by_title",
+        lambda title, max_results=5, timeout=None: (calls.append(("search", title)), ([], "ok"))[1],
+    )
+
+    result = detect_impersonation(
+        package_name="com.phonpe.app",  # typosquat of com.phonepe.app
+        app_label="PhonePe",
+        brands=[brand()],
+    )
+    assert any(f.kind == "package_typosquat" for f in result.findings)
+    assert calls == []  # static evidence already found — live lookup never attempted
+
+
+def test_live_lookup_skipped_for_a_known_genuine_package(monkeypatch):
+    monkeypatch.setattr(settings, "brand_live_lookup_enabled", True)
+    calls = []
+    monkeypatch.setattr(
+        brand_lookup, "fetch_play_listing",
+        lambda pkg, timeout=None: (calls.append(pkg), (None, "not_found"))[1],
+    )
+
+    result = detect_impersonation(
+        package_name="com.phonepe.app", app_label="PhonePe",
+        cert_sha256=REAL_CERT, brands=[brand()],
+    )
+    assert result.findings == []
+    assert calls == []  # already vouched for by the static table
+
+
+def test_live_lookup_flags_a_package_identity_mismatch(monkeypatch):
+    monkeypatch.setattr(settings, "brand_live_lookup_enabled", True)
+    monkeypatch.setattr(
+        brand_lookup, "fetch_play_listing",
+        lambda pkg, timeout=None: (
+            brand_lookup.PlayListing(pkg, "Totally Different Real App"), "found"
+        ),
+    )
+    monkeypatch.setattr(
+        brand_lookup, "search_play_by_title",
+        lambda title, max_results=5, timeout=None: ([], "ok"),
+    )
+
+    result = detect_impersonation(
+        package_name="com.unknown.example",
+        app_label="Some Unrelated Label",
+        brands=[brand()],  # PhonePe — not involved in this package at all
+    )
+    assert [f.kind for f in result.findings] == ["package_identity_mismatch_live"]
+    assert result.max_severity < 0.75  # strictly weaker than any static finding
+
+
+def test_live_lookup_flags_a_label_impersonation_via_search(monkeypatch):
+    monkeypatch.setattr(settings, "brand_live_lookup_enabled", True)
+    monkeypatch.setattr(
+        brand_lookup, "fetch_play_listing",
+        lambda pkg, timeout=None: (None, "not_found"),
+    )
+    monkeypatch.setattr(
+        brand_lookup, "search_play_by_title",
+        lambda title, max_results=5, timeout=None: (
+            [brand_lookup.PlayListing("com.realapp.example", "Totally Real Brand")], "ok"
+        ),
+    )
+
+    result = detect_impersonation(
+        package_name="com.clone.example",
+        app_label="Totally Real Brand",
+        brands=[brand()],
+    )
+    assert [f.kind for f in result.findings] == ["label_impersonation_live"]
+    assert result.findings[0].expected == "Totally Real Brand (com.realapp.example)"
+
+
+# ── generic bait label (sixth check) ────────────────────────────────────────
+# The case that motivated this check: a synthetic SpyNote sample labeled
+# "Customer Support" produced zero findings from every check above (confirmed
+# live 2026-08-25) because there is no single real "Customer Support" company
+# for checks 1-5 to compare against. Fully offline — no network involved.
+
+def test_generic_bait_label_is_flagged_advisory_only():
+    result = detect_impersonation(
+        package_name="rolling.investigations.novel",
+        app_label="Customer Support",
+        brands=[],
+    )
+    assert [f.kind for f in result.findings] == ["generic_bait_label"]
+    assert result.findings[0].severity < 0.6  # weaker than every other check
+
+
+def test_generic_bait_label_matching_is_case_and_whitespace_insensitive():
+    result = detect_impersonation(
+        package_name="x.y.z", app_label="  CUSTOMER   support  ", brands=[]
+    )
+    assert [f.kind for f in result.findings] == ["generic_bait_label"]
+
+
+def test_generic_bait_label_matches_a_tagline_variant():
+    result = detect_impersonation(
+        package_name="x.y.z", app_label="Speed Post - Track Your Parcel", brands=[]
+    )
+    assert [f.kind for f in result.findings] == ["generic_bait_label"]
+
+
+@pytest.mark.parametrize("label", [
+    "Income Tax Refund 2026",
+    "KYC Update Required",
+    "FedEx Delivery Tracker",
+    "Instant Personal Loan App",
+])
+def test_generic_bait_label_widened_list_catches_india_specific_lures(label):
+    result = detect_impersonation(package_name="x.y.z", app_label=label, brands=[])
+    assert [f.kind for f in result.findings] == ["generic_bait_label"]
+
+
+def test_generic_bait_label_does_not_fire_on_unrelated_labels():
+    result = detect_impersonation(package_name="x.y.z", app_label="My Cool Game", brands=[])
+    assert result.findings == []
+
+
+def test_generic_bait_label_runs_alongside_a_static_finding():
+    """Orthogonal check — it isn't skipped just because a static finding fired."""
+    result = detect_impersonation(
+        package_name="com.phonpe.app",  # typosquat
+        app_label="Customer Support",
+        brands=[brand()],
+    )
+    kinds = {f.kind for f in result.findings}
+    assert "package_typosquat" in kinds
+    assert "generic_bait_label" in kinds
+
+
+def test_generic_bait_label_never_moves_the_verdict_band():
+    """No entry in IMPERSONATION_SCORE_FLOOR — advisory only, by design."""
+    from app.reports.scoring import IMPERSONATION_SCORE_FLOOR
+
+    assert "generic_bait_label" not in IMPERSONATION_SCORE_FLOOR
+
+
+def test_live_lookup_disabled_setting_skips_the_network_entirely(monkeypatch):
+    # Default from tests/conftest.py — asserted explicitly here so the intent is
+    # visible in this file too, not only in the fixture.
+    assert settings.brand_live_lookup_enabled is False
+    calls = []
+    monkeypatch.setattr(
+        brand_lookup, "fetch_play_listing",
+        lambda pkg, timeout=None: (calls.append(pkg), (None, "not_found"))[1],
+    )
+    monkeypatch.setattr(
+        brand_lookup, "search_play_by_title",
+        lambda title, max_results=5, timeout=None: (calls.append(title), ([], "ok"))[1],
+    )
+
+    result = detect_impersonation(
+        package_name="com.unknown.example", app_label="Whatever", brands=[brand()]
+    )
+    assert calls == []
+    assert any("disabled" in note for note in result.coverage)

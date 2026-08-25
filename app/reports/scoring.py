@@ -508,6 +508,14 @@ IMPERSONATION_SCORE_FLOOR = {
     # Weakest of the four: display names are not unique, and a genuine third-party
     # companion app may legitimately carry a brand's name.
     "label_impersonation": BAND_MEDIUM_CEILING + _JUST_ABOVE,        # -> `suspicious`
+    # Live Play Store checks (app/analysis/brand_lookup.py) — weaker than every
+    # static-table finding above: no verified certificate, a scraped title
+    # comparison rather than a hand-verified reference entry. Same floor as
+    # label_impersonation, the weakest of the four static checks, and never
+    # higher — a scraping false positive must not be able to push a clean app
+    # past `suspicious`.
+    "package_identity_mismatch_live": BAND_MEDIUM_CEILING + _JUST_ABOVE,  # -> `suspicious`
+    "label_impersonation_live": BAND_MEDIUM_CEILING + _JUST_ABOVE,        # -> `suspicious`
 }
 
 # The band each floor is meant to guarantee. Pinned by
@@ -520,6 +528,8 @@ IMPERSONATION_FLOOR_BAND = {
     "package_namespace_squat": "high",
     "package_typosquat": "high",
     "label_impersonation": "suspicious",
+    "package_identity_mismatch_live": "suspicious",
+    "label_impersonation_live": "suspicious",
 }
 
 RISKY_PERMISSIONS = {
