@@ -287,7 +287,9 @@ async def get_analysis(sha256: str):
     )
 
     narrative = cached.get("narrative") or "[No narrative stored for this sample.]"
-    limitations = list(cached.get("limitations") or []) + [
+    # dict.fromkeys dedupes while preserving order — self-heals any record
+    # left with duplicate entries by the growth bug fixed in analyze_apk_stream.
+    limitations = list(dict.fromkeys(cached.get("limitations") or [])) + [
         "HISTORICAL RECORD: reconstructed from the stored verdict, not the original "
         "APK — fields that only ever came from re-parsing the file (certificate "
         "anomalies, accessibility flags, exported components, payload assets, "
@@ -849,7 +851,20 @@ def _run_analysis(
             dynamic_verification=dynamic_result if dynamic_enabled else cached.get("dynamic_verification"),
         )
         narrative = cached.get("narrative", "")
-        limitations = cached.get("limitations", [])
+        # `limitations` grows below with messages that describe THIS request
+        # (a stale narrative relative to freshly-run dynamic verification,
+        # etc.) — those are re-derived every response and must never be
+        # persisted, or the opportunistic store_signature call further down
+        # bakes them into `cached["limitations"]`, which is read back in as
+        # the base list on the next cache hit and grows the same message
+        # again on top of itself. `base_limitations` is what actually gets
+        # persisted; `limitations` (declared right after) is base + this
+        # request's own transient additions, returned in the response only.
+        # dict.fromkeys dedupes while preserving order — a defensive self-heal
+        # for records already corrupted by the growth bug this fixes, since
+        # there's no migration pass over existing cached samples.
+        base_limitations = list(dict.fromkeys(cached.get("limitations", []) or []))
+        limitations = base_limitations
         grounding = cached.get("grounding")
 
         if cached_score is None:
@@ -892,7 +907,10 @@ def _run_analysis(
                 risk_score=risk_score.total_score,
                 ttps=cached_ttps,
                 narrative=narrative,
-                limitations=limitations,
+                # base_limitations, not `limitations` — see the comment where
+                # base_limitations is built above. Persisting the request-
+                # augmented list here is what caused the duplicate-message bug.
+                limitations=base_limitations,
                 signature_yara_data=cached.get("signature_yara_data"),
                 permissions=cached_permissions,
                 risk_components=risk_score.model_dump(),

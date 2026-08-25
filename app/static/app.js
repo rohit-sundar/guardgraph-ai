@@ -1077,13 +1077,13 @@ function renderRiskBreakdown(manifest, risk) {
 // toggle once it holds more than `threshold` entries. Below that (including
 // zero, where the list holds a single .re-empty note) it's pinned open with
 // the toggle chrome hidden entirely: not worth a click for 1-4 lines.
-function finalizeFindingsAccordion(prefix, threshold = 4) {
+function finalizeFindingsAccordion(prefix, threshold = 4, itemSelector = '.re-finding-item') {
   const details = document.getElementById(`${prefix}Details`);
   const list = document.getElementById(`${prefix}List`);
   const countEl = document.getElementById(`${prefix}Count`);
   if (!details || !list) return;
 
-  const n = list.querySelectorAll('.re-finding-item').length;
+  const n = list.querySelectorAll(itemSelector).length;
   if (n > threshold) {
     details.open = false;
     details.classList.remove('no-toggle');
@@ -1151,6 +1151,7 @@ function renderLimitations(limitations) {
     item.textContent = text;
     list.appendChild(item);
   });
+  finalizeFindingsAccordion('limitations', 3, '.limitation-item');
 }
 
 function renderDynamicVerification(manifest) {
