@@ -247,23 +247,28 @@ already says the icon check is unavailable for that brand.
 
 ### Vendored frontend libraries
 
-`app/static/vendor/` holds three scripts that were CDN `<script>` tags until they were pulled
-local. Cytoscape draws the Threat Landscape tab and the CFG explorer, so a captive portal or a
-throttled venue network would silently remove the graph half of the product; the other two are
-the markdown renderer and the sanitizer standing between the LLM narrative and the DOM. They
-are checked in deliberately — **do not put the CDN URLs back.**
+`app/static/vendor/` holds three scripts and two font files that were CDN `<script>`/`<link>`
+tags until they were pulled local. Cytoscape draws the Threat Landscape tab and the CFG
+explorer, so a captive portal or a throttled venue network would silently remove the graph
+half of the product; the other two scripts are the markdown renderer and the sanitizer
+standing between the LLM narrative and the DOM. They are checked in deliberately —
+**do not put the CDN URLs back.**
 
 | File | Version | Refresh from |
 |---|---|---|
 | `marked.min.js` | 15.0.12 | `https://cdn.jsdelivr.net/npm/marked@15.0.12/marked.min.js` |
 | `purify.min.js` | 3.1.6 | `https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js` |
 | `cytoscape.min.js` | 3.28.1 | `https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js` |
+| `fonts/outfit-latin-variable.woff2` | v15, latin subset | Google Fonts CSS2 API: `family=Outfit:wght@300..800` |
+| `fonts/jetbrains-mono-latin-variable.woff2` | v24, latin subset | Google Fonts CSS2 API: `family=JetBrains+Mono:wght@400..600` |
 
 Each URL above is pinned; the `marked` tag this replaced was unpinned (`npm/marked/`) and
 resolved to 15.0.12 at the time of vendoring — re-fetching an unpinned "latest" is a change,
-not a restore. Google Fonts is still loaded from the CDN on purpose: `--font-sans` and
-`--font-mono` in `styles.css` both carry system fallbacks, so a blocked font request costs
-typography, not function.
+not a restore. The two fonts are variable fonts, so one file each covers the whole weight
+range used (`--font-sans` / `--font-mono` in `styles.css`, declared via `@font-face` at the
+top of that file); both still carry system fallbacks, so even a corrupted/missing font file
+costs typography, not function. Non-Latin glyphs are out of scope — this is a Latin-only
+subset, matching the UI's English-only copy.
 
 ## Scalability — what it costs, and what actually scales
 

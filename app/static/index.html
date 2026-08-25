@@ -4,9 +4,6 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GuardGraph AI — Android Malware Threat Intelligence</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css">
   <!-- Vendored, not CDN-loaded. Cytoscape draws the threat landscape and the CFG
        explorer, so a blocked CDN on conference wifi would take out the graph half
@@ -34,17 +31,17 @@
         </div>
         <div class="brand-text">
           <h1>GUARDGRAPH <span>AI</span></h1>
-          <p class="tagline">GraphRAG Android Threat Intelligence Platform</p>
+          <p class="tagline">AI-Powered Android Threat Intelligence</p>
         </div>
       </div>
       <!-- Both pills were hardcoded green and stayed green through a 43-minute
            Neo4j outage. They now report GET /health. "Backend Engine" was replaced
-           by "Knowledge Graph" on purpose: if this page rendered, the backend is up
+           by "Correlation Engine" on purpose: if this page rendered, the backend is up
            by definition, so that pill could never have told anyone anything — the
            graph is the dependency that fails silently. -->
       <div class="status-badges">
         <div class="status-badge status-unknown" id="pillGraph">
-          <span class="dot"></span><span id="pillGraphText">Knowledge Graph: checking&hellip;</span>
+          <span class="dot"></span><span id="pillGraphText">Correlation Engine: checking&hellip;</span>
         </div>
         <div class="status-badge status-unknown" id="pillLlm">
           <span class="dot"></span><span id="pillLlmText">Qwen2.5 7B LLM: checking&hellip;</span>
@@ -90,19 +87,15 @@
 
         <div class="file-preview hidden" id="filePreview">
           <div class="file-info">
-            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="flex-shrink:0;">
               <rect x="5" y="2" width="14" height="20" rx="2" ry="2"/>
               <line x1="12" y1="18" x2="12.01" y2="18"/>
             </svg>
             <span class="file-name" id="fileName">sample.apk</span>
             <span class="file-size" id="fileSize">0 MB</span>
           </div>
-          <label class="dynamic-toggle" style="display:flex;align-items:center;gap:0.5rem;justify-content:center;margin:0.75rem 0;font-size:0.85rem;color:#94a3b8;">
-            <input type="checkbox" id="enableDynamicCheckbox">
-            🧪 Also run dynamic verification (needs a running AVD — adds ~30s)
-          </label>
           <button type="button" class="btn btn-analyze" id="btnStartAnalyze">
-            🚀 Run GraphRAG Threat Analysis
+            Run GraphRAG Threat Analysis
           </button>
         </div>
       </div>
@@ -113,7 +106,7 @@
       <div class="glass-card history-card">
         <div class="history-header">
           <h4>Analysis History</h4>
-          <button type="button" class="btn btn-sm btn-control" id="btnRefreshHistory">🔄 Refresh</button>
+          <button type="button" class="btn btn-sm btn-control" id="btnRefreshHistory">Refresh</button>
         </div>
         <div class="history-list" id="historyList">
           <div class="graph-placeholder-text">Loading&hellip;</div>
@@ -182,6 +175,15 @@
           </div>
         </div>
       </div>
+
+      <!-- Rotating capability callouts — pure filler for the wait, driven by
+           startProgressTips()/stopProgressTips() in app.js. Not tied to the
+           real pipeline phase in any way; purely to keep the screen from
+           sitting empty during a multi-minute analysis. -->
+      <div class="glass-card tip-card">
+        <div class="tip-eyebrow">About GuardGraph AI</div>
+        <p class="tip-text" id="progressTipText"></p>
+      </div>
     </section>
 
     <!-- Results Section -->
@@ -228,8 +230,10 @@
                a deliberate manual step, not something this click triggers. -->
           <div class="feedback-row" id="feedbackRow">
             <span class="feedback-label">Is this verdict right?</span>
-            <button type="button" class="btn btn-sm btn-control" id="btnFeedbackConfirmed" title="This verdict looks correct">👍 Correct</button>
-            <button type="button" class="btn btn-sm btn-control" id="btnFeedbackFalsePositive" title="This verdict is wrong">👎 False positive</button>
+            <div class="feedback-actions">
+              <button type="button" class="btn btn-sm btn-control btn-control-affirm" id="btnFeedbackConfirmed" title="This verdict looks correct">Correct</button>
+              <button type="button" class="btn btn-sm btn-control btn-control-danger" id="btnFeedbackFalsePositive" title="This verdict is wrong">False positive</button>
+            </div>
             <span class="feedback-status hidden" id="feedbackStatus"></span>
           </div>
         </div>
@@ -246,11 +250,21 @@
             </div>
             <div class="spec-item">
               <span class="spec-label">SHA-256 Hash</span>
-              <span class="spec-value code truncate" id="targetHash">—</span>
+              <div class="spec-value-row">
+                <span class="spec-value code truncate" id="targetHash">—</span>
+                <button type="button" class="icon-btn" id="btnCopyHash" title="Copy full SHA-256 hash">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                </button>
+              </div>
             </div>
             <div class="spec-item">
               <span class="spec-label">VirusTotal Status</span>
-              <span class="spec-value" id="vtStatus">—</span>
+              <div class="spec-value-row">
+                <span class="spec-value" id="vtStatus">—</span>
+                <a class="icon-btn hidden" id="linkVtReport" href="#" target="_blank" rel="noopener noreferrer" title="Open this hash's VirusTotal analysis page">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>
+                </a>
+              </div>
             </div>
             <div class="spec-item">
               <span class="spec-label">Malware Family</span>
@@ -265,6 +279,14 @@
               <span class="spec-value" id="certAnomalies">—</span>
             </div>
           </div>
+
+          <!-- Top risk-score contributors — a preview of the Risk Scoring tab's
+               full breakdown, not a separate computation. Hidden when every
+               component reads null/0 (e.g. an unscored historical record). -->
+          <div class="why-score-section hidden" id="whyScoreSection">
+            <div class="why-score-title">Why This Score &mdash; Top Contributing Factors</div>
+            <div id="whyScoreList"></div>
+          </div>
         </div>
       </div>
 
@@ -274,9 +296,10 @@
            never rendered it anywhere. Placed above the tabs, not inside one, since
            it applies to the whole report regardless of which tab is open. -->
       <div class="glass-card limitations-card hidden" id="limitationsCard">
-        <div class="card-header">
-          <h4>⚠️ COVERAGE &amp; LIMITATIONS — WHY SOME FIELDS ABOVE MAY READ EMPTY</h4>
+        <div class="card-header" style="margin-bottom:0.4rem;">
+          <h4>Coverage &amp; Limitations</h4>
         </div>
+        <p class="re-section-desc" style="margin-bottom:1rem;">Why some of the fields above may read empty.</p>
         <div class="limitations-list" id="limitationsList"></div>
       </div>
 
@@ -299,10 +322,10 @@
             Risk Scoring
           </button>
           <button class="tab-btn" onclick="switchTab('reFindings', this)">
-            Rev-Engg Indicators (<span id="reFindingsCount">0</span>)
+            Reverse-Engineering Indicators (<span id="reFindingsCount">0</span>)
           </button>
           <button class="tab-btn hidden" id="tabBtnDynamicVerification" onclick="switchTab('dynamicVerification', this)">
-            🧪 Dynamic Verification
+            Dynamic Verification
           </button>
           <button class="tab-btn" onclick="switchTab('appIdentity', this)">
             App Identity (<span id="impersonationCount">0</span>)
@@ -324,9 +347,29 @@
             <div class="ai-report-wrapper">
               <div class="ai-report-header">
                 <div class="llm-info">
-                  <span class="sparkle">✨</span> Grounded in MITRE ATT&CK Mobile Ontology via Qwen2.5 7B
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v4M12 17v4M5 5l2.5 2.5M16.5 16.5 19 19M3 12h4M17 12h4M5 19l2.5-2.5M16.5 7.5 19 5"/></svg>
+                  Grounded in MITRE ATT&CK Mobile Ontology via Qwen2.5 7B
                 </div>
-                <button class="btn btn-sm" onclick="copyAiReport()">Copy Report</button>
+                <div class="export-menu" id="exportMenu">
+                  <button class="btn btn-sm btn-control" id="btnExportToggle" onclick="toggleExportMenu()" aria-haspopup="true" aria-expanded="false">
+                    Export
+                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                  </button>
+                  <div class="export-menu-list hidden" id="exportMenuList">
+                    <button type="button" onclick="exportReport('json')">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"/><path d="M16 3h1a2 2 0 0 1 2 2v5a2 2 0 0 0 2 2 2 2 0 0 0-2 2v5a2 2 0 0 1-2 2h-1"/></svg>
+                      JSON
+                    </button>
+                    <button type="button" onclick="exportReport('markdown')">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 15V9l3 3 3-3v6"/><path d="M17 9v6M14.5 12.5 17 15l2.5-2.5"/></svg>
+                      Markdown
+                    </button>
+                    <button type="button" onclick="exportReport('pdf')">
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+                      PDF
+                    </button>
+                  </div>
+                </div>
               </div>
               <div id="groundingPanel" class="grounding-panel hidden">
                 <div class="grounding-head">
@@ -343,6 +386,12 @@
 
           <!-- Tab 2: YARA Rules -->
           <div class="tab-content" id="tabYaraRules">
+            <p class="graph-subtitle" style="margin-bottom:1rem;">
+              Static signature matching — known-hash lookups against the GuardGraph malware corpus
+              (Signature Matches) plus pattern-based YARA rules run against the APK's DEX and strings
+              (YARA Rule Matches). A hit here is a known threat; an empty tab doesn't mean the app is
+              clean, only that it isn't already in a signature database.
+            </p>
             <div class="yara-matches-container" id="yaraMatchesList">
               <!-- YARA matches rendered here -->
             </div>
@@ -350,6 +399,12 @@
 
           <!-- Tab 3: Topology -->
           <div class="tab-content" id="tabTopology">
+            <p class="graph-subtitle" style="margin-bottom:1rem;">
+              Structural metrics pulled from the app's control-flow graphs — how the code is organized
+              and how hard it's been made to statically analyze. High entropy, heavy reflection, and
+              control-flow flattening are hallmarks of a deliberately obfuscated APK, not proof of
+              malice on their own.
+            </p>
             <div class="topology-grid">
               <div class="top-stat-box">
                 <span class="stat-num" id="statCfgNodes">0</span>
@@ -391,9 +446,9 @@
                     this sample.</p>
                 </div>
                 <div class="graph-controls">
-                  <button class="btn btn-sm btn-control" onclick="resetGraphView()">🎯 Fit View</button>
-                  <button class="btn btn-sm btn-control" onclick="relayoutGraph('cose')">🔄 Re-cluster</button>
-                  <button class="btn btn-sm btn-control" onclick="relayoutGraph('concentric')">⭕ Rings</button>
+                  <button class="btn btn-sm btn-control" onclick="resetGraphView()">Fit View</button>
+                  <button class="btn btn-sm btn-control" onclick="relayoutGraph('cose')">Re-cluster</button>
+                  <button class="btn btn-sm btn-control" onclick="relayoutGraph('concentric')">Rings</button>
                 </div>
               </div>
               <div class="graph-canvas-container" id="cyGraphContainer">
@@ -418,6 +473,13 @@
 
           <!-- Tab 4: Permissions -->
           <div class="tab-content" id="tabPermissions">
+            <p class="graph-subtitle" style="margin-bottom:1rem;">
+              Every permission declared in the app's manifest. Permissions flagged
+              <strong>DANGEROUS</strong> (SMS, Accessibility, Contacts, Phone, Location, Storage,
+              Camera) are the ones most commonly abused for credential theft and OTP interception —
+              not every dangerous permission is malicious, but the combination and context (see the
+              GraphRAG AI Report tab) is what matters.
+            </p>
             <div class="permissions-grid" id="permissionsList">
               <!-- Permissions rendered here -->
             </div>
@@ -425,6 +487,11 @@
 
           <!-- Tab 5: Risk Breakdown -->
           <div class="tab-content" id="tabRiskBreakdown">
+            <p class="graph-subtitle" style="margin-bottom:1rem;">
+              How the overall risk score (0-100) is assembled — seven weighted components, each capped
+              at its own maximum points below. Click any row to see the specific evidence that produced
+              its number.
+            </p>
             <div class="breakdown-list" id="riskBreakdownList">
               <!-- Breakdown bars rendered here -->
             </div>
@@ -435,12 +502,10 @@
                 <span class="model-accuracy-loading" id="modelAccuracyStatus">Loading&hellip;</span>
               </div>
               <p class="model-accuracy-note">
-                Two numbers, on purpose. Every malware label in training comes from its
-                <em>family's</em> known ATT&amp;CK techniques, so a split that stratifies on labels
-                puts identical label vectors on both sides of the train/test line &mdash; that number
-                measures family recognition, not technique inference. The family-held-out column
-                holds whole families out of each fold, so it can only be scored on families the
-                model never saw. That's the one that means something about a real unseen sample.
+                Two accuracy numbers, because one of them is misleading. <strong>Stratified</strong>
+                tests the model on malware families it already trained on, so it looks stronger than
+                it really is. <strong>Family-held-out</strong> tests it on families it has never seen
+                before &mdash; the only fair measure of how it performs on a brand-new sample.
               </p>
               <div class="model-accuracy-table" id="modelAccuracyTable"></div>
             </div>
@@ -454,7 +519,7 @@
               UPI app is fraud whether or not its payload trips a single behavioural anchor, so
               these findings raise a floor under the verdict rather than adding to the weighted score.
             </p>
-            <div class="spec-grid" style="margin-bottom:1rem;">
+            <div class="specs-grid" style="margin-bottom:1.25rem; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));">
               <div class="spec-item">
                 <span class="spec-label">Display Name</span>
                 <span class="spec-value" id="identityLabel">&mdash;</span>
@@ -462,10 +527,6 @@
               <div class="spec-item">
                 <span class="spec-label">Launcher Icon Hash</span>
                 <span class="spec-value code" id="identityIconHash">&mdash;</span>
-              </div>
-              <div class="spec-item">
-                <span class="spec-label">Brands Compared</span>
-                <span class="spec-value" id="identityBrandCount">&mdash;</span>
               </div>
             </div>
             <div class="re-findings-section">
@@ -490,20 +551,36 @@
               note in the Topology tab for how much of the app's obfuscation defeated resolution.
             </p>
             <div class="re-findings-section">
-              <h5>🔑 Crypto Configuration</h5>
-              <div class="re-findings-list" id="reCryptoList"><span class="re-empty">None found</span></div>
+              <h5>Crypto Configuration</h5>
+              <p class="re-section-desc">Encryption, hashing, and key-derivation calls resolved from the app's bytecode — algorithms, modes, and any insecure configurations (ECB mode, missing IV) it can statically identify.</p>
+              <details class="re-findings-details" id="reCryptoDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="reCryptoCount"></span></summary>
+                <div class="re-findings-list" id="reCryptoList"></div>
+              </details>
             </div>
             <div class="re-findings-section">
-              <h5>📦 Dynamic Code Loading</h5>
-              <div class="re-findings-list" id="reDclList"><span class="re-empty">None found</span></div>
+              <h5>Dynamic Code Loading</h5>
+              <p class="re-section-desc">DexClassLoader / PathClassLoader targets — secondary code the app loads and executes at runtime instead of shipping in the main DEX.</p>
+              <details class="re-findings-details" id="reDclDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="reDclCount"></span></summary>
+                <div class="re-findings-list" id="reDclList"></div>
+              </details>
             </div>
             <div class="re-findings-section">
-              <h5>🌐 WebView JS Bridges</h5>
-              <div class="re-findings-list" id="reWebviewList"><span class="re-empty">None found</span></div>
+              <h5>WebView JS Bridges</h5>
+              <p class="re-section-desc">addJavascriptInterface() calls that expose native app methods to whatever web content a WebView loads — a common attack surface when that content isn't trusted.</p>
+              <details class="re-findings-details" id="reWebviewDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="reWebviewCount"></span></summary>
+                <div class="re-findings-list" id="reWebviewList"></div>
+              </details>
             </div>
             <div class="re-findings-section">
-              <h5>⚙️ Native / JNI Bridges</h5>
-              <div class="re-findings-list" id="reNativeList"><span class="re-empty">None found</span></div>
+              <h5>Native / JNI Bridges</h5>
+              <p class="re-section-desc">System.loadLibrary() calls resolved to their native .so files and exported JNI symbols, where present in the APK.</p>
+              <details class="re-findings-details" id="reNativeDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="reNativeCount"></span></summary>
+                <div class="re-findings-list" id="reNativeList"></div>
+              </details>
             </div>
           </div>
 
@@ -511,111 +588,103 @@
                dynamic pass actually ran for this analysis; see renderDynamicVerification -->
           <div class="tab-content" id="tabDynamicVerification">
             <p class="graph-subtitle" style="margin-bottom:1rem;">
-              A narrow, opt-in runtime pass on a local AVD — this does NOT re-analyze the
-              app independently. Every row below either confirms or does not confirm a
-              specific finding the static pipeline already made; it is never a new
-              standalone claim. "Not observed" is not the same as "refuted" — a capture
-              window can miss a time-gated or sandbox-aware check.
+              A live test run on a real Android emulator. Each row below checks whether something
+              the static scan predicted actually happened while the app was running.
             </p>
-            <div class="spec-grid" style="margin-bottom:1rem;">
+            <div class="specs-grid" style="margin-bottom:1.25rem; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));">
               <div class="spec-item">
                 <span class="spec-label">Capture Window</span>
                 <span class="spec-value" id="dynDuration">&mdash;</span>
               </div>
               <div class="spec-item">
                 <span class="spec-label">Coverage</span>
-                <span class="spec-value" id="dynCoverage">&mdash;</span>
+                <span class="spec-value truncate" id="dynCoverage">&mdash;</span>
               </div>
             </div>
             <div class="re-findings-section">
-              <h5>📊 Runtime Activity Summary</h5>
+              <h5>Runtime Activity Summary</h5>
+              <p class="re-section-desc">Everything the app actually did while running, in one line.</p>
               <div class="re-findings-list" id="dynActivitySummary"></div>
             </div>
             <div class="re-findings-section hidden" id="dynScreenshotSection">
-              <h5>📸 Live Capture</h5>
-              <div class="hidden" id="dynEventScreenshotsWrap" style="margin-bottom:14px;">
-                <div style="font-size:0.85em; opacity:0.8; margin-bottom:4px;">Event-triggered — captured the instant a crucial finding fired</div>
-                <div style="display:flex; gap:16px; flex-wrap:wrap;" id="dynEventScreenshots"></div>
-              </div>
-              <div style="display:flex; gap:16px; flex-wrap:wrap;">
-                <div class="hidden" id="dynScreenshotReactionWrap">
-                  <div style="font-size:0.85em; opacity:0.8; margin-bottom:4px;">Reaction — shortly after SMS/tap stimuli</div>
-                  <img id="dynScreenshotReaction" alt="Live capture of the app's screen shortly after the SMS/tap stimuli fired" style="max-width:320px; border-radius:8px; border:1px solid rgba(255,255,255,0.15); display:block;" />
-                </div>
-                <div class="hidden" id="dynScreenshotFinalWrap">
-                  <div style="font-size:0.85em; opacity:0.8; margin-bottom:4px;">Final — end of capture window</div>
-                  <img id="dynScreenshot" alt="Live capture of the app's screen at the end of the dynamic-verification window" style="max-width:320px; border-radius:8px; border:1px solid rgba(255,255,255,0.15); display:block;" />
-                </div>
-              </div>
+              <h5>Live Capture</h5>
+              <p class="re-section-desc">Screenshots taken during the test run.</p>
+              <div class="dyn-screenshot-grid" id="dynScreenshotGrid"></div>
             </div>
             <div class="re-findings-section">
-              <h5>🌐 Network — Static C2 Indicators vs. Runtime Contact</h5>
-              <div class="re-findings-list" id="dynNetworkList"><span class="re-empty">None found</span></div>
+              <h5>Network — Static C2 Indicators vs. Runtime Contact</h5>
+              <p class="re-section-desc">Servers the app was predicted to contact, checked against what it actually contacted.</p>
+              <details class="re-findings-details" id="dynNetworkDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="dynNetworkCount"></span></summary>
+                <div class="re-findings-list" id="dynNetworkList"></div>
+              </details>
             </div>
             <div class="re-findings-section">
-              <h5>📦 DexClassLoader Payload — Resolved vs. Executed</h5>
-              <div class="re-findings-list" id="dynDclList"><span class="re-empty">None found</span></div>
+              <h5>DexClassLoader Payload — Resolved vs. Executed</h5>
+              <p class="re-section-desc">Extra code the app was predicted to load in later, checked against what it actually loaded.</p>
+              <details class="re-findings-details" id="dynDclDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="dynDclCount"></span></summary>
+                <div class="re-findings-list" id="dynDclList"></div>
+              </details>
             </div>
             <div class="re-findings-section">
-              <h5>🧬 Native Library — Resolved vs. Loaded</h5>
-              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
-                Static analysis resolves System.loadLibrary() call sites to their .so file and JNI
-                symbols but can never confirm the call actually ran — this is that confirmation.
-              </p>
-              <div class="re-findings-list" id="dynNativeList"><span class="re-empty">None found</span></div>
+              <h5>Native Library — Resolved vs. Loaded</h5>
+              <p class="re-section-desc">Native (.so) code libraries the app was predicted to use, checked against what actually loaded.</p>
+              <details class="re-findings-details" id="dynNativeDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="dynNativeCount"></span></summary>
+                <div class="re-findings-list" id="dynNativeList"></div>
+              </details>
             </div>
             <div class="re-findings-section">
-              <h5>📵 Incoming SMS Interception (OTP Theft)</h5>
-              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
-                A simulated inbound SMS is injected partway through the capture window (an AVD has
-                no real carrier) — this is whether the app's own code parsed its sender, the actual
-                OTP-theft mechanism this project targets, not just declaring the RECEIVE_SMS permission.
-              </p>
-              <div class="re-findings-list" id="dynSmsInterceptList"><span class="re-empty">None found</span></div>
+              <h5>Incoming SMS Interception (OTP Theft)</h5>
+              <p class="re-section-desc">A fake OTP text is sent during the test — this checks whether the app actually reads it, the real theft mechanism, not just whether it has SMS permission.</p>
+              <details class="re-findings-details" id="dynSmsInterceptDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="dynSmsInterceptCount"></span></summary>
+                <div class="re-findings-list" id="dynSmsInterceptList"></div>
+              </details>
             </div>
             <div class="re-findings-section">
-              <h5>🪟 Overlay Attack Detection</h5>
-              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
-                A WindowManager.addView call with a system/overlay-class window type — the mechanism
-                behind a fake login screen drawn over a real banking app. Mechanically verified
-                installing correctly on this project's AVD image; not yet independently confirmed
-                firing against a real overlay attack, so treat "none found" here as weaker evidence
-                than the other rows on this tab.
-              </p>
-              <div class="re-findings-list" id="dynOverlayList"><span class="re-empty">None found</span></div>
+              <h5>Overlay Attack Detection</h5>
+              <p class="re-section-desc">Whether the app draws a fake screen over another app — the trick behind fake login pages layered on top of real banking apps.</p>
+              <details class="re-findings-details" id="dynOverlayDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="dynOverlayCount"></span></summary>
+                <div class="re-findings-list" id="dynOverlayList"></div>
+              </details>
             </div>
             <div class="re-findings-section">
-              <h5>📋 Other Runtime Signals</h5>
-              <div class="re-findings-list" id="dynOtherList"><span class="re-empty">None found</span></div>
+              <h5>Other Runtime Signals</h5>
+              <p class="re-section-desc">Other suspicious actions caught live — sending SMS, using accessibility services, or running encryption.</p>
+              <details class="re-findings-details" id="dynOtherDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="dynOtherCount"></span></summary>
+                <div class="re-findings-list" id="dynOtherList"></div>
+              </details>
             </div>
             <div class="re-findings-section">
-              <h5>🔍 Sensitive Data Access</h5>
-              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
-                Contacts/call-log/SMS-history reads via ContentResolver, and clipboard reads (the
-                mechanism behind crypto-clipper malware swapping a copied wallet address).
-              </p>
-              <div class="re-findings-list" id="dynSensitiveDataList"><span class="re-empty">None found</span></div>
+              <h5>Sensitive Data Access</h5>
+              <p class="re-section-desc">Whether the app read contacts, call logs, texts, or the clipboard while running.</p>
+              <details class="re-findings-details" id="dynSensitiveDataDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="dynSensitiveDataCount"></span></summary>
+                <div class="re-findings-list" id="dynSensitiveDataList"></div>
+              </details>
             </div>
             <div class="re-findings-section">
-              <h5>🎯 Indicators of Compromise Observed at Runtime</h5>
-              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
-                Standalone findings, not diffed against a static prediction — reported the way any
-                dynamic-analysis sandbox would: URLs actually requested, files the app wrote to its
-                own sandbox, and shell commands it executed.
-              </p>
-              <div class="re-findings-list" id="dynIocList"><span class="re-empty">None found</span></div>
+              <h5>Indicators of Compromise Observed at Runtime</h5>
+              <p class="re-section-desc">Suspicious activity caught directly — web addresses contacted, files created, or commands run.</p>
+              <details class="re-findings-details" id="dynIocDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="dynIocCount"></span></summary>
+                <div class="re-findings-list" id="dynIocList"></div>
+              </details>
             </div>
             <div class="re-findings-section">
-              <h5>🕐 Event Timeline</h5>
-              <p class="graph-subtitle" style="margin-bottom:0.5rem;">
-                Every event above, in the order it actually happened (ms since the hooks attached) —
-                lets you see, e.g., whether a C2 contact happened immediately after launch or only
-                after the simulated SMS/tap stimuli partway through the window.
-              </p>
-              <div class="re-findings-list" id="dynTimelineList"><span class="re-empty">None found</span></div>
+              <h5>Event Timeline</h5>
+              <p class="re-section-desc">Everything above, in the order it actually happened.</p>
+              <details class="re-findings-details" id="dynTimelineDetails">
+                <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="dynTimelineCount"></span></summary>
+                <div class="re-findings-list" id="dynTimelineList"></div>
+              </details>
             </div>
             <div class="re-findings-section hidden" id="dynCrashLogcatSection">
-              <h5>💥 Crash Diagnostics</h5>
+              <h5>Crash Diagnostics</h5>
               <p class="graph-subtitle" style="margin-bottom:0.5rem;">
                 The target process exited mid-capture — possible anti-analysis self-termination, but
                 could also be an unrelated crash. Last ~50 logcat lines at the moment it happened, so
@@ -642,6 +711,9 @@
               MITRE techniques and/or C2 infrastructure with this one — a live graph query,
               not a static rule. An empty section means nothing cached so far overlaps.
             </p>
+            <div class="related-samples-header-row hidden" id="relatedSamplesHeaderRow">
+              <span></span><span class="related-samples-col-label">Risk Score</span>
+            </div>
             <div class="related-samples-list" id="relatedSamplesList"><span class="re-empty">None found</span></div>
           </div>
 
@@ -654,8 +726,8 @@
                   certificate this instance has ever seen — not just the current report.</p>
               </div>
               <div class="graph-controls">
-                <button class="btn btn-sm btn-control" onclick="loadThreatLandscape()">🔄 Refresh</button>
-                <button class="btn btn-sm btn-control" onclick="relayoutLandscape('cose')">🎯 Re-cluster</button>
+                <button class="btn btn-sm btn-control" onclick="loadThreatLandscape()">Refresh</button>
+                <button class="btn btn-sm btn-control" onclick="relayoutLandscape('cose')">Re-cluster</button>
               </div>
             </div>
             <div class="graph-canvas-container" id="landscapeGraphContainer" style="margin-top:1rem;">

@@ -14,7 +14,23 @@ document.addEventListener('DOMContentLoaded', () => {
   if (confirmedBtn) confirmedBtn.addEventListener('click', () => submitFeedback('confirmed'));
   const falsePositiveBtn = document.getElementById('btnFeedbackFalsePositive');
   if (falsePositiveBtn) falsePositiveBtn.addEventListener('click', () => submitFeedback('false_positive'));
+  const copyHashBtn = document.getElementById('btnCopyHash');
+  if (copyHashBtn) copyHashBtn.addEventListener('click', copyTargetHash);
 });
+
+function copyTargetHash() {
+  const hash = currentReportData && currentReportData.manifest && currentReportData.manifest.sha256;
+  const btn = document.getElementById('btnCopyHash');
+  if (!hash || !btn) return;
+  navigator.clipboard.writeText(hash).then(() => {
+    btn.classList.add('copied');
+    setTimeout(() => btn.classList.remove('copied'), 1200);
+  }).catch(() => {
+    // Clipboard permission denied/unavailable (e.g. an insecure context, or a
+    // browser policy blocking it) — nothing useful to recover into, but this
+    // must not surface as an unhandled rejection.
+  });
+}
 
 // Analyst feedback — records a correction against the currently-rendered
 // report's sha256 (see POST /analyses/{sha256}/feedback). This only logs
@@ -93,12 +109,12 @@ async function refreshHealth() {
 
     const g = h.neo4j || {};
     if (!g.reachable) {
-      setPill('pillGraph', 'pillGraphText', 'down', 'Knowledge Graph: offline', g.detail);
+      setPill('pillGraph', 'pillGraphText', 'down', 'Correlation Engine: offline', g.detail);
     } else if (!g.grounded_techniques) {
-      setPill('pillGraph', 'pillGraphText', 'warn', 'Knowledge Graph: not loaded', g.detail);
+      setPill('pillGraph', 'pillGraphText', 'warn', 'Correlation Engine: not loaded', g.detail);
     } else {
       setPill('pillGraph', 'pillGraphText', 'ok',
-              `Knowledge Graph: ${g.cached_samples} samples`, g.detail);
+              `Correlation Engine: ${g.cached_samples} samples`, g.detail);
     }
 
     const l = h.ollama || {};
@@ -112,7 +128,7 @@ async function refreshHealth() {
   } catch (err) {
     // The API itself is unreachable, so neither dependency is knowable. Say that
     // rather than blaming a dependency we did not manage to ask about.
-    setPill('pillGraph', 'pillGraphText', 'unknown', 'Knowledge Graph: unknown', String(err));
+    setPill('pillGraph', 'pillGraphText', 'unknown', 'Correlation Engine: unknown', String(err));
     setPill('pillLlm', 'pillLlmText', 'unknown', 'API unreachable', String(err));
   } finally {
     setTimeout(refreshHealth, HEALTH_POLL_MS);
@@ -239,21 +255,20 @@ async function loadModelAccuracy() {
     return;
   }
 
-  statusEl.textContent = `${data.trained_labels} labels &middot; ${data.n_samples} training rows &middot; ${honest.n_family_groups} malware families`
-    .replace('&middot;', '·');
+  statusEl.textContent = `${data.trained_labels} labels · ${data.n_samples} training rows · ${honest.n_family_groups} malware families`;
 
   const rows = [
-    ['micro_f1', 'micro-F1'],
-    ['jaccard_samples', 'Jaccard (per-sample)'],
-    ['macro_f1', 'macro-F1'],
-    ['hamming_loss', 'Hamming loss'],
+    ['micro_f1', 'micro-F1', 'Overall accuracy across every technique combined — correct calls out of all calls made.'],
+    ['jaccard_samples', 'Jaccard (per-sample)', "How closely the model's predicted technique set matches the true set, averaged per sample."],
+    ['macro_f1', 'macro-F1', 'Accuracy averaged evenly across techniques, so a rare technique counts as much as a common one.'],
+    ['hamming_loss', 'Hamming loss', 'Share of individual technique predictions that were wrong — lower is better.'],
   ];
 
   tableEl.innerHTML = `
-    <div class="model-accuracy-row" style="font-weight:600; color:var(--text-muted); font-size:0.72rem;">
-      <span></span><span>Stratified (leaky)</span><span>Family-held-out (honest)</span><span></span>
+    <div class="model-accuracy-row model-accuracy-header-row">
+      <span></span><span class="metric-strat">Stratified (leaky)</span><span class="metric-honest">Family-held-out (honest)</span><span></span>
     </div>
-    ${rows.map(([key, label]) => {
+    ${rows.map(([key, label, meaning]) => {
       const s = strat[key];
       const h = honest[key];
       if (s === undefined || h === undefined) return '';
@@ -262,15 +277,15 @@ async function loadModelAccuracy() {
       const worse = lowerIsBetter ? delta > 0 : delta < 0;
       return `
         <div class="model-accuracy-row">
-          <span class="metric-name">${esc(label)}</span>
+          <span class="metric-name" title="${esc(meaning)}">${esc(label)}</span>
           <span class="metric-strat">${s.toFixed(3)}</span>
           <span class="metric-honest">${h.toFixed(3)}</span>
           <span class="metric-delta">${worse ? '↓' : ''} ${worse ? Math.abs(delta).toFixed(3) : ''}</span>
         </div>`;
     }).join('')}
     <div class="model-accuracy-legend">
-      <span>${honest.n_splits}-fold GroupKFold, whole families held out per fold</span>
-      <span>quote the honest column</span>
+      <span>${honest.n_splits}-fold cross-validation, whole malware families held out each round</span>
+      <span>Use the "honest" column when citing accuracy — it's the only one tested on unseen families</span>
     </div>
   `;
 }
@@ -371,17 +386,66 @@ function handleFileSelected(file) {
 // current server carries its own, so this rarely matters in practice.
 const PIPELINE_PHASE_COUNT = 11;
 
+// Rotating "about the app" callouts shown on the progress screen — pure
+// wait-filler, not tied to the real pipeline phase. Each one describes
+// something the pipeline actually does or a capability that sets it apart,
+// grounded in the real components (see PHASES.md / README.md).
+const PROGRESS_TIPS = [
+  "Every sample's SHA-256 hash and signing certificate are checked against known threat intel before a single instruction is analyzed.",
+  "Control-flow graphs are parsed into behavioral subgraphs — the same technique used here to detect control-flow flattening obfuscation.",
+  "Suspicious samples are launched on a real Android Virtual Device with Frida hooks intercepting SMS, overlay, and native library calls live.",
+  "Every verdict is mapped to the MITRE ATT&CK Mobile framework — real adversary techniques, not just a risk number.",
+  "The AI narrative is grounded in retrieved graph facts, then checked after generation to catch anything the model invented.",
+  "Reflectively-loaded DEX payloads and dynamically resolved API calls are traced through register-constant propagation to see past basic obfuscation.",
+  "Every analyzed sample joins a live Neo4j knowledge graph, so a new upload can be instantly correlated against known malware families and C2 infrastructure.",
+  "App icons and display names are compared against known banking and UPI brands to catch impersonation before the payload even runs.",
+  "The risk model is validated on malware families it has never seen — so the accuracy numbers reflect real unseen threats, not memorized ones.",
+  "A finding only counts as CONFIRMED once static and dynamic analysis agree — a resolved crypto call has to actually execute at runtime, not just exist in the code.",
+  "YARA rules and signature matching run alongside the graph-based pipeline, so known threats surface instantly while zero-days get the full analysis.",
+  "WebView JavaScript bridges are inventoried automatically — a common attack surface where native app methods get exposed to untrusted web content.",
+  "The correlation graph never forgets: a fresh upload can surface earlier samples that reused the same signing certificate or C2 infrastructure.",
+  "From APK to a MITRE-mapped, evidence-grounded verdict — the full pipeline runs in minutes, not the hours a manual reverse-engineering pass would take.",
+];
+
+let _tipInterval = null;
+
+function startProgressTips() {
+  const el = document.getElementById('progressTipText');
+  if (!el) return;
+  stopProgressTips();
+
+  let idx = -1;
+  const showNext = () => {
+    idx = (idx + 1) % PROGRESS_TIPS.length;
+    el.classList.remove('visible');
+    setTimeout(() => {
+      el.textContent = PROGRESS_TIPS[idx];
+      el.classList.add('visible');
+    }, 300);
+  };
+
+  showNext();
+  _tipInterval = setInterval(showNext, 8000);
+}
+
+function stopProgressTips() {
+  if (_tipInterval) {
+    clearInterval(_tipInterval);
+    _tipInterval = null;
+  }
+}
+
 async function uploadAndAnalyze(file) {
   document.getElementById('uploadSection').classList.add('hidden');
   document.getElementById('progressSection').classList.remove('hidden');
   document.getElementById('resultsSection').classList.add('hidden');
   resetPipelineSteps();
+  startProgressTips();
 
   const formData = new FormData();
   formData.append("file", file);
 
-  const enableDynamic = document.getElementById('enableDynamicCheckbox')?.checked || false;
-  const startUrl = enableDynamic ? '/analyze/start?enable_dynamic=true' : '/analyze/start';
+  const startUrl = '/analyze/start?enable_dynamic=true';
 
   try {
     const startResp = await fetch(startUrl, {
@@ -399,6 +463,7 @@ async function uploadAndAnalyze(file) {
 }
 
 function handleAnalysisFailure(message) {
+  stopProgressTips();
   alert(message);
   document.getElementById('uploadSection').classList.remove('hidden');
   document.getElementById('progressSection').classList.add('hidden');
@@ -535,6 +600,7 @@ function applyProgressEvent(event) {
 
 function renderResults(data) {
   currentReportData = data;
+  stopProgressTips();
   document.getElementById('progressSection').classList.add('hidden');
   document.getElementById('resultsSection').classList.remove('hidden');
 
@@ -606,8 +672,14 @@ function renderResults(data) {
   document.getElementById('secondaryDexCount').textContent = `${manifest.secondary_dex_count || 0} payload assets`;
   const certAnomalies = manifest.cert_anomalies || [];
   const certEl = document.getElementById('certAnomalies');
-  certEl.textContent = certAnomalies.length > 0 ? certAnomalies.join(', ') : 'None detected';
-  certEl.className = certAnomalies.length > 0 ? 'spec-value warning' : 'spec-value';
+  const certText = certAnomalies.length > 0 ? certAnomalies.join(', ') : 'None detected';
+  certEl.textContent = certText;
+  // These come straight from the cert's raw subject string and can run to a
+  // full DN (CN/OU/O/L/ST) — truncate to one line like the SHA-256 hash above,
+  // with the full text still reachable on hover, instead of letting a long
+  // anomaly wrap into a multi-line paragraph that blows out the grid row.
+  certEl.title = certAnomalies.length > 0 ? certText : '';
+  certEl.className = certAnomalies.length > 0 ? 'spec-value warning truncate' : 'spec-value';
 
   // VirusTotal status — signature_yara is null entirely on a cache hit (Phase
   // 1.5 is skipped, see AnalysisManifest.signature_yara's docstring), which is
@@ -625,6 +697,20 @@ function renderResults(data) {
   } else {
     vtEl.textContent = 'No VirusTotal detections';
     vtEl.className = 'spec-value';
+  }
+
+  // A VT match is only actionable to click through on if VT was actually
+  // queried and flagged something — not for a cache hit or a clean result,
+  // where there's no VT analysis page worth sending an analyst to.
+  const vtLink = document.getElementById('linkVtReport');
+  if (vtLink) {
+    if (vtMatch && manifest.sha256) {
+      vtLink.href = `https://www.virustotal.com/gui/file/${encodeURIComponent(manifest.sha256)}`;
+      vtLink.classList.remove('hidden');
+    } else {
+      vtLink.classList.add('hidden');
+      vtLink.href = '#';
+    }
   }
 
   // 0. Grounding — did the narrative cite anything it wasn't given?
@@ -646,7 +732,7 @@ function renderResults(data) {
   if (sigMatches.length > 0) {
     const sigHeader = document.createElement('h5');
     sigHeader.className = 'yara-section-header';
-    sigHeader.textContent = `🔍 Signature Matches (${sigMatches.length})`;
+    sigHeader.textContent = `Signature Matches (${sigMatches.length})`;
     yaraContainer.appendChild(sigHeader);
 
     sigMatches.forEach(sig => {
@@ -673,7 +759,7 @@ function renderResults(data) {
   if (yaraMatches.length > 0) {
     const yaraHeader = document.createElement('h5');
     yaraHeader.className = 'yara-section-header';
-    yaraHeader.textContent = `⚡ YARA Rule Matches (${yaraMatches.length})`;
+    yaraHeader.textContent = `YARA Rule Matches (${yaraMatches.length})`;
     yaraContainer.appendChild(yaraHeader);
 
     yaraMatches.forEach(rule => {
@@ -746,7 +832,7 @@ function renderResults(data) {
   if (obf.coverage_note) {
     const noteEl = document.createElement('div');
     noteEl.className = 'coverage-note';
-    noteEl.innerHTML = `<span class="note-icon">📋</span> ${esc(obf.coverage_note)}`;
+    noteEl.textContent = obf.coverage_note;
     outliersContainer.appendChild(noteEl);
   }
 
@@ -785,13 +871,12 @@ function renderResults(data) {
     warningDiv.className = 'packed-manifest-warning';
     if (isPackedManifest) {
       warningDiv.innerHTML = `
-        <div class="warning-icon">⚠️</div>
         <h5>AndroidManifest.xml is Packed / Corrupted</h5>
-        <p>This APK uses <strong>manifest obfuscation</strong> — the AndroidManifest.xml has deliberately corrupted headers, 
+        <p>This APK uses <strong>manifest obfuscation</strong> — the AndroidManifest.xml has deliberately corrupted headers,
         preventing static permission extraction. This is a common <strong>evasion technique</strong> used by banking trojans and RATs.</p>
-        <p class="warning-detail">The Android runtime can still parse the manifest at install time, but static analyzers (Androguard, aapt2) cannot. 
+        <p class="warning-detail">The Android runtime can still parse the manifest at install time, but static analyzers (Androguard, aapt2) cannot.
         Permissions listed in the AI narrative are inferred from <strong>behavioral analysis</strong> (forensic anchors, DEX string patterns) rather than declared manifest entries.</p>
-        <div class="warning-badge">🔴 This is itself a strong malware indicator</div>
+        <div class="warning-badge">This is itself a strong malware indicator</div>
       `;
     } else {
       warningDiv.innerHTML = '<p class="text-muted">No permissions declared in this APK manifest.</p>';
@@ -804,13 +889,14 @@ function renderResults(data) {
       pEl.className = `perm-item ${isDangerous ? 'perm-danger' : ''}`;
       // Show short permission name
       const shortPerm = perm.replace('android.permission.', '');
-      pEl.innerHTML = `<span class="perm-name">${esc(shortPerm)}</span>${isDangerous ? '<span class="perm-badge">⚠ DANGEROUS</span>' : ''}`;
+      pEl.innerHTML = `<span class="perm-name">${esc(shortPerm)}</span>${isDangerous ? '<span class="perm-badge">DANGEROUS</span>' : ''}`;
       permContainer.appendChild(pEl);
     });
   }
 
   // 5. Risk Score Breakdown (use real API values)
   renderRiskBreakdown(manifest, risk);
+  renderWhyScore(risk);
 }
 
 // Click-to-reveal evidence: what specifically produced this component's number.
@@ -879,12 +965,12 @@ function _componentEvidence(key, manifest, risk) {
   }
 }
 
-function renderRiskBreakdown(manifest, risk) {
-  const breakdownContainer = document.getElementById('riskBreakdownList');
-  breakdownContainer.innerHTML = '';
-  // Caps must match the weights in app/reports/scoring.py's compute_risk_score
-  // (classifier*25, permission*20, ttp*15, anchor*15, obfuscation*15, reputation*5, ioc*5 — sums to 100).
-  const components = [
+// Caps must match the weights in app/reports/scoring.py's compute_risk_score
+// (classifier*25, permission*20, ttp*15, anchor*15, obfuscation*15, reputation*5, ioc*5 — sums to 100).
+// Shared by the full Risk Scoring tab breakdown and the "Why This Score" preview
+// on the overview card, so the two never drift out of sync.
+function _riskComponents(risk) {
+  return [
     { key: 'permission_api', name: 'Permission & API Analysis', score: risk.permission_api_component, max: 20 },
     { key: 'forensic_anchor', name: 'Forensic Anchor Matching', score: risk.forensic_anchor_component, max: 15 },
     { key: 'obfuscation', name: 'Obfuscation Signals', score: risk.obfuscation_component, max: 15 },
@@ -893,6 +979,42 @@ function renderRiskBreakdown(manifest, risk) {
     { key: 'ttp_severity', name: 'TTP Severity', score: risk.ttp_severity_component, max: 15 },
     { key: 'classifier_confidence', name: 'Classifier Confidence', score: risk.classifier_confidence_component, max: 25 },
   ];
+}
+
+function renderWhyScore(risk) {
+  const section = document.getElementById('whyScoreSection');
+  const list = document.getElementById('whyScoreList');
+  if (!section || !list) return;
+
+  // Top 3 by actual points contributed, not by percent-of-max — a maxed-out
+  // 5-point component shouldn't outrank a 20-point component sitting at 80%.
+  // Zero/null components are dropped so a mostly-unscored historical record
+  // doesn't surface three meaningless zero-length bars.
+  const top = _riskComponents(risk)
+    .filter(c => typeof c.score === 'number' && c.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 3);
+
+  if (top.length === 0) {
+    section.classList.add('hidden');
+    return;
+  }
+  section.classList.remove('hidden');
+  list.innerHTML = top.map(c => {
+    const pct = Math.min(100, (c.score / c.max) * 100);
+    return `
+      <div class="why-score-row">
+        <span class="why-score-label">${esc(c.name)}</span>
+        <div class="why-score-bar-track"><div class="why-score-bar-fill" style="width:${pct}%;"></div></div>
+        <span class="why-score-pts">${c.score.toFixed(1)} / ${c.max}</span>
+      </div>`;
+  }).join('');
+}
+
+function renderRiskBreakdown(manifest, risk) {
+  const breakdownContainer = document.getElementById('riskBreakdownList');
+  breakdownContainer.innerHTML = '';
+  const components = _riskComponents(risk);
 
   components.forEach(c => {
     const scoreVal = c.score !== null && c.score !== undefined ? c.score : null;
@@ -950,33 +1072,58 @@ function renderRiskBreakdown(manifest, risk) {
   });
 }
 
+// A <details>/<summary> findings list — id-prefixed as `${prefix}Details` /
+// `${prefix}Count` / `${prefix}List` — collapses behind a "Show findings"
+// toggle once it holds more than `threshold` entries. Below that (including
+// zero, where the list holds a single .re-empty note) it's pinned open with
+// the toggle chrome hidden entirely: not worth a click for 1-4 lines.
+function finalizeFindingsAccordion(prefix, threshold = 4) {
+  const details = document.getElementById(`${prefix}Details`);
+  const list = document.getElementById(`${prefix}List`);
+  const countEl = document.getElementById(`${prefix}Count`);
+  if (!details || !list) return;
+
+  const n = list.querySelectorAll('.re-finding-item').length;
+  if (n > threshold) {
+    details.open = false;
+    details.classList.remove('no-toggle');
+    if (countEl) countEl.textContent = n;
+  } else {
+    details.open = true;
+    details.classList.add('no-toggle');
+    if (countEl) countEl.textContent = '';
+  }
+}
+
 function renderReFindings(manifest) {
   const sections = [
-    { listId: 'reCryptoList', items: manifest.resolved_crypto_configs || [] },
-    { listId: 'reDclList', items: manifest.resolved_dcl_targets || [] },
-    { listId: 'reWebviewList', items: manifest.resolved_webview_bridges || [] },
-    { listId: 'reNativeList', items: manifest.resolved_native_bridges || [] },
+    { key: 'reCrypto', items: manifest.resolved_crypto_configs || [] },
+    { key: 'reDcl', items: manifest.resolved_dcl_targets || [] },
+    { key: 'reWebview', items: manifest.resolved_webview_bridges || [] },
+    { key: 'reNative', items: manifest.resolved_native_bridges || [] },
   ];
 
   let total = 0;
-  sections.forEach(({ listId, items }) => {
-    const container = document.getElementById(listId);
+  sections.forEach(({ key, items }) => {
+    const container = document.getElementById(`${key}List`);
     if (!container) return;
     container.innerHTML = '';
     total += items.length;
+
     if (items.length === 0) {
       container.innerHTML = '<span class="re-empty">None found</span>';
-      return;
+    } else {
+      items.forEach(finding => {
+        const item = document.createElement('div');
+        item.className = 're-finding-item';
+        // WEAK: flags a real risk — highlight it distinctly rather than blending
+        // it into the same neutral text as an ordinary resolved finding.
+        item.classList.toggle('re-finding-weak', finding.includes('WEAK:'));
+        item.textContent = finding;
+        container.appendChild(item);
+      });
     }
-    items.forEach(finding => {
-      const item = document.createElement('div');
-      item.className = 're-finding-item';
-      // WEAK: flags a real risk — highlight it distinctly rather than blending
-      // it into the same neutral text as an ordinary resolved finding.
-      item.classList.toggle('re-finding-weak', finding.includes('WEAK:'));
-      item.textContent = finding;
-      container.appendChild(item);
-    });
+    finalizeFindingsAccordion(key);
   });
 
   const countEl = document.getElementById('reFindingsCount');
@@ -1021,7 +1168,11 @@ function renderDynamicVerification(manifest) {
   if (tabBtn) tabBtn.classList.remove('hidden');
 
   setText('dynDuration', dyn.ran ? `${dyn.duration_s}s` : 'did not complete');
-  setText('dynCoverage', dyn.coverage_note || '—');
+  const coverageEl = document.getElementById('dynCoverage');
+  if (coverageEl) {
+    coverageEl.textContent = dyn.coverage_note || '—';
+    coverageEl.title = dyn.coverage_note || '';
+  }
 
   // Runtime Activity Summary — always populated when ran=true, regardless of
   // whether anything matched a static prediction. Without this, a run where
@@ -1064,13 +1215,11 @@ function renderDynamicVerification(manifest) {
   }
 
   // Live screenshots — hidden entirely unless at least one capture succeeded.
+  // Every shot (event-triggered, reaction, final) renders as one equal-width
+  // grid tile rather than separate flex rows, so 2 shots or 5 shots both read
+  // as a balanced row instead of a left-aligned, unevenly-sized cluster.
   const screenshotSection = document.getElementById('dynScreenshotSection');
-  const screenshotImg = document.getElementById('dynScreenshot');
-  const screenshotFinalWrap = document.getElementById('dynScreenshotFinalWrap');
-  const screenshotReactionImg = document.getElementById('dynScreenshotReaction');
-  const screenshotReactionWrap = document.getElementById('dynScreenshotReactionWrap');
-  const eventScreenshotsWrap = document.getElementById('dynEventScreenshotsWrap');
-  const eventScreenshotsList = document.getElementById('dynEventScreenshots');
+  const screenshotGrid = document.getElementById('dynScreenshotGrid');
   const EVENT_SCREENSHOT_LABELS = {
     sms_intercepted: 'SMS Intercepted',
     overlay_window: 'Overlay Drawn',
@@ -1079,48 +1228,42 @@ function renderDynamicVerification(manifest) {
     sms_send: 'SMS Sent',
     command_executed: 'OS Command Executed',
   };
-  if (screenshotSection && screenshotImg && screenshotReactionImg) {
-    const hasReaction = !!dyn.screenshot_reaction_url;
-    const hasFinal = !!dyn.screenshot_url;
-    const eventShots = dyn.event_screenshots || [];
+  if (screenshotSection && screenshotGrid) {
+    screenshotGrid.innerHTML = '';
     // Cache-bust: the same sha256 can be re-analyzed, producing a new
     // screenshot at the same URL — without this the browser would keep
     // showing a stale cached image from an earlier run.
-    if (hasReaction) {
-      screenshotReactionWrap.classList.remove('hidden');
-      screenshotReactionImg.src = dyn.screenshot_reaction_url + '?t=' + Date.now();
-    } else {
-      screenshotReactionWrap.classList.add('hidden');
-    }
-    if (hasFinal) {
-      screenshotFinalWrap.classList.remove('hidden');
-      screenshotImg.src = dyn.screenshot_url + '?t=' + Date.now();
-    } else {
-      screenshotFinalWrap.classList.add('hidden');
-    }
-    if (eventScreenshotsWrap && eventScreenshotsList) {
-      eventScreenshotsList.innerHTML = '';
-      if (eventShots.length) {
-        eventScreenshotsWrap.classList.remove('hidden');
-        for (const shot of eventShots) {
-          if (!shot.url) continue;
-          const wrap = document.createElement('div');
-          const label = document.createElement('div');
-          label.style.cssText = 'font-size:0.85em; opacity:0.8; margin-bottom:4px;';
-          label.textContent = EVENT_SCREENSHOT_LABELS[shot.kind] || shot.kind;
-          const img = document.createElement('img');
-          img.style.cssText = 'max-width:320px; border-radius:8px; border:1px solid rgba(255,255,255,0.15); display:block;';
-          img.alt = `Live capture taken when ${shot.kind} fired`;
-          img.src = shot.url + '?t=' + Date.now();
-          wrap.appendChild(label);
-          wrap.appendChild(img);
-          eventScreenshotsList.appendChild(wrap);
-        }
-      } else {
-        eventScreenshotsWrap.classList.add('hidden');
-      }
-    }
-    screenshotSection.classList.toggle('hidden', !hasReaction && !hasFinal && !eventShots.length);
+    const bust = '?t=' + Date.now();
+    const tiles = [
+      ...(dyn.event_screenshots || [])
+        .filter(shot => shot.url)
+        .map(shot => ({
+          label: EVENT_SCREENSHOT_LABELS[shot.kind] || shot.kind,
+          alt: `Live capture taken when ${shot.kind} fired`,
+          url: shot.url,
+        })),
+      ...(dyn.screenshot_reaction_url
+        ? [{ label: 'Reaction — after SMS/tap stimuli', alt: "Live capture of the app's screen shortly after the SMS/tap stimuli fired", url: dyn.screenshot_reaction_url }]
+        : []),
+      ...(dyn.screenshot_url
+        ? [{ label: 'Final — end of capture window', alt: "Live capture of the app's screen at the end of the dynamic-verification window", url: dyn.screenshot_url }]
+        : []),
+    ];
+    tiles.forEach(tile => {
+      const item = document.createElement('div');
+      item.className = 'dyn-screenshot-item';
+      const label = document.createElement('div');
+      label.className = 'dyn-screenshot-label';
+      label.textContent = tile.label;
+      const img = document.createElement('img');
+      img.className = 'dyn-screenshot-img';
+      img.alt = tile.alt;
+      img.src = tile.url + bust;
+      item.appendChild(label);
+      item.appendChild(img);
+      screenshotGrid.appendChild(item);
+    });
+    screenshotSection.classList.toggle('hidden', tiles.length === 0);
   }
 
   const networkList = document.getElementById('dynNetworkList');
@@ -1150,6 +1293,7 @@ function renderDynamicVerification(manifest) {
       networkList.appendChild(item);
     });
   }
+  finalizeFindingsAccordion('dynNetwork');
 
   dclList.innerHTML = '';
   if (dyn.dcl_payload_executed) {
@@ -1166,6 +1310,7 @@ function renderDynamicVerification(manifest) {
   } else {
     dclList.appendChild(emptyNote('No dynamic class-loading observed during the capture window.'));
   }
+  finalizeFindingsAccordion('dynDcl');
 
   if (nativeList) {
     nativeList.innerHTML = '';
@@ -1183,6 +1328,7 @@ function renderDynamicVerification(manifest) {
     } else {
       nativeList.appendChild(emptyNote('No native library loading observed during the capture window.'));
     }
+    finalizeFindingsAccordion('dynNative');
   }
 
   otherList.innerHTML = '';
@@ -1212,6 +1358,7 @@ function renderDynamicVerification(manifest) {
       otherList.appendChild(item);
     });
   }
+  finalizeFindingsAccordion('dynOther');
 
   const iocList = document.getElementById('dynIocList');
   if (iocList) {
@@ -1231,6 +1378,7 @@ function renderDynamicVerification(manifest) {
         iocList.appendChild(item);
       });
     }
+    finalizeFindingsAccordion('dynIoc');
   }
 
   const smsInterceptList = document.getElementById('dynSmsInterceptList');
@@ -1247,6 +1395,7 @@ function renderDynamicVerification(manifest) {
         smsInterceptList.appendChild(item);
       });
     }
+    finalizeFindingsAccordion('dynSmsIntercept');
   }
 
   const overlayList = document.getElementById('dynOverlayList');
@@ -1263,6 +1412,7 @@ function renderDynamicVerification(manifest) {
         overlayList.appendChild(item);
       });
     }
+    finalizeFindingsAccordion('dynOverlay');
   }
 
   const sensitiveList = document.getElementById('dynSensitiveDataList');
@@ -1282,6 +1432,7 @@ function renderDynamicVerification(manifest) {
         sensitiveList.appendChild(item);
       });
     }
+    finalizeFindingsAccordion('dynSensitiveData');
   }
 
   const timelineList = document.getElementById('dynTimelineList');
@@ -1299,6 +1450,7 @@ function renderDynamicVerification(manifest) {
         timelineList.appendChild(item);
       });
     }
+    finalizeFindingsAccordion('dynTimeline');
   }
 
   const crashLogcatSection = document.getElementById('dynCrashLogcatSection');
@@ -1392,7 +1544,6 @@ function renderImpersonation(manifest, risk) {
 
   setText('identityLabel', manifest.app_label || 'Not recovered');
   setText('identityIconHash', manifest.icon_phash || 'No raster icon (adaptive/XML)');
-  setText('identityBrandCount', imp ? `${imp.brands_checked} protected brands` : 'Not assessed');
 
   list.innerHTML = '';
   if (!imp) {
@@ -1522,8 +1673,12 @@ function renderMitreMapping(manifest) {
       </div>
       <div class="mitre-item-footer">
         <span class="spec-value code">${pct}% confidence <span class="threshold-label">&middot; threshold ${thresholdPct}%</span></span>
-        ${t.description ? `<p class="mitre-description">${esc(t.description)}</p>` : ''}
       </div>
+      ${t.description ? `
+      <details class="mitre-desc-details">
+        <summary class="mitre-desc-summary">Show technique description</summary>
+        <p class="mitre-description">${esc(t.description)}</p>
+      </details>` : ''}
     `;
     container.appendChild(item);
   });
@@ -1531,6 +1686,7 @@ function renderMitreMapping(manifest) {
 
 function renderRelatedSamples(manifest) {
   const container = document.getElementById('relatedSamplesList');
+  const headerRow = document.getElementById('relatedSamplesHeaderRow');
   if (!container) return;
   container.innerHTML = '';
 
@@ -1540,13 +1696,21 @@ function renderRelatedSamples(manifest) {
 
   if (related.length === 0) {
     container.innerHTML = '<span class="re-empty">No overlapping samples in the graph yet</span>';
+    if (headerRow) headerRow.classList.add('hidden');
     return;
   }
+  // A "Risk Score" column header shown once, above the list, instead of
+  // repeating the words on every single card.
+  if (headerRow) headerRow.classList.remove('hidden');
 
   related.forEach(r => {
     const item = document.createElement('div');
     item.className = 'related-sample-item';
-    const sharedTech = (r.shared_techniques || []).map(t => `<span class="chip">${esc(t)}</span>`).join('');
+    const techCount = (r.shared_techniques || []).length;
+    const c2Count = (r.shared_c2 || []).length;
+    const sharedTech = (r.shared_techniques || [])
+      .map(t => `<span class="chip" title="MITRE ATT&CK technique ${esc(t)} — also predicted for this sample">${esc(t)}</span>`)
+      .join('');
     const confirmedC2 = new Set(r.shared_c2_confirmed || []);
     const sharedC2 = (r.shared_c2 || []).map(c => {
       const isConfirmed = confirmedC2.has(c);
@@ -1555,12 +1719,23 @@ function renderRelatedSamples(manifest) {
         : 'Shared as a static string only — not (yet) dynamically confirmed live on this other sample';
       return `<span class="chip chip-danger" title="${esc(title)}">${isConfirmed ? '✓ ' : ''}${esc(c)}</span>`;
     }).join('');
+
+    // A plain-language reason this sample surfaced at all — the technique/C2
+    // chips below are the evidence, this line is the one-glance takeaway.
+    const reasonParts = [];
+    if (techCount > 0) reasonParts.push(`${techCount} MITRE technique${techCount === 1 ? '' : 's'}`);
+    if (c2Count > 0) reasonParts.push(`${c2Count} C2 indicator${c2Count === 1 ? '' : 's'}`);
+    const reason = reasonParts.length
+      ? `Shares ${reasonParts.join(' and ')} with this sample`
+      : 'Correlated in the graph';
+
     item.innerHTML = `
       <div class="related-sample-header">
         <span class="mitre-name">${esc(r.app_name || r.sha256)}</span>
         ${r.family ? `<span class="mitre-tactic">${esc(r.family)}</span>` : ''}
-        ${r.risk_score !== null && r.risk_score !== undefined ? `<span class="spec-value code" style="margin-left:auto;">score ${Number(r.risk_score).toFixed(1)}</span>` : ''}
+        ${r.risk_score !== null && r.risk_score !== undefined ? `<span class="spec-value code" title="This sample's own overall risk score">${Number(r.risk_score).toFixed(1)}</span>` : ''}
       </div>
+      <div class="related-sample-reason">${esc(reason)}</div>
       ${sharedTech ? `<div class="related-sample-row"><span class="spec-label">Shared techniques:</span> ${sharedTech}</div>` : ''}
       ${sharedC2 ? `<div class="related-sample-row"><span class="spec-label">Shared C2 infrastructure:</span> ${sharedC2}</div>` : ''}
     `;
@@ -1681,14 +1856,18 @@ async function loadThreatLandscape() {
         }
       }
     ],
-    layout: { name: 'cose', animate: false, padding: 30, nodeRepulsion: 8000, idealEdgeLength: 80 }
+    layout: {
+      name: 'cose',
+      animate: false,
+      padding: 30,
+      nodeRepulsion: 18000,
+      idealEdgeLength: 130,
+      componentSpacing: 80,
+    }
   });
 
-  // Tighter initial framing than the default fit — the raw layout leaves a lot
-  // of dead space around a graph this size, which makes it look smaller/emptier
-  // than it is at a glance.
   cyLandscapeInstance.ready(() => {
-    cyLandscapeInstance.fit(undefined, 20);
+    cyLandscapeInstance.fit(undefined, 30);
   });
 
   cyLandscapeInstance.on('tap', 'node', function (evt) {
@@ -1710,9 +1889,14 @@ async function loadThreatLandscape() {
 }
 
 function relayoutLandscape(layoutName) {
-  if (cyLandscapeInstance) {
-    cyLandscapeInstance.layout({ name: layoutName, animate: true, animationDuration: 500, padding: 30 }).run();
+  if (!cyLandscapeInstance) return;
+  const opts = { name: layoutName, animate: true, animationDuration: 500, padding: 30 };
+  if (layoutName === 'cose') {
+    opts.nodeRepulsion = 18000;
+    opts.idealEdgeLength = 130;
+    opts.componentSpacing = 80;
   }
+  cyLandscapeInstance.layout(opts).run();
 }
 
 // Dispatchers drawn without a surrounding subgraph, and outlier chips listed under
@@ -1911,9 +2095,54 @@ function switchTab(tabId, btnEl) {
   }
 }
 
-function copyAiReport() {
-  if (currentReportData && currentReportData.narrative_report) {
-    navigator.clipboard.writeText(currentReportData.narrative_report);
-    alert('AI Threat Narrative Report copied to clipboard!');
+function toggleExportMenu() {
+  const menu = document.getElementById('exportMenuList');
+  const btn = document.getElementById('btnExportToggle');
+  if (!menu || !btn) return;
+  const opening = menu.classList.contains('hidden');
+  menu.classList.toggle('hidden', !opening);
+  btn.setAttribute('aria-expanded', String(opening));
+}
+
+document.addEventListener('click', (e) => {
+  const menuWrap = document.getElementById('exportMenu');
+  const menu = document.getElementById('exportMenuList');
+  if (!menuWrap || !menu || menu.classList.contains('hidden')) return;
+  if (!menuWrap.contains(e.target)) {
+    menu.classList.add('hidden');
+    document.getElementById('btnExportToggle')?.setAttribute('aria-expanded', 'false');
+  }
+});
+
+function _downloadBlob(content, filename, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function exportReport(format) {
+  document.getElementById('exportMenuList')?.classList.add('hidden');
+  document.getElementById('btnExportToggle')?.setAttribute('aria-expanded', 'false');
+
+  if (!currentReportData) return;
+  const sha = (currentReportData.manifest && currentReportData.manifest.sha256) || 'report';
+  const shortSha = sha.slice(0, 12);
+
+  if (format === 'json') {
+    _downloadBlob(JSON.stringify(currentReportData, null, 2), `guardgraph-${shortSha}.json`, 'application/json');
+  } else if (format === 'markdown') {
+    const md = currentReportData.narrative_report || '# No AI narrative available for this report';
+    _downloadBlob(md, `guardgraph-${shortSha}.md`, 'text/markdown');
+  } else if (format === 'pdf') {
+    // No bundled PDF library (this project avoids pulling dependencies from a
+    // CDN) — the browser's own print-to-PDF does the job with zero added
+    // weight. print.css scopes what actually renders on the printed page.
+    window.print();
   }
 }
