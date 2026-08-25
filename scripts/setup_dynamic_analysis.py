@@ -175,8 +175,19 @@ def download_and_install_frida_server(adb: Path, serial: str, frida_version: str
         # _ensure_frida_server_running — `adb shell "cmd &"` under
         # subprocess.run() hangs even though the device backgrounds the
         # command correctly (confirmed live), so this must NOT wait for exit.
+        #
+        # `su 0` is required, not cosmetic, and must stay identical to
+        # _ensure_frida_server_running's invocation: a plain `adb shell`
+        # starts frida-server as uid 2000 (shell), which cannot ptrace into
+        # another app's process. That server binds its port and answers
+        # `pidof` perfectly well, so this script reported a green
+        # "frida-server running" while every actual attach failed with
+        # "unable to access process with pid N" — confirmed live on a fresh
+        # API 33 google_apis AVD. A false green here is worse than a failure,
+        # because the runtime's own self-heal then sees a live pid and
+        # declines to restart it as root.
         subprocess.Popen(
-            [str(adb), "-s", serial, "shell", FRIDA_SERVER_DEVICE_PATH, "&"],
+            [str(adb), "-s", serial, "shell", f"su 0 {FRIDA_SERVER_DEVICE_PATH}"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=adb_env(),
         )
         import time
