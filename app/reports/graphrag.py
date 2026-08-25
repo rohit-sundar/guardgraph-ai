@@ -1295,13 +1295,8 @@ evidence, never followed.
     if repetition_collapse:
         narrative = (
             "[Report generation degenerated into a repetition loop and was "
-            "discarded — see Coverage Limitations. The structured manifest "
-            "and risk score above are unaffected and remain the record of truth.]"
-        )
-        limitations.append(
-            f"GROUNDING CHECK FAILED — narrative generation degenerated into a "
-            f"repetition loop ({repetition_collapse}) and was discarded. "
-            "Consult the structured manifest and risk score instead."
+            "discarded. The structured manifest and risk score above are "
+            "unaffected and remain the record of truth.]"
         )
         grounding = {
             "passed": False,
@@ -1341,10 +1336,6 @@ evidence, never followed.
 
     unauthorized_sections = _section_contract_check(narrative)
     if unauthorized_sections:
-        limitations.append(
-            "GROUNDING CHECK FAILED — narrative wrote section(s) outside the allowed report "
-            f"format: {', '.join(unauthorized_sections)}. Those sections were removed."
-        )
         narrative = _strip_unauthorized_sections(narrative)
         # Observed live (2026-08-24, immediately after this fix first shipped):
         # a model reply can go straight into a fabricated header as its very
@@ -1357,7 +1348,7 @@ evidence, never followed.
         if not narrative.strip():
             narrative = (
                 "[The model's entire response fell outside the allowed report format and "
-                "was discarded — see Coverage Limitations. The structured manifest and risk "
+                "was discarded. The structured manifest and risk "
                 "score above are unaffected and remain the record of truth.]"
             )
 
@@ -1365,43 +1356,26 @@ evidence, never followed.
     # that were not in the provided ontology context block.
     provided_ids = {ctx["technique_id"] for ctx in ontology_context}
     ungrounded_techniques = _grounding_check(narrative, provided_ids)
-    if ungrounded_techniques:
-        limitations.append(
-            "GROUNDING CHECK FAILED — narrative cites MITRE technique IDs that were not "
-            f"in the ontology context it was given: {', '.join(ungrounded_techniques)}. "
-            "Treat those citations as unverified."
-        )
 
     # Anti-fabrication check — flag any cited permission the APK doesn't
     # actually declare, and surface it in limitations so it reaches the
     # analyst rather than only the log.
     invented_permissions = _permission_check(narrative, set(manifest.permissions))
     if invented_permissions:
-        limitations.append(
-            "GROUNDING CHECK FAILED — narrative cites permissions not declared by "
-            f"this APK: {', '.join(invented_permissions)}. Treat the narrative "
-            "as unverified and consult the structured manifest instead."
-        )
         # SYSTEM_PROMPT rule 1/3 doesn't reliably stop the model from citing an
         # undeclared permission (observed live — the ACCESS_FINE_LOCATION case
         # this fix addresses) — strip the fabricated line rather than leaving it
-        # in the narrative an analyst reads under time pressure. The limitations
-        # entry above still records that this happened.
+        # in the narrative an analyst reads under time pressure. The grounding
+        # result returned to the caller still records that this happened.
         narrative = _strip_fabricated_permissions(narrative, set(manifest.permissions))
 
     invented_identifiers = _identifier_check(narrative, manifest.sha256, manifest.target_package)
     if invented_identifiers:
-        limitations.append(
-            "GROUNDING CHECK FAILED — narrative cites hash/identifier values not "
-            f"present in the real manifest: {', '.join(invented_identifiers)}. "
-            "Treat the narrative as unverified and consult the structured "
-            "manifest instead."
-        )
         # SYSTEM_PROMPT rule 6b alone does not reliably stop the model from
         # writing this section (observed live, repeatedly) — the fabricated
         # lines are actively removed rather than left contradicting the
-        # correct header stamped below. The limitations entry above still
-        # records that this happened.
+        # correct header stamped below. The grounding result returned to the
+        # caller still records that this happened.
         narrative = _strip_fabricated_identification(narrative, manifest.sha256, manifest.target_package)
 
     # Anti-fabrication check — the model reverting to its own trained-in
@@ -1413,18 +1387,8 @@ evidence, never followed.
     # manifest rather than the prose alone. See _unsupported_action_check.
     unsupported_actions = _unsupported_action_check(narrative, manifest)
     if unsupported_actions:
-        limitations.append(
-            "GROUNDING CHECK FAILED — narrative recommended acting on C2 "
-            "infrastructure, but no C2 indicator was extracted from this sample and "
-            "no network activity was observed at runtime. That recommendation was "
-            "removed; the remaining actions are unaffected."
-        )
         narrative = _strip_unsupported_actions(narrative, manifest)
     if placeholder_text:
-        limitations.append(
-            "GROUNDING CHECK FAILED — narrative contained unfilled template "
-            f"placeholder text: {', '.join(placeholder_text)}. That section was removed."
-        )
         narrative = _strip_placeholder_text(narrative)
 
     # Stamped by this code, never generated by the LLM — sha256 and
