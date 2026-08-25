@@ -195,6 +195,12 @@ class YaraMatch(BaseModel):
     scan_target: str = "apk"
 
 
+class FeedbackRequest(BaseModel):
+    """Body for POST /analyses/{sha256}/feedback — an analyst's correction."""
+    verdict: str            # free-form label, e.g. "false_positive", "confirmed"
+    note: Optional[str] = None
+
+
 class SignatureYaraResult(BaseModel):
     """Combined result from signature detection and YARA scanning."""
     signature_matches: list[SignatureMatch] = []

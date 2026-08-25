@@ -262,6 +262,68 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
         pass
 
 
+def record_feedback(sha256: str, verdict: str, note: str | None = None) -> bool:
+    """
+    Records an analyst's correction against an already-analysed sample — the
+    first half of an active-learning loop. Does NOT retrain anything itself;
+    scripts/export_feedback_for_training.py is the second half, turning
+    recorded corrections into training-ready rows for samples whose original
+    APK still exists in one of the curated corpora (uploaded APKs are never
+    retained past a single request — see routes.py's tmp_dir cleanup — so a
+    correction on an upload-only sample is recorded here but cannot always
+    be turned back into a feature row; export_feedback_for_training.py says
+    so explicitly rather than silently dropping it).
+
+    `verdict` is the analyst's own label (e.g. "false_positive", "confirmed")
+    — this project makes no assumption about the label vocabulary, it only
+    persists what a human analyst records. Returns False (not found) rather
+    than raising when no Sample node exists for sha256, since feedback can
+    only correct an existing verdict, not create one out of nothing — the
+    caller (the API endpoint) turns that into a 404.
+    """
+    found_in_memory = sha256 in _MEMORY_CACHE
+    if found_in_memory:
+        _MEMORY_CACHE[sha256]["analyst_verdict"] = verdict
+        _MEMORY_CACHE[sha256]["analyst_note"] = note
+
+    query = """
+    MATCH (s:Sample {sha256: $sha256})
+    SET s.analyst_verdict = $verdict,
+        s.analyst_note = $note,
+        s.analyst_feedback_at = timestamp()
+    RETURN s.sha256 AS sha256
+    """
+    try:
+        rows = neo4j_client.run(query, sha256=sha256, verdict=verdict, note=note)
+        found_in_neo4j = bool(rows)
+    except Exception as e:
+        logger.warning(f"[cache] record_feedback: Neo4j write failed for {sha256[:12]}: {e}")
+        found_in_neo4j = False
+
+    return found_in_memory or found_in_neo4j
+
+
+def list_feedback_samples() -> list[dict]:
+    """
+    Every Sample node an analyst has left feedback on — the read side of
+    record_feedback, consumed by scripts/export_feedback_for_training.py.
+    Not paginated: this project's analyst-feedback volume is expected to be
+    small enough (one manual correction at a time) that a full scan is fine;
+    add a LIMIT here if that stops being true.
+    """
+    query = """
+    MATCH (s:Sample)
+    WHERE s.analyst_verdict IS NOT NULL
+    RETURN s.sha256 AS sha256, s.analyst_verdict AS verdict,
+           s.analyst_note AS note, s.package_name AS package_name
+    """
+    try:
+        return neo4j_client.run(query)
+    except Exception as e:
+        logger.warning(f"[cache] list_feedback_samples failed: {e}")
+        return []
+
+
 def list_recent_samples(limit: int = 30) -> list[dict]:
     """
     Summary rows for the Analysis History panel — most-recently-touched first.

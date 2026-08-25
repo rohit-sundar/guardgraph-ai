@@ -34,7 +34,7 @@ from loguru import logger
 
 from app.analysis.ingest import compute_sha256
 from app.analysis.signatures import deterministic_family
-from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape, list_recent_samples
+from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape, list_recent_samples, record_feedback
 from app.graph.ontology import get_technique_context
 from app.ml.classifier import ttp_classifier
 from app.reports.scoring import (
@@ -42,7 +42,7 @@ from app.reports.scoring import (
 )
 from app.core import progress
 from app.core.config import settings
-from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown, SignatureYaraResult
+from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown, SignatureYaraResult, FeedbackRequest
 
 router = APIRouter()
 
@@ -310,6 +310,21 @@ async def get_analysis(sha256: str):
         narrative_report=narrative,
         limitations=limitations,
     )
+
+
+@router.post("/analyses/{sha256}/feedback")
+async def submit_feedback(sha256: str, body: FeedbackRequest):
+    """
+    Records an analyst's correction against an already-analysed sample — the
+    first half of an active-learning loop (see
+    scripts/export_feedback_for_training.py for the second half). Does not
+    retrain anything itself; retraining stays the existing deliberate,
+    manual `python scripts/train_model.py --target ttp` step.
+    """
+    found = record_feedback(sha256, verdict=body.verdict, note=body.note)
+    if not found:
+        raise HTTPException(404, f"No stored analysis for {sha256}.")
+    return {"sha256": sha256, "verdict": body.verdict, "recorded": True}
 
 
 def _analyze_with_fallback(
