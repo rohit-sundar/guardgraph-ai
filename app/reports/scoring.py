@@ -123,7 +123,9 @@ ANCHOR_SATURATION_MASS = 1.5
 # were useless: string-pool entropy tops out at 3.47 against a 7.2 threshold and runs
 # the wrong way (benign 3.28 vs malware 2.78); `flattening_suspected` is an
 # existential over every analysed method and fired on 30/30 sampled clean apps;
-# `unresolved_reflection_targets` is a documented stub pinned at 0;
+# `unresolved_reflection_targets` was a documented stub pinned at 0 WHEN N7 RAN --
+# it has since been implemented, which is exactly how its 0.10 weight came to fire
+# on 88% of clean apps unnoticed (see UNRESOLVED_REFLECTION_WEIGHT);
 # `method_parse_failure_rate` was 0.0 on all 353 then, and on all 616 now. So the
 # component was a constant
 # 6.00/15 for 216 of 220 clean apps and 108 of 133 malware — 39.3% of cap for benign
@@ -147,6 +149,32 @@ CODE_NOT_RECOVERED_WEIGHT = 0.60
 # below it, one declaring 539 activities, 42 services and 49 receivers with 57
 # methods in its DEX.
 MIN_METHODS_PER_DECLARED_COMPONENT = 2.0
+# Measured and reported, NOT scored — the same verdict N7 reached for string
+# entropy and flattening prevalence, for the same reason.
+#
+# This weight was calibrated while `unresolved_reflection_targets` was a stub that
+# always returned 0, and the branch was, in the original comment's words, "wired so
+# that implementing the taint pass turns it on rather than requiring a second change
+# here". tests/test_reflection_resolution.py then replaced that stub with a real
+# resolver — and the weight silently armed itself with nobody re-measuring it.
+#
+# Measured over the 2026-08-25 corpus run (631 scored), the obfuscation component
+# took exactly these values:
+#
+#            0.00      1.50      9.00     10.50
+#   benign   11.8%     88.2%        0%        0%
+#   malware   6.6%     76.9%     11.4%      5.1%
+#
+# 1.50 is this term firing alone, and it fires on 88.2% of CLEAN apps against 76.9%
+# of malware — a near-constant pointing the wrong way, which is precisely what N7
+# deleted three other inputs for. Every bit of real signal in this component lives
+# in the 9.00/10.50 rows, which are CODE_NOT_RECOVERED_WEIGHT and are malware-only.
+#
+# Unresolved reflection is genuinely useful to an ANALYST — "12 reflection call
+# targets not statically resolved" tells them how much of the app was opaque — so
+# it stays on ObfuscationSignal and stays in the coverage note. It just does not
+# move the score. The constant is kept (not deleted) so this reasoning has somewhere
+# to live and the next person does not re-add the branch.
 UNRESOLVED_REFLECTION_WEIGHT = 0.10
 # Same magnitude as CODE_NOT_RECOVERED_WEIGHT — both represent the analyser
 # being structurally denied the evidence it needs, not a measured prevalence
@@ -798,11 +826,8 @@ def obfuscation_component(
     if no_code_analysed(obfuscation):
         score += TOTAL_METHOD_PARSE_FAILURE_WEIGHT
 
-    # Reflection targets that constant propagation could not resolve. Still a stub in
-    # obfuscation.count_reflection_calls (always 0); wired so that implementing the
-    # taint pass turns it on rather than requiring a second change here.
-    if obfuscation.unresolved_reflection_targets > 0:
-        score += UNRESOLVED_REFLECTION_WEIGHT
+    # Unresolved reflection targets are measured and REPORTED (see the coverage
+    # note) but deliberately not scored — see UNRESOLVED_REFLECTION_WEIGHT.
 
     # A structurally corrupted manifest (ingest.py's fallback path fired) means
     # permission_api_component, ttp_severity_component and

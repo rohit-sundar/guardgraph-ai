@@ -34,6 +34,7 @@ import argparse
 import csv
 import datetime
 import io
+import functools
 import json
 import os
 import sys
@@ -67,6 +68,7 @@ from app.core.config import settings  # noqa: E402
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 SOFTWARE_MAP_PATH = "data/ontology/software_technique_map.json"
+DERIVED_MAP_PATH = "data/ontology/derived_family_map.json"
 OUT_CSV = "data/ttp_dataset.csv"
 MB_API = "https://mb-api.abuse.ch/api/v1/"
 # Written by the download phase, read by the analysis phase: carries each sample's
@@ -88,6 +90,15 @@ def _setup_logging(phase: str) -> str:
     os.makedirs(LOGS_DIR, exist_ok=True)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = os.path.join(LOGS_DIR, f"build_ttp_dataset_{phase}_{ts}.log")
+    # Loguru's default stderr sink is DEBUG, and androguard logs every DEX map_item
+    # it parses through the same logger. Over a multi-hour corpus run that is not
+    # noise you scroll past — measured on this corpus, stderr grew 140 MB/min and
+    # projected to ~7 GB for one stage, on a disk with 25 GB free. (The repo already
+    # carries a 17 GB overnight_stage_c.log from exactly this.) Replace the default
+    # sink with an INFO one; the file sink below was already INFO, so nothing that
+    # was ever worth keeping is lost.
+    logger.remove()
+    logger.add(sys.stderr, level="INFO")
     logger.add(log_path, level="INFO", enqueue=False, backtrace=True, diagnose=False)
     logger.info(f"[dataset] logging this run to {log_path}")
     return log_path
@@ -373,6 +384,70 @@ def _signature_variants(name: str, aliases: list[str]) -> list[str]:
     return out
 
 
+
+
+@functools.lru_cache(maxsize=1)
+def _derived_family_names() -> frozenset:
+    """Names whose ATT&CK techniques were inherited rather than STIX-sourced."""
+    if not os.path.exists(DERIVED_MAP_PATH):
+        return frozenset()
+    with open(DERIVED_MAP_PATH, "r", encoding="utf-8") as f:
+        return frozenset(d["name"] for d in json.load(f).get("families", []))
+
+
+def _expand_with_derived_families(software_map: list[dict]) -> tuple[list[dict], set[str]]:
+    """
+    Adds modern Android bankers that MalwareBazaar carries but ATT&CK has no
+    software entry for, each inheriting its parent entry's technique_ids.
+
+    Why this exists: MalwareBazaar is exhausted for MITRE-named families (measured
+    2026-08-25 - every one returned fewer samples than asked for except Cerberus),
+    so the only route to a larger, MORE DIVERSE malware corpus is families ATT&CK
+    has not catalogued. Hydra, Coper, Alien, ERMAC, Hook, Octo and Vultur are ~427
+    available samples of current banking trojans, which is precisely the threat
+    this project targets.
+
+    The inheritance is by documented code lineage, not loose analogy - Alien/ERMAC/
+    Hook are Cerberus forks, Octo/Coper are Exobot descendants - and every entry
+    carries its own `basis` and `confidence` in the JSON. Rows built from these are
+    stamped label_source='lineage_ref' rather than 'stix_ref', so the training set
+    can always be split back into MITRE-sourced and lineage-inferred labels. That
+    distinction is the whole reason this is acceptable: the provenance claim stays
+    honest because it is recorded per row, not asserted globally.
+
+    A derived family whose parent is missing from software_map is skipped with a
+    warning rather than silently dropped - it would otherwise download samples that
+    can never be labelled.
+    """
+    if not os.path.exists(DERIVED_MAP_PATH):
+        return software_map, set()
+    with open(DERIVED_MAP_PATH, "r", encoding="utf-8") as f:
+        spec = json.load(f)
+    by_name = {e["name"]: e for e in software_map}
+    added, names = [], set()
+    for d in spec.get("families", []):
+        parent = by_name.get(d["parent"])
+        if not parent:
+            logger.warning(
+                f"[dataset] derived family {d['name']}: parent '{d['parent']}' not in "
+                "software_map - skipping, it could never be labelled."
+            )
+            continue
+        added.append({
+            "software_id": f"DERIVED-{d['name']}",
+            "name": d["name"],
+            "aliases": [],
+            "technique_ids": list(parent["technique_ids"]),
+        })
+        names.add(d["name"])
+    if added:
+        logger.info(
+            f"[dataset] +{len(added)} lineage-derived families "
+            f"({', '.join(sorted(names))}) inheriting their parent's techniques."
+        )
+    return software_map + added, names
+
+
 def _resolve_stage_a_targets(
     software_map: list[dict],
     max_per_family: int,
@@ -482,6 +557,7 @@ def stage_a_download(
         return {}
     with open(SOFTWARE_MAP_PATH, "r", encoding="utf-8") as f:
         software_map = json.load(f)
+    software_map, _derived_names = _expand_with_derived_families(software_map)
 
     auth_key = settings.malwarebazaar_api_key
 
@@ -660,7 +736,12 @@ def stage_a_analyze(apk_dir: str, manifest_path: str, writer: IncrementalCsvWrit
             continue
         vec, meta = extracted
         techniques = set(info["techniques"])
-        writer.write(_row_dict(vec, techniques, "stix_ref", meta["sha256"], info["family"]))
+        # Provenance is per row, not global: a family whose techniques were inherited
+        # by documented lineage (see _expand_with_derived_families) is NOT a STIX
+        # reference and must never claim to be one. Stamping it here is what lets the
+        # dataset be split back into MITRE-sourced and lineage-inferred labels.
+        source = "lineage_ref" if info["family"] in _derived_family_names() else "stix_ref"
+        writer.write(_row_dict(vec, techniques, source, meta["sha256"], info["family"]))
         written += 1
         logger.info(
             f"[dataset] [{idx}/{total}] row written: {info['family']} "

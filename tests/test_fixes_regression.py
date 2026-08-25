@@ -968,3 +968,60 @@ class TestPreloadDoesNotFakeTheWarmup(unittest.TestCase):
              patch.object(g, "_post_native_chat") as mock_post:
             self.assertTrue(g.preload_model())
         mock_post.assert_not_called()
+
+    # ── Rule 12 was asked for but never enforced ──────────────────────────────
+    # SYSTEM_PROMPT has banned "isolate the device" / "keep AV updated" /
+    # "educate users" since it was written, and the model kept writing them —
+    # confirmed live even after ATT&CK mitigations were added to the prompt. Every
+    # other rule that matters is enforced after generation; this is rule 12's.
+
+    def test_generic_recommendations_are_flagged(self):
+        from app.reports.graphrag import _generic_action_check
+        narrative = (
+            "Malicious, 78.2/100.\n\n### Recommended Analyst Actions\n"
+            "1. **Isolate the Device**: Isolate the device from the network.\n"
+            "2. **Educate Users**: Inform users about permission risks.\n"
+        )
+        found = _generic_action_check(narrative)
+        self.assertIn("isolate the device", found)
+        self.assertIn("educate users", found)
+
+    def test_grounded_recommendations_pass(self):
+        """A mitigation-cited action names the control and the finding it answers."""
+        from app.reports.graphrag import _generic_action_check
+        narrative = (
+            "Malicious, 78.2/100.\n\n### Recommended Analyst Actions\n"
+            "1. M1011 User Guidance — covers T1417, the input capture this sample's "
+            "accessibility service enables.\n"
+            "2. Block the extracted C2 host nexuspay.shop at the perimeter.\n"
+        )
+        self.assertEqual(_generic_action_check(narrative), [])
+
+    def test_check_is_case_insensitive(self):
+        from app.reports.graphrag import _generic_action_check
+        self.assertEqual(_generic_action_check("ISOLATE THE DEVICE now"), ["isolate the device"])
+
+    def test_mitigation_block_renders_id_name_description_and_coverage(self):
+        """The whole point: an ID and a title tell an analyst nothing, so the
+        description has to be in the report, not just in the prompt."""
+        from app.reports.graphrag import _render_mitigations
+        out = _render_mitigations([{
+            "mitigation_id": "M1012", "name": "Enterprise Policy",
+            "description": "An EMM/MDM system can provision policies to mobile devices.",
+            "covers": ["T1417", "T1636"],
+        }])
+        self.assertIn("M1012", out)
+        self.assertIn("Enterprise Policy", out)
+        self.assertIn("An EMM/MDM system can provision policies", out)
+        self.assertIn("T1417, T1636", out)
+        self.assertIn("not model-generated", out)   # labelled as matrix-sourced
+
+    def test_mitigation_block_is_empty_when_nothing_applies(self):
+        from app.reports.graphrag import _render_mitigations
+        self.assertEqual(_render_mitigations([]), "")
+
+    def test_mitigation_block_skips_malformed_rows_without_raising(self):
+        """Report generation must not die because the graph returned an odd row."""
+        from app.reports.graphrag import _render_mitigations
+        out = _render_mitigations([{"name": "no id here"}, None, "junk"])
+        self.assertEqual(out, "")
