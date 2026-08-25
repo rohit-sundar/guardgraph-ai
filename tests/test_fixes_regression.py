@@ -1025,3 +1025,52 @@ class TestPreloadDoesNotFakeTheWarmup(unittest.TestCase):
         from app.reports.graphrag import _render_mitigations
         out = _render_mitigations([{"name": "no id here"}, None, "junk"])
         self.assertEqual(out, "")
+
+
+# ─── Coverage gaps were reported twice ───────────────────────────────────────
+# Reported by a teammate testing b711fce6…: everything in the coverage and
+# limitations field appeared duplicated. Two independent causes, one here and
+# one in the frontend (see renderLimitations): the backend seeded limitations[0]
+# with obfuscation.coverage_note and THEN appended a reworded copy of the same
+# unresolved-reflection count that coverage_note is already built from.
+
+class TestLimitationsAreNotDuplicated(unittest.TestCase):
+
+    def _report(self, unresolved: int):
+        from app.core.schemas import AnalysisManifest, ObfuscationSignal, RiskScoreBreakdown
+        from app.reports.graphrag import generate_report
+        obf = ObfuscationSignal(
+            string_entropy_score=3.0, flattening_suspected=False,
+            method_parse_failure_rate=0.0,
+            unresolved_reflection_targets=unresolved,
+            coverage_note=f"{unresolved} reflection call targets not statically resolved",
+        )
+        manifest = AnalysisManifest(
+            target_package="com.test.app", sha256="dd" * 32, cache_hit=False,
+            total_nodes_parsed=10, graph_density=0.1, behavioral_subgraphs=[],
+            obfuscation=obf, predicted_ttps={}, predicted_family=None,
+            family_confidence=None,
+        )
+        risk = RiskScoreBreakdown(
+            classifier_confidence_component=0.0, permission_api_component=0.0,
+            ttp_severity_component=0.0, forensic_anchor_component=0.0,
+            obfuscation_component=0.0, reputation_component=1.5, ioc_component=0.0,
+            total_score=1.5, verdict_band="low",
+        )
+        # skip_llm returns before any Ollama call, so this needs no model.
+        _narrative, limitations, _grounding = generate_report(manifest, risk, skip_llm=True)
+        return limitations
+
+    def test_unresolved_reflection_is_reported_once(self):
+        lim = self._report(12)
+        reflection_entries = [l for l in lim if "reflection" in l.lower()]
+        self.assertEqual(
+            len(reflection_entries), 1,
+            f"unresolved reflection reported {len(reflection_entries)}x: {reflection_entries}",
+        )
+
+    def test_no_two_limitations_state_the_same_count(self):
+        """Guards the general shape of the bug, not just this one phrasing."""
+        lim = self._report(12)
+        self.assertEqual(len(lim), len(set(l.strip() for l in lim)), f"duplicate entries: {lim}")
+        self.assertEqual(len([l for l in lim if "12" in l]), 1, lim)

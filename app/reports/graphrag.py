@@ -875,12 +875,14 @@ def generate_report(
     store_signature() independently of this function. Live/interactive
     analysis (the default) is unaffected; this is opt-in.
     """
+    # coverage_note is already the assembled list of every static coverage gap
+    # (build_obfuscation_signal joins them with "; "), and unresolved reflection
+    # is one of the entries it builds from the SAME field. Appending a reworded
+    # copy here put the identical fact in the list twice — "12 reflection call
+    # targets not statically resolved" followed by "12 reflection-based API calls
+    # could not be statically resolved to their real target." Reported by a
+    # teammate as limitations appearing duplicated in the UI.
     limitations = [manifest.obfuscation.coverage_note]
-    if manifest.obfuscation.unresolved_reflection_targets > 0:
-        limitations.append(
-            f"{manifest.obfuscation.unresolved_reflection_targets} reflection-based "
-            "API calls could not be statically resolved to their real target."
-        )
 
     if skip_llm:
         # No narrative means the grounding checks never ran — None, not an empty
