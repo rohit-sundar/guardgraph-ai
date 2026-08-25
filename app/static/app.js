@@ -5,11 +5,51 @@ document.addEventListener('DOMContentLoaded', () => {
   setupUploadEvents();
   loadModelAccuracy();
   loadHistory();
+  refreshHealth();
   const refreshBtn = document.getElementById('btnRefreshHistory');
   if (refreshBtn) refreshBtn.addEventListener('click', loadHistory);
   const backBtn = document.getElementById('btnBackToUpload');
   if (backBtn) backBtn.addEventListener('click', goBackToUpload);
+  const confirmedBtn = document.getElementById('btnFeedbackConfirmed');
+  if (confirmedBtn) confirmedBtn.addEventListener('click', () => submitFeedback('confirmed'));
+  const falsePositiveBtn = document.getElementById('btnFeedbackFalsePositive');
+  if (falsePositiveBtn) falsePositiveBtn.addEventListener('click', () => submitFeedback('false_positive'));
 });
+
+// Analyst feedback — records a correction against the currently-rendered
+// report's sha256 (see POST /analyses/{sha256}/feedback). This only logs
+// the correction; scripts/export_feedback_for_training.py is the separate,
+// deliberate step that turns it into a training row, and nothing here
+// triggers retraining.
+async function submitFeedback(verdict) {
+  const statusEl = document.getElementById('feedbackStatus');
+  const sha256 = currentReportData && currentReportData.manifest && currentReportData.manifest.sha256;
+  if (!sha256) {
+    if (statusEl) {
+      statusEl.textContent = 'No sample loaded.';
+      statusEl.classList.remove('hidden');
+    }
+    return;
+  }
+  try {
+    const resp = await fetch(`/analyses/${encodeURIComponent(sha256)}/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verdict: verdict }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if (statusEl) {
+      statusEl.textContent = verdict === 'confirmed' ? 'Thanks — recorded.' : 'Recorded — thanks for the correction.';
+      statusEl.classList.remove('hidden');
+    }
+  } catch (e) {
+    if (statusEl) {
+      statusEl.textContent = 'Could not record feedback (see console).';
+      statusEl.classList.remove('hidden');
+    }
+    console.error('submitFeedback failed:', e);
+  }
+}
 
 // Returns from a rendered report (fresh or historical) to the landing page.
 // Re-fetches history since the results just viewed may be a new analysis
@@ -27,6 +67,56 @@ function goBackToUpload() {
     preview.style.display = 'none';
   }
   loadHistory();
+}
+
+// The header status pills. Polled rather than read once at load: the failure this
+// exists to catch is a dependency dying DURING a session (someone stops Docker),
+// which a load-time check would render green and then never revisit. 30s is slow
+// enough to be free and fast enough to notice before the next upload.
+const HEALTH_POLL_MS = 30000;
+
+function setPill(id, textId, state, label, detail) {
+  const pill = document.getElementById(id);
+  const text = document.getElementById(textId);
+  if (!pill || !text) return;
+  pill.classList.remove('status-ok', 'status-warn', 'status-down', 'status-unknown');
+  pill.classList.add(`status-${state}`);
+  text.textContent = label;
+  pill.title = detail || '';
+}
+
+async function refreshHealth() {
+  try {
+    const resp = await fetch('/health');
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const h = await resp.json();
+
+    const g = h.neo4j || {};
+    if (!g.reachable) {
+      setPill('pillGraph', 'pillGraphText', 'down', 'Knowledge Graph: offline', g.detail);
+    } else if (!g.grounded_techniques) {
+      setPill('pillGraph', 'pillGraphText', 'warn', 'Knowledge Graph: not loaded', g.detail);
+    } else {
+      setPill('pillGraph', 'pillGraphText', 'ok',
+              `Knowledge Graph: ${g.cached_samples} samples`, g.detail);
+    }
+
+    const l = h.ollama || {};
+    if (!l.reachable) {
+      setPill('pillLlm', 'pillLlmText', 'down', 'Qwen2.5 7B LLM: offline', l.detail);
+    } else if (!l.model_resident) {
+      setPill('pillLlm', 'pillLlmText', 'warn', 'Qwen2.5 7B LLM: loading', l.detail);
+    } else {
+      setPill('pillLlm', 'pillLlmText', 'ok', 'Qwen2.5 7B LLM: ready', l.detail);
+    }
+  } catch (err) {
+    // The API itself is unreachable, so neither dependency is knowable. Say that
+    // rather than blaming a dependency we did not manage to ask about.
+    setPill('pillGraph', 'pillGraphText', 'unknown', 'Knowledge Graph: unknown', String(err));
+    setPill('pillLlm', 'pillLlmText', 'unknown', 'API unreachable', String(err));
+  } finally {
+    setTimeout(refreshHealth, HEALTH_POLL_MS);
+  }
 }
 
 const HISTORY_BAND_VARS = {
@@ -481,13 +571,32 @@ function renderResults(data) {
   // was only ever called on the truthy branch.
   document.getElementById('zeroDayBadge').classList.add('hidden');
   document.getElementById('knownMalwareBadge').classList.add('hidden');
+  const feedbackStatusEl = document.getElementById('feedbackStatus');
+  if (feedbackStatusEl) feedbackStatusEl.classList.add('hidden');
   const impBadge = document.getElementById('impersonationBadge');
   if (impBadge) impBadge.classList.add('hidden');
+  const packerBadge = document.getElementById('packerBadge');
+  if (packerBadge) packerBadge.classList.add('hidden');
   if (risk.zero_day_indicator) {
     document.getElementById('zeroDayBadge').classList.remove('hidden');
   }
   if (manifest.signature_yara && manifest.signature_yara.is_known_malware) {
     document.getElementById('knownMalwareBadge').classList.remove('hidden');
+  }
+  // Packer detection is one YARA rule among dozens on a heavily-flagged sample —
+  // easy to miss scrolling the YARA tab. Pull it out to its own top-level badge,
+  // same treatment as the impersonation/zero-day findings above. The rule's
+  // description carries the specific family ("...matched: iJiami") since YARA
+  // itself only reports the generic rule name.
+  if (packerBadge && manifest.signature_yara) {
+    const packerMatch = (manifest.signature_yara.yara_matches || [])
+      .find(y => y.rule_name === 'AndroidPacker_KnownStubs');
+    if (packerMatch) {
+      const familyMatch = /matched:\s*(.+)$/.exec(packerMatch.description || '');
+      const family = familyMatch ? familyMatch[1].trim() : 'a known packer';
+      packerBadge.textContent = `Packed with ${family}`;
+      packerBadge.classList.remove('hidden');
+    }
   }
 
   // Metadata

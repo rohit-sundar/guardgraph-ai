@@ -283,7 +283,12 @@ class TestSuppressionReachesTheReport(unittest.TestCase):
         )
         obf = _obfuscation()
 
+        # _run_analysis hashes the file before deciding whether to parse it,
+        # so the hash is its own dependency now, not something the mocked
+        # pipeline supplies. The value does not matter (lookup_signature is
+        # patched) but the read is real, and /fake/test.apk does not exist.
         with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.compute_sha256", return_value="dd" * 32), \
              patch("app.api.routes.lookup_signature", return_value=None), \
              patch("app.api.routes.store_signature"):
             mp.run_phase1_ingestion.return_value = (

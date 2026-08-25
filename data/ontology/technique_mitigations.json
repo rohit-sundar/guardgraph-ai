@@ -1,0 +1,252 @@
+[
+  {
+    "mitigation_id": "M1001",
+    "name": "Security Updates",
+    "description": "Install security updates in response to discovered vulnerabilities.\n\nPurchase devices with a vendor and/or mobile carrier commitment to provide security updates in a prompt manner for a set period of time.\n\nDecommission devices that will no longer receive security updates.\n\nLimit or block access to enterprise resources from devices that have not installed recent security updates.\n\nOn Android devices, access can be controlled based on each device's security patch level. On iOS devices, access can be controlled based on the iOS version.",
+    "technique_ids": [
+      "T1398",
+      "T1404",
+      "T1456",
+      "T1458",
+      "T1461",
+      "T1474",
+      "T1474.002",
+      "T1474.003",
+      "T1577",
+      "T1629",
+      "T1629.003",
+      "T1630",
+      "T1630.001",
+      "T1634",
+      "T1634.001",
+      "T1645",
+      "T1658",
+      "T1664"
+    ]
+  },
+  {
+    "mitigation_id": "M1002",
+    "name": "Attestation",
+    "description": "Enable remote attestation capabilities when available (such as Android SafetyNet or Samsung Knox TIMA Attestation) and prohibit devices that fail the attestation from accessing enterprise resources.",
+    "technique_ids": [
+      "T1398",
+      "T1404",
+      "T1424",
+      "T1617",
+      "T1623",
+      "T1623.001",
+      "T1625",
+      "T1625.001",
+      "T1630",
+      "T1630.001",
+      "T1634",
+      "T1634.001",
+      "T1645"
+    ]
+  },
+  {
+    "mitigation_id": "M1003",
+    "name": "Lock Bootloader",
+    "description": "On devices that provide the capability to unlock the bootloader (hence allowing any operating system code to be flashed onto the device), perform periodic checks to ensure that the bootloader is locked.",
+    "technique_ids": [
+      "T1398",
+      "T1458",
+      "T1645"
+    ]
+  },
+  {
+    "mitigation_id": "M1004",
+    "name": "System Partition Integrity",
+    "description": "Ensure that Android devices being used include and enable the Verified Boot capability, which cryptographically ensures the integrity of the system partition.",
+    "technique_ids": [
+      "T1398",
+      "T1474.003",
+      "T1625",
+      "T1625.001",
+      "T1629",
+      "T1629.003",
+      "T1645"
+    ]
+  },
+  {
+    "mitigation_id": "M1006",
+    "name": "Use Recent OS Version",
+    "description": "New mobile operating system versions bring not only patches against discovered vulnerabilities but also often bring security architecture improvements that provide resilience against potential vulnerabilities or weaknesses that have not yet been discovered. They may also bring improvements that block use of observed adversary techniques.",
+    "technique_ids": [
+      "T1407",
+      "T1409",
+      "T1414",
+      "T1417",
+      "T1417.002",
+      "T1418",
+      "T1418.001",
+      "T1420",
+      "T1422",
+      "T1422.002",
+      "T1424",
+      "T1429",
+      "T1430",
+      "T1458",
+      "T1512",
+      "T1577",
+      "T1624",
+      "T1624.001",
+      "T1626.001",
+      "T1627",
+      "T1627.001",
+      "T1628.001",
+      "T1629.001",
+      "T1629.002",
+      "T1632",
+      "T1632.001",
+      "T1635",
+      "T1635.001",
+      "T1636",
+      "T1636.005",
+      "T1638",
+      "T1641",
+      "T1641.001",
+      "T1642",
+      "T1661"
+    ]
+  },
+  {
+    "mitigation_id": "M1009",
+    "name": "Encrypt Network Traffic",
+    "description": "Application developers should encrypt all of their application network traffic using the Transport Layer Security (TLS) protocol to ensure protection of sensitive data and deter network-based attacks. If desired, application developers could perform message-based encryption of data before passing it for TLS encryption.\n\niOS's App Transport Security feature can be used to help ensure that all application network traffic is appropriately protected. [\u2026]",
+    "technique_ids": [
+      "T1422.001",
+      "T1638"
+    ]
+  },
+  {
+    "mitigation_id": "M1010",
+    "name": "Deploy Compromised Device Detection Method",
+    "description": "A variety of methods exist that can be used to enable enterprises to identify compromised (e.g. rooted/jailbroken) devices, whether using security mechanisms built directly into the device, third-party mobile security applications, enterprise mobility management (EMM)/mobile device management (MDM) capabilities, or other methods. Some methods may be trivial to evade while others may be more sophisticated.",
+    "technique_ids": [
+      "T1404",
+      "T1617",
+      "T1623",
+      "T1623.001",
+      "T1628.002",
+      "T1629",
+      "T1629.003",
+      "T1634",
+      "T1634.001"
+    ]
+  },
+  {
+    "mitigation_id": "M1011",
+    "name": "User Guidance",
+    "description": "Describes any guidance or training given to users to set particular configuration settings or avoid specific potentially risky behaviors.",
+    "technique_ids": [
+      "T1417",
+      "T1417.001",
+      "T1418",
+      "T1418.001",
+      "T1429",
+      "T1430",
+      "T1430.001",
+      "T1451",
+      "T1453",
+      "T1458",
+      "T1513",
+      "T1516",
+      "T1517",
+      "T1521.003",
+      "T1541",
+      "T1582",
+      "T1616",
+      "T1626.001",
+      "T1627",
+      "T1627.001",
+      "T1628.001",
+      "T1629",
+      "T1629.001",
+      "T1629.003",
+      "T1630",
+      "T1630.001",
+      "T1630.002",
+      "T1632",
+      "T1632.001",
+      "T1635",
+      "T1635.001",
+      "T1636",
+      "T1636.001",
+      "T1636.002",
+      "T1636.003",
+      "T1636.004",
+      "T1636.005",
+      "T1640",
+      "T1642",
+      "T1643",
+      "T1644",
+      "T1655",
+      "T1655.001",
+      "T1658",
+      "T1660",
+      "T1662",
+      "T1663",
+      "T1670",
+      "T1676"
+    ]
+  },
+  {
+    "mitigation_id": "M1012",
+    "name": "Enterprise Policy",
+    "description": "An enterprise mobility management (EMM), also known as mobile device management (MDM), system can be used to provision policies to mobile devices to control aspects of their allowed behavior.",
+    "technique_ids": [
+      "T1417",
+      "T1417.001",
+      "T1417.002",
+      "T1428",
+      "T1430",
+      "T1430.001",
+      "T1451",
+      "T1458",
+      "T1461",
+      "T1513",
+      "T1516",
+      "T1517",
+      "T1521.003",
+      "T1629",
+      "T1629.001",
+      "T1632",
+      "T1632.001",
+      "T1661",
+      "T1663"
+    ]
+  },
+  {
+    "mitigation_id": "M1013",
+    "name": "Application Developer Guidance",
+    "description": "Application Developer Guidance focuses on providing developers with the knowledge, tools, and best practices needed to write secure code, reduce vulnerabilities, and implement secure design principles. By integrating security throughout the software development lifecycle (SDLC), this mitigation aims to prevent the introduction of exploitable weaknesses in applications, systems, and APIs. [\u2026]",
+    "technique_ids": [
+      "T1474",
+      "T1474.001",
+      "T1513",
+      "T1517",
+      "T1626",
+      "T1635",
+      "T1635.001"
+    ]
+  },
+  {
+    "mitigation_id": "M1014",
+    "name": "Interconnection Filtering",
+    "description": "In order to mitigate Signaling System 7 (SS7) exploitation, the Communications, Security, Reliability, and Interoperability Council (CSRIC) describes filtering interconnections between network operators to block inappropriate requests.",
+    "technique_ids": [
+      "T1430",
+      "T1430.002"
+    ]
+  },
+  {
+    "mitigation_id": "M1058",
+    "name": "Antivirus/Antimalware",
+    "description": "Mobile security products, such as Mobile Threat Defense (MTD), offer various device-based mitigations against certain behaviors.",
+    "technique_ids": [
+      "T1660",
+      "T1664"
+    ]
+  }
+]

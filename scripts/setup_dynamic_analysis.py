@@ -175,8 +175,19 @@ def download_and_install_frida_server(adb: Path, serial: str, frida_version: str
         # _ensure_frida_server_running — `adb shell "cmd &"` under
         # subprocess.run() hangs even though the device backgrounds the
         # command correctly (confirmed live), so this must NOT wait for exit.
+        #
+        # `su 0` is required, not cosmetic, and must stay identical to
+        # _ensure_frida_server_running's invocation: a plain `adb shell`
+        # starts frida-server as uid 2000 (shell), which cannot ptrace into
+        # another app's process. That server binds its port and answers
+        # `pidof` perfectly well, so this script reported a green
+        # "frida-server running" while every actual attach failed with
+        # "unable to access process with pid N" — confirmed live on a fresh
+        # API 33 google_apis AVD. A false green here is worse than a failure,
+        # because the runtime's own self-heal then sees a live pid and
+        # declines to restart it as root.
         subprocess.Popen(
-            [str(adb), "-s", serial, "shell", FRIDA_SERVER_DEVICE_PATH, "&"],
+            [str(adb), "-s", serial, "shell", f"su 0 {FRIDA_SERVER_DEVICE_PATH}"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=adb_env(),
         )
         import time
@@ -198,13 +209,21 @@ def build_frida_agent(result: Result):
     if not hooks_js.exists():
         result.add("Frida agent build", "FAIL", f"{hooks_js} not found — is app/analysis/frida_scripts/ present?")
         return
+    # Freshness is checked BEFORE npm is required, because npm is a build-time
+    # dependency needed only when a rebuild is actually warranted — demanding it
+    # to validate an already-committed artifact blocks setup for no reason.
+    # `>=`, not `>`: git stamps every file it checks out with the same mtime, so
+    # a fresh clone or merge lands _agent.js and hooks.js on an identical
+    # timestamp. Strict `>` reads that tie as "stale" and sends anyone without
+    # Node down a rebuild path they don't need (confirmed live on a merge).
+    if agent_js.exists() and agent_js.stat().st_mtime >= hooks_js.stat().st_mtime:
+        result.add("Frida agent build", "OK", "_agent.js already up to date")
+        return
     npm = shutil.which("npm")
     if not npm:
         result.add("Frida agent build", "FAIL",
-                    "npm not found on PATH — install Node.js (nodejs.org), then re-run this script")
-        return
-    if agent_js.exists() and agent_js.stat().st_mtime > hooks_js.stat().st_mtime:
-        result.add("Frida agent build", "OK", "_agent.js already up to date")
+                    "npm not found on PATH — hooks.js is newer than the compiled _agent.js, so this "
+                    "genuinely needs a rebuild: install Node.js (nodejs.org), then re-run this script")
         return
     try:
         node_modules = FRIDA_SCRIPTS_DIR / "node_modules"
@@ -366,7 +385,7 @@ def main():
     if args.check_only:
         agent_js = FRIDA_SCRIPTS_DIR / "_agent.js"
         if agent_js.exists():
-            result.add("Frida agent build", "OK" if agent_js.stat().st_mtime >
+            result.add("Frida agent build", "OK" if agent_js.stat().st_mtime >=
                         (FRIDA_SCRIPTS_DIR / "hooks.js").stat().st_mtime else "WARN",
                         "" if agent_js.exists() else "not built")
         else:

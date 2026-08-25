@@ -195,6 +195,12 @@ class YaraMatch(BaseModel):
     scan_target: str = "apk"
 
 
+class FeedbackRequest(BaseModel):
+    """Body for POST /analyses/{sha256}/feedback — an analyst's correction."""
+    verdict: str            # free-form label, e.g. "false_positive", "confirmed"
+    note: Optional[str] = None
+
+
 class SignatureYaraResult(BaseModel):
     """Combined result from signature detection and YARA scanning."""
     signature_matches: list[SignatureMatch] = []
@@ -248,6 +254,12 @@ class DynamicVerificationResult(BaseModel):
     sms_destinations: list[str] = []
     accessibility_services: list[str] = []
     crypto_algorithms: list[str] = []
+    # Cheap substitute for real parameterized string-decryption — the actual
+    # Cipher.doFinal() return value, captured live and truncated (see
+    # hooks.js's hookCrypto), plus Cipher.init's encrypt/decrypt mode.
+    # Independent observations, not correlated per-Cipher-instance.
+    crypto_outputs: list[dict] = []
+    crypto_modes_observed: list[str] = []
     # Incoming-SMS interception (the real OTP-theft path — sms_api_invoked
     # above only ever covered the app SENDING a message). A simulated inbound
     # SMS is injected mid-capture (see dynamic_verification.py's
@@ -398,6 +410,12 @@ class RiskScoreBreakdown(BaseModel):
     # confirmed C2 contact or executed DCL payload raised the verdict above what
     # the weighted components alone produced. Both flags can be true at once.
     dynamic_confirmation_floor_applied: bool = False
+    # Same distinction again, for OPAQUE_REPUTATION_SCORE_FLOOR — true when the
+    # sample is externally flagged as known malware AND static parsing recovered
+    # nothing, so the weighted components could not speak. Tells an analyst the
+    # verdict rests on external reputation plus opacity, not on anything this
+    # pipeline observed itself, which is a materially weaker claim.
+    opaque_reputation_floor_applied: bool = False
     # The weighted total before any floor. Equal to total_score unless a floor moved
     # it. None on the hot path, where no component was recomputed.
     weighted_score: Optional[float] = None

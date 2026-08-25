@@ -32,13 +32,17 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
-from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape, list_recent_samples
+from app.analysis.ingest import compute_sha256
+from app.analysis.signatures import deterministic_family
+from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape, list_recent_samples, record_feedback
 from app.graph.ontology import get_technique_context
 from app.ml.classifier import ttp_classifier
-from app.reports.scoring import compute_risk_score, dynamic_confirmation_floor, _band_for
+from app.reports.scoring import (
+    compute_risk_score, dynamic_confirmation_floor, _band_for, IMPERSONATION_SCORE_FLOOR,
+)
 from app.core import progress
 from app.core.config import settings
-from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown, SignatureYaraResult
+from app.core.schemas import AnalysisManifest, AnalysisReport, ObfuscationSignal, RiskScoreBreakdown, SignatureYaraResult, FeedbackRequest
 
 router = APIRouter()
 
@@ -291,6 +295,14 @@ async def get_analysis(sha256: str):
         "impersonation, app identity) are not recoverable and read empty here "
         "rather than being guessed. Re-upload the sample for a full current analysis."
     ]
+    if not cached.get("narrative"):
+        limitations.append(
+            "This sample was analysed with report generation disabled, so no "
+            "narrative was ever produced for it. Run "
+            f"`python scripts/clear_sample.py {sha256}` and upload the APK again "
+            "to generate one — a narrative needs the control-flow graph, which a "
+            "stored record does not carry."
+        )
 
     return AnalysisReport(
         manifest=manifest,
@@ -298,6 +310,21 @@ async def get_analysis(sha256: str):
         narrative_report=narrative,
         limitations=limitations,
     )
+
+
+@router.post("/analyses/{sha256}/feedback")
+async def submit_feedback(sha256: str, body: FeedbackRequest):
+    """
+    Records an analyst's correction against an already-analysed sample — the
+    first half of an active-learning loop (see
+    scripts/export_feedback_for_training.py for the second half). Does not
+    retrain anything itself; retraining stays the existing deliberate,
+    manual `python scripts/train_model.py --target ttp` step.
+    """
+    found = record_feedback(sha256, verdict=body.verdict, note=body.note)
+    if not found:
+        raise HTTPException(404, f"No stored analysis for {sha256}.")
+    return {"sha256": sha256, "verdict": body.verdict, "recorded": True}
 
 
 def _analyze_with_fallback(
@@ -517,7 +544,6 @@ def _unparseable_report(filepath: str, exc: BaseException, skip_report: bool = F
     parse failure is a property of this analyzer, not a verdict worth replaying on
     the hot path after the underlying cause is fixed.
     """
-    from app.analysis.ingest import compute_sha256
     from app.analysis.failure_diagnostics import probable_cause
 
     try:
@@ -613,16 +639,30 @@ def _run_analysis(
     job_id: str | None = None,
     enable_dynamic: bool = False,
 ) -> AnalysisReport:
+    # --- Hot path: hash, then look up, THEN parse ---
+    # Order matters. The cache is keyed on the SHA-256 of the raw bytes, which
+    # needs no parsing at all, but the lookup used to sit behind a full Androguard
+    # pass — so a "known sample, answered from cache" response still paid the
+    # entire cost of analysing it. Measured on a 7.5 MB APK: the DEX
+    # cross-reference build is 13.42s of a 13.6s ingestion, against 0.013s to hash
+    # and 0.006s to query Neo4j against a warm driver.
+    #
+    # A hit still parses the manifest (~0.12s, no DEX pass — see ingest_apk's
+    # skip_dex_analysis) rather than answering from the record alone. That is
+    # deliberate: the impersonation check below re-runs on every hit so an updated
+    # brand table applies to already-cached samples without re-analysis, and it
+    # needs the app label, launcher icon hash and signing certificate, none of
+    # which the cached record carries.
+    sha256 = compute_sha256(filepath)
+    cached = lookup_signature(sha256)
+    cache_hit = cached is not None
+
     # --- Phase 1: Ingestion & Metadata (+ Android malware static enrichments) ---
     progress.emit(job_id, 1, "APK Ingestion", "start")
     ingestion, apk_obj, dvm, analysis_obj, yara_targets = (
-        AnalysisPipeline.run_phase1_ingestion(filepath)
+        AnalysisPipeline.run_phase1_ingestion(filepath, skip_dex_analysis=cache_hit)
     )
     progress.emit(job_id, 1, "APK Ingestion", "done")
-
-    # --- Hot path: cache lookup ---
-    cached = lookup_signature(ingestion.sha256)
-    cache_hit = cached is not None
 
     if cache_hit:
         # Phases 1.5-7 never run on this path — say so once rather than emitting
@@ -646,8 +686,36 @@ def _run_analysis(
         cached_ttps = cached.get("ttps") or {}
         total_score = cached_score if cached_score is not None else 0.0
 
-        # Reconstruct risk score — use cached component breakdown if available
+        # Free on a cache hit: derives from nothing but the Phase 1 ingestion that
+        # already re-runs on every request (cert_anomalies/permission_matrix_flags/etc.
+        # below are the same pattern). Running this fresh rather than caching it means
+        # an update to the protected-brand reference table takes effect on the very
+        # next request for an already-cached sample, instead of waiting for someone to
+        # re-upload it.
+        impersonation = AnalysisPipeline.run_phase5b_impersonation(ingestion)
+
+        # Computed before the score, because the floor has to be re-applied here too.
+        # Running the check fresh but scoring from the cached components meant a newly
+        # added brand produced a finding in the App Identity tab while the verdict
+        # underneath it still read whatever was cached — the tab said "impersonates
+        # Bank of India" next to a `medium`. The floor is the whole mechanism by which
+        # impersonation reaches a verdict, so re-running the check without re-applying
+        # it makes the fresh run decorative.
+        #
+        # It can only ever raise the cached score, never lower it: a floor that is
+        # already below the cached total changes nothing.
         rc = cached.get("risk_components") or {}
+        impersonation_floor = 0.0
+        for finding in (impersonation or {}).get("findings") or []:
+            impersonation_floor = max(
+                impersonation_floor,
+                IMPERSONATION_SCORE_FLOOR.get(finding.get("kind", ""), 0.0),
+            )
+        floor_applied = rc.get("impersonation_floor_applied", False)
+        if impersonation_floor > total_score:
+            total_score = impersonation_floor
+            floor_applied = True
+
         risk_score = RiskScoreBreakdown(
             classifier_confidence_component=rc.get("classifier_confidence_component"),
             permission_api_component=rc.get("permission_api_component"),
@@ -659,7 +727,11 @@ def _run_analysis(
             total_score=total_score,
             verdict_band=_band_for(total_score),
             zero_day_indicator=rc.get("zero_day_indicator", False),
-            impersonation_floor_applied=rc.get("impersonation_floor_applied", False),
+            # Recomputed above, not read from the cached record: a brand added to the
+            # reference table after this sample was cached must be able to raise the
+            # verdict on the very next request. Reading rc here would make the fresh
+            # Phase 5.5 run decorative.
+            impersonation_floor_applied=floor_applied,
             dynamic_confirmation_floor_applied=rc.get("dynamic_confirmation_floor_applied", False),
             weighted_score=rc.get("weighted_score"),
         )
@@ -680,14 +752,6 @@ def _run_analysis(
 
         # Use cached permissions, falling back to ingestion
         cached_permissions = cached.get("permissions") or ingestion.permissions
-
-        # Free on a cache hit: both derive from nothing but the Phase 1 ingestion
-        # that already re-runs on every request (cert_anomalies/permission_matrix_
-        # flags/etc. below are the same pattern). Running this fresh rather than
-        # caching it also means an update to the protected-brand reference table
-        # takes effect on the very next request for an already-cached sample,
-        # instead of waiting for someone to re-upload it.
-        impersonation = AnalysisPipeline.run_phase5b_impersonation(ingestion)
 
         # Dynamic verification, requested explicitly on this request despite
         # the cache hit. Uses the cached resolved_dcl_targets/native_bridges
@@ -796,7 +860,12 @@ def _run_analysis(
                 "crypto/DCL/WebView/native findings are not recoverable for this "
                 "record without a fresh upload"
             ]
-        if cached_score is not None and grounding is None:
+        # Gated on the narrative existing: with no narrative there is nothing for
+        # the fabrication checks to have run against, so a missing `grounding` is
+        # expected rather than evidence of an old record. Reporting it as
+        # "predates persistence" here diagnosed the wrong problem — see the
+        # no-narrative branch below for what is actually true of such a record.
+        if cached_score is not None and grounding is None and narrative:
             limitations = limitations + [
                 "cache hit predates grounding-check persistence — the narrative's "
                 "fabrication checks cannot be shown for this record without a "
@@ -839,8 +908,16 @@ def _run_analysis(
                 dynamic_verification=dynamic_result,
             )
         if not narrative:
-            narrative = "[Narrative not found in cache. Cached score only.]"
-            limitations = limitations + ["analysis skipped — known sample (cache hit)"]
+            narrative = "[No narrative was generated for this sample.]"
+            limitations = limitations + [
+                "This sample was analysed with report generation disabled, so it has "
+                "no narrative and no fabrication-check results — the verdict, score "
+                "and manifest above are unaffected. A narrative cannot be produced "
+                "from a cache hit: it needs the control-flow graph, which is only "
+                "built on a full analysis. To generate one, run "
+                f"`python scripts/clear_sample.py {ingestion.sha256}` and upload the "
+                "APK again."
+            ]
 
         return AnalysisReport(
             manifest=manifest,
@@ -909,6 +986,27 @@ def _run_analysis(
     progress.emit(job_id, 5.5, "Brand Impersonation Checks", "start")
     impersonation = AnalysisPipeline.run_phase5b_impersonation(ingestion)
     progress.emit(job_id, 5.5, "Brand Impersonation Checks", "done")
+
+    # Family attribution, resolved ONCE for both the manifest and the cache write
+    # below. A third-party signature hit names the family from a lookup of this
+    # sample's own hash — deterministic evidence — so it takes precedence over the
+    # auxiliary classifier's guess.
+    #
+    # Resolving it here rather than only at the store_signature call is what keeps
+    # a first analysis and a later cache hit of the same APK reporting the same
+    # family: the hot path reads the stored value, so deciding the family at the
+    # write and leaving the manifest on the classifier's answer made the cold path
+    # report "unclassified" for a sample that reads "Cerberus" on re-upload.
+    #
+    # family_confidence stays None whenever the name came from a signature: that
+    # field is the classifier's probability, and a hash match has no probability
+    # to report. Provenance is not lost — signature_yara carries the source, and
+    # the report prompt already separates deterministic findings from predictions.
+    signature_family = deterministic_family(
+        sig_yara.signature_matches if sig_yara else None
+    )
+    if signature_family:
+        predicted_family, family_confidence = signature_family, None
 
     # --- Phase 8: Dynamic Verification (opt-in — see dynamic_verification.py) ---
     # Placed here, before Phase 6, rather than after it: its inputs
@@ -992,16 +1090,31 @@ def _run_analysis(
         limitations = list(limitations) + [NO_CLASSIFIER_EVIDENCE_NOTE]
 
     # Always persist after a cold-path run so the hot path fires on the next
-    # request for the same SHA-256. predicted_family may be None when the
-    # auxiliary family classifier is untrained — that's fine, store "" and
-    # let lookup_signature gate on SHA-256 presence instead of family.
+    # request for the same SHA-256. The family may be "" — the auxiliary
+    # classifier is often untrained — and that's fine, lookup_signature gates on
+    # SHA-256 presence, not family.
+    #
+    # `predicted_family` already carries the deterministic signature family where
+    # one was available (resolved above the manifest, so both agree). See
+    # scripts/backfill_families.py, which repaired the records written before
+    # that preference existed.
+    #
+    # A skipped report is persisted as an EMPTY narrative, not as the placeholder
+    # string generate_report returns. The placeholder is truthy, so storing it put
+    # a record in the cache that every later reader treated as a real narrative —
+    # the hot path's `if not narrative` guard never fired, and the analyst was
+    # shown "[Report generation skipped - bulk population run]" in the report tab
+    # with nothing to indicate it was recoverable. store_signature only runs on a
+    # cache MISS, so that text then stuck to the sample permanently. Empty is the
+    # truth ("no narrative exists for this record") and every consumer already
+    # handles it.
     if not cache_hit:
         store_signature(
             sha256=ingestion.sha256,
             family=predicted_family or "",
             risk_score=risk_score.total_score,
             ttps=predicted_ttps,
-            narrative=narrative,
+            narrative="" if skip_report else narrative,
             limitations=limitations,
             signature_yara_data=sig_yara.model_dump() if sig_yara else None,
             permissions=ingestion.permissions,

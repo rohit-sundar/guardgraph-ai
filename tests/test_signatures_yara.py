@@ -9,8 +9,13 @@ from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.analysis.signatures import match_signatures, reset_signature_db
-from app.analysis.yara_engine import compile_rules, scan_bytes, reset_compiled_rules, YARA_AVAILABLE
+from app.analysis.signatures import (
+    match_signatures, reset_signature_db, normalize_family_name, deterministic_family,
+)
+from app.analysis.yara_engine import (
+    compile_rules, scan_bytes, reset_compiled_rules, YARA_AVAILABLE,
+    identify_packer_families, scan_apk_with_payloads,
+)
 from app.ml.features import build_feature_vector, FEATURE_NAMES
 from app.reports.scoring import compute_risk_score
 from app.core.schemas import ObfuscationSignal
@@ -184,6 +189,47 @@ def test_yara_rule_scanning():
     assert len(clean_matches) == 0
 
 
+def test_yara_detects_apkprotect_stub():
+    if not YARA_AVAILABLE:
+        print("Skipping YARA scan test: yara-python not installed.")
+        return
+    reset_compiled_rules()
+    matches = scan_bytes(b"some header bytes libAPKProtect.so more bytes com.apkprotect.Loader")
+    packer_matches = [m for m in matches if m["rule_name"] == "AndroidPacker_KnownStubs"]
+    assert len(packer_matches) == 1
+    assert "apkprot1" in packer_matches[0]["matched_strings"][0] or any(
+        "apkprot" in s for s in packer_matches[0]["matched_strings"]
+    )
+
+
+def test_identify_packer_families_maps_known_prefixes():
+    assert identify_packer_families(["$jiagu1", "$jiagu3"]) == ["Jiagu (Qihoo 360)"]
+    assert identify_packer_families(["$bangcle2"]) == ["Bangcle / SecNeo"]
+    assert identify_packer_families(["$apkprot1", "$apkprot3"]) == ["APKProtect"]
+    # A jiagu + bangcle double-pack reports both, in first-seen order.
+    assert identify_packer_families(["$bangcle1", "$jiagu2"]) == ["Bangcle / SecNeo", "Jiagu (Qihoo 360)"]
+    # Unrecognized / unrelated identifiers (e.g. from a different rule) yield nothing.
+    assert identify_packer_families(["$webview1", "$target3"]) == []
+    assert identify_packer_families([]) == []
+
+
+def test_scan_apk_with_payloads_names_specific_packer_family_in_description():
+    if not YARA_AVAILABLE:
+        print("Skipping YARA scan test: yara-python not installed.")
+        return
+    reset_compiled_rules()
+    with tempfile.NamedTemporaryFile(suffix=".apk", delete=False) as tmp:
+        tmp.write(b"padding bytes libjiagu.so com.qihoo.util.Helper padding bytes")
+        tmp_name = tmp.name
+    try:
+        matches, _targets = scan_apk_with_payloads(tmp_name)
+        packer_matches = [m for m in matches if m["rule_name"] == "AndroidPacker_KnownStubs"]
+        assert len(packer_matches) == 1
+        assert "Jiagu (Qihoo 360)" in packer_matches[0]["description"]
+    finally:
+        os.unlink(tmp_name)
+
+
 def test_feature_vector_35_features():
     # Verify that the vector length matches the expanded 35 features
     assert len(FEATURE_NAMES) == 35
@@ -262,6 +308,57 @@ def test_risk_scoring_with_signatures_and_yara():
     assert score_yara.ioc_component > score_clean.ioc_component
 
 
+def test_normalize_family_name():
+    """
+    The family a scanner reports is what a bank analyst reads as the attribution,
+    so a placeholder or a bucket id must not reach the graph dressed as a family.
+    Every input below was observed in the real corpus.
+    """
+    # Real names pass through untouched — casing is the vendors' own.
+    for name in ("GodFather", "SpyNote", "AndroRAT", "BRATA", "TrickMo"):
+        assert normalize_family_name(name) == name
+
+    # VirusTotal's "<category>.<family>/<platform>" reduces to the family.
+    assert normalize_family_name("trojan.sharkbot/andr") == "sharkbot"
+    assert normalize_family_name("trojan.hqwar") == "hqwar"
+    assert normalize_family_name("  Cerberus  ") == "Cerberus"
+
+    # Nothing that names no family may become a MalwareFamily node.
+    for empty in ("trojan.", "dropper.", "unknown", "", "   ", None, "-"):
+        assert normalize_family_name(empty) is None, f"{empty!r} should yield no family"
+
+    # VT cluster ids arrive in the same field as real names and must be rejected;
+    # "trojan.ag1594795/adlibrary" is a bucket number, not an attribution.
+    assert normalize_family_name("trojan.ag1594795/adlibrary") is None
+
+    # A family whose own name contains a dot keeps it — only a leading *category*
+    # token is stripped.
+    assert normalize_family_name("not.acategory") == "not.acategory"
+    print("OK: family-name normalisation rejects placeholders and cluster ids")
+
+
+def test_deterministic_family_prefers_the_first_real_attribution():
+    """
+    match_signatures returns MalwareBazaar before VirusTotal, and MalwareBazaar
+    reports a clean family name where VirusTotal reports a full detection label —
+    but a MalwareBazaar "unknown" must not shadow a usable VirusTotal answer.
+    """
+    assert deterministic_family([
+        {"source": "MalwareBazaar", "family": "Cerberus"},
+        {"source": "VirusTotal", "family": "trojan.anubis/andr"},
+    ]) == "Cerberus"
+
+    assert deterministic_family([
+        {"source": "MalwareBazaar", "family": "unknown"},
+        {"source": "VirusTotal", "family": "trojan.sharkbot/andr"},
+    ]) == "sharkbot"
+
+    assert deterministic_family([{"family": "unknown"}, {"family": "trojan."}]) is None
+    assert deterministic_family([]) is None
+    assert deterministic_family(None) is None
+    print("OK: deterministic family picks the first real attribution, else None")
+
+
 if __name__ == "__main__":
     test_local_signature_matching()
     test_online_signature_matching_vt()
@@ -269,4 +366,6 @@ if __name__ == "__main__":
     test_yara_rule_scanning()
     test_feature_vector_33_features()
     test_risk_scoring_with_signatures_and_yara()
+    test_normalize_family_name()
+    test_deterministic_family_prefers_the_first_real_attribution()
     print("All signature/YARA tests passed successfully!")

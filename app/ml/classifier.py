@@ -9,9 +9,11 @@ anyone noticing during the demo.
 """
 import os
 import numpy as np
+import pandas as pd
 import xgboost as xgb
 
 from app.core.config import settings, MODEL_LABEL_MAP
+from app.ml.features import FEATURE_NAMES
 
 
 class MalwareClassifier:
@@ -38,33 +40,68 @@ class MalwareClassifier:
         Returns dict of label -> probability. Caller is responsible for
         deciding what confidence threshold counts as "predicted family".
 
-        Backward-compat: models trained before SIGNATURE_YARA_FEATURES was
-        appended expect 30 dims; the live vector is 33. If the model wants
-        fewer features and the extra dims are a trailing suffix, slice to
-        the trained width so the auxiliary family path still works.
+        Backward-compat, by column NAME rather than by length. Models trained
+        before SIGNATURE_YARA_FEATURES was appended expect 30 dims against a
+        live 35, and slicing the extra dims off is correct *only* when the
+        trained columns are a leading prefix of the current schema — i.e. the
+        schema grew by appending.
+
+        Length alone cannot tell that safe case from the dangerous one. When
+        BEHAVIOR_FEATURES grew 6 -> 8 (DYNAMIC_CODE_LOADING, ACCESSIBILITY_ABUSE)
+        the schema grew in the MIDDLE, so a 35-vector sliced to a 33-column
+        model kept the length and shifted every column from index 12 onward by
+        two: the model received DYNAMIC_CODE_LOADING where it was fitted on
+        degree_centrality_mean. XGBoost cannot detect that — it has no concept
+        of column names at inference time — so it returned confident, wrong
+        families with no error, which is exactly the silent failure
+        app.ml.features warns about in its module docstring.
+
+        train_model.py fits on a DataFrame (`X = df[FEATURE_NAMES]`), so every
+        model this project produces carries its column names in the booster.
+        A model without them cannot be verified, and an unverifiable model is
+        refused rather than trusted — same loud-stub contract as a missing one.
         """
         if self._model is None:
             self.load()
 
         vec = list(feature_vector)
-        expected = getattr(self._model, "n_features_in_", None)
-        if expected is None:
-            try:
-                expected = int(self._model.get_booster().num_features())
-            except Exception:
-                expected = len(vec)
+        trained = self._model.get_booster().feature_names
 
-        if len(vec) != expected:
-            if len(vec) > expected:
-                # Trailing features (e.g. signature/YARA) added after training.
-                vec = vec[:expected]
-            else:
-                raise ValueError(
-                    f"Family feature vector length {len(vec)} < model expected "
-                    f"{expected}. Retrain or rebuild the vector with FEATURE_NAMES."
-                )
+        if trained is None:
+            raise ValueError(
+                f"Family model at {self.model_path} carries no feature names, so its "
+                "column order cannot be checked against FEATURE_NAMES. Retrain it with "
+                "`python scripts/train_model.py --target family`, which fits on a named "
+                "DataFrame and records them."
+            )
 
-        X = np.array([vec])
+        if list(trained) != FEATURE_NAMES[: len(trained)]:
+            mismatch = next(
+                (
+                    i
+                    for i, name in enumerate(trained)
+                    if i >= len(FEATURE_NAMES) or name != FEATURE_NAMES[i]
+                ),
+                0,
+            )
+            raise ValueError(
+                f"Family model at {self.model_path} was trained on a different feature "
+                f"schema than app.ml.features.FEATURE_NAMES: first divergence at column "
+                f"{mismatch} (model has "
+                f"{trained[mismatch] if mismatch < len(trained) else '<end>'!r}, current "
+                f"schema has "
+                f"{FEATURE_NAMES[mismatch] if mismatch < len(FEATURE_NAMES) else '<end>'!r}). "
+                "Predictions would be computed from misaligned columns. Retrain with "
+                "`python scripts/train_model.py --target family`."
+            )
+
+        # Trained columns are a verified prefix of the current schema, so anything
+        # past them is a later append and is safe to drop.
+        vec = vec[: len(trained)]
+
+        # Passed as a named DataFrame, matching how train_model.py fitted it, so
+        # XGBoost validates the column names itself instead of trusting position.
+        X = pd.DataFrame([vec], columns=list(trained))
         probs = self._model.predict_proba(X)[0]
 
         if len(probs) != len(MODEL_LABEL_MAP):

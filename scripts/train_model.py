@@ -260,29 +260,87 @@ def _ml_metrics(Y_true, Y_pred) -> dict:
 
 def _calibrate_thresholds(model, X_val, Y_val, labels: list[str]) -> dict[str, float]:
     """
-    Pick each label's decision threshold by maximising validation F1.
+    Pick each label's decision threshold by maximising validation F1, subject to a
+    floor: a threshold may never sit at or below what the model predicts for an
+    all-zeros feature vector.
+
+    The floor is the invariant _zero_vector_sanity_check tests, enforced where the
+    number is chosen rather than only audited afterwards. Without it, F1 alone will
+    happily pick a threshold BELOW the model's no-evidence output for a prevalent
+    label that carries no learnable signal — which reads as "assert this technique
+    unless something contradicts it".
+
+    Observed on T1418 (Software Discovery) at 633 samples: the all-zeros vector
+    scores 0.5418 and F1 selected 0.15, against a median of 0.65 across labels and
+    0.6–0.9 for its similarly-prevalent peers. The label is family-constant (it
+    varies between samples in 0 of 21 families) and its defining API appears in 1.5%
+    of positive rows against 0.7% of negatives, so there is nothing for the estimator
+    to key on and "always yes" maximises F1. The same label trained at 0.8 on the
+    364-sample corpus and passed the gate — the defect was latent, not new.
+
+    A label whose floor pushes it near the top of the grid will rarely fire. That is
+    the honest outcome: it says the model cannot separate that technique from its own
+    prior, which is worth seeing rather than hiding behind a permissive cut.
 
     Labels with too few validation positives keep DEFAULT_TTP_THRESHOLD — a threshold
-    fitted to one or two samples is noise dressed up as calibration. Ties go to the
-    higher threshold, which is the conservative choice for a detector whose training
-    set has no benign class to teach it when to stay quiet.
+    fitted to one or two samples is noise dressed up as calibration — but the floor
+    applies to them too. Ties go to the higher threshold, the conservative choice for
+    a detector whose benign class (299 of 633 rows) still cannot cover every way a
+    clean app can look.
     """
+    import numpy as np
     from sklearn.metrics import f1_score
 
     proba = model.predict_proba_matrix(X_val)
+    # What the model says when shown nothing — the per-label floor.
+    zero_proba = model.predict_proba_matrix(
+        np.zeros((1, X_val.shape[1]), dtype=float)
+    )[0]
+
     thresholds: dict[str, float] = {}
     for i, label in enumerate(labels):
+        floor = float(zero_proba[i])
+        # Strictly above the floor: the sanity check fires on `p >= threshold`, so a
+        # threshold equal to the no-evidence probability would still assert the label.
+        allowed = [t for t in THRESHOLD_GRID if t > floor]
+
         y = Y_val[:, i]
         if int(y.sum()) < MIN_VAL_POSITIVES_TO_CALIBRATE:
-            thresholds[label] = DEFAULT_TTP_THRESHOLD
+            thresholds[label] = (
+                DEFAULT_TTP_THRESHOLD if DEFAULT_TTP_THRESHOLD > floor
+                else (allowed[0] if allowed else _above(floor))
+            )
             continue
-        best_t, best_f1 = DEFAULT_TTP_THRESHOLD, -1.0
-        for t in THRESHOLD_GRID:
+
+        if not allowed:
+            # The no-evidence probability exceeds every grid value. No threshold on
+            # the grid can make this label evidence-driven, so it is pinned just above
+            # its own floor: it will effectively never fire, which is the truthful
+            # answer for a label the model asserts unconditionally.
+            thresholds[label] = _above(floor)
+            continue
+
+        best_t, best_f1 = allowed[0], -1.0
+        for t in allowed:
             f1 = f1_score(y, (proba[:, i] >= t).astype(int), zero_division=0)
             if f1 > best_f1 or (f1 == best_f1 and t > best_t):
                 best_t, best_f1 = t, float(f1)
         thresholds[label] = best_t
     return thresholds
+
+
+def _above(floor: float) -> float:
+    """
+    Smallest sensible threshold strictly greater than `floor`, deliberately NOT clamped
+    to 1.0.
+
+    A label whose no-evidence probability is 0.99 needs a threshold above 0.99, and
+    clamping to 0.99 would leave `p >= threshold` true — reintroducing the exact
+    assertion-on-nothing this floor exists to stop. Letting the value exceed 1.0 makes
+    the label unreachable, which is the correct reading: the model asserts it at
+    near-certainty without evidence, so no probability should satisfy it.
+    """
+    return round(floor + 0.01, 4)
 
 
 def _pr_auc(model, X_te, Y_te, labels: list[str]) -> dict:

@@ -19,6 +19,12 @@ Explicitly NOT implemented: mapping WHICH native method belongs to WHICH
 loaded library. That requires resolving JNI_OnLoad's RegisterNatives calls
 inside the .so itself — real native disassembly, out of scope here — so
 native-flagged DEX methods are reported app-wide, not split per library.
+
+Also reads the .dynsym table's UNDEFINED (imported) symbols — the libc/
+OpenSSL functions this library calls out to — as a cheap substitute for
+real disassembly. This says "this native code can open sockets" without
+knowing what it does with them; deliberately a capability signal, not
+behavior analysis.
 """
 import io
 from dataclasses import dataclass, field
@@ -32,6 +38,20 @@ LOAD_LIBRARY_APIS = (
     "Ljava/lang/Runtime;->loadLibrary",
 )
 
+# Curated, not exhaustive — imported libc/OpenSSL symbols whose mere presence
+# is a meaningful capability signal even without knowing how they're used.
+# Grouped for readability in describe(); the grouping itself isn't used for
+# scoring, only the flat set of matched names.
+RISKY_IMPORTS = {
+    "network": {"connect", "socket", "send", "sendto", "recv", "recvfrom", "getaddrinfo"},
+    "process/exec": {"system", "fork", "execve", "execl", "popen", "dlopen"},
+    "crypto": {
+        "EVP_EncryptUpdate", "EVP_DecryptUpdate", "EVP_CipherInit",
+        "AES_encrypt", "AES_decrypt", "MD5_Update", "SHA1_Update",
+    },
+}
+_RISKY_IMPORT_NAMES = frozenset(name for group in RISKY_IMPORTS.values() for name in group)
+
 
 @dataclass
 class NativeBridgeFinding:
@@ -41,6 +61,7 @@ class NativeBridgeFinding:
     dynsym_count: int = 0
     java_prefixed_symbols: list = field(default_factory=list)
     declared_native_methods: list = field(default_factory=list)
+    risky_imports: list = field(default_factory=list)
 
     def describe(self) -> str:
         if self.resolved_so_path is None:
@@ -63,6 +84,8 @@ class NativeBridgeFinding:
                 if not self.java_prefixed_symbols else
                 f'{len(self.declared_native_methods)} native-flagged DEX methods declared app-wide'
             )
+        if self.risky_imports:
+            parts.append(f'imports: {", ".join(self.risky_imports)}')
         return " — ".join(parts)
 
 
@@ -80,20 +103,29 @@ def _find_library_file(apk_obj, library_name: str) -> str | None:
     return None
 
 
-def _parse_elf_dynsym(raw: bytes) -> tuple[bool, int, list[str]]:
+def _parse_elf_dynsym(raw: bytes) -> tuple[bool, int, list[str], list[str]]:
     if raw[:4] != b"\x7fELF":
-        return False, 0, []
+        return False, 0, [], []
     try:
         from elftools.elf.elffile import ELFFile
         elf = ELFFile(io.BytesIO(raw))
         dynsym = elf.get_section_by_name(".dynsym")
         if dynsym is None:
-            return True, 0, []
-        names = [s.name for s in dynsym.iter_symbols() if s.name]
+            return True, 0, [], []
+        names = []
+        risky_imports = set()
+        for s in dynsym.iter_symbols():
+            if not s.name:
+                continue
+            names.append(s.name)
+            # Undefined (SHN_UNDEF) = imported from elsewhere at load time, not
+            # implemented in this library — an import, not an export.
+            if s.entry.st_shndx == "SHN_UNDEF" and s.name in _RISKY_IMPORT_NAMES:
+                risky_imports.add(s.name)
         java_syms = sorted(n for n in names if n.startswith("Java_"))
-        return True, len(names), java_syms
+        return True, len(names), java_syms, sorted(risky_imports)
     except Exception:
-        return False, 0, []
+        return False, 0, [], []
 
 
 def _declared_native_methods(analysis_obj) -> list[str]:
@@ -141,10 +173,11 @@ def resolve_native_bridges(
                 raw = apk_obj.get_file(so_path)
             except Exception:
                 raw = b""
-            is_elf, count, java_syms = _parse_elf_dynsym(raw)
+            is_elf, count, java_syms, risky_imports = _parse_elf_dynsym(raw)
             finding.is_valid_elf = is_elf
             finding.dynsym_count = count
             finding.java_prefixed_symbols = java_syms
+            finding.risky_imports = risky_imports
             if is_elf:
                 if declared_native is None:
                     declared_native = _declared_native_methods(analysis_obj)

@@ -16,6 +16,7 @@ from typing import Any
 
 from androguard.core import dex
 from androguard.core.analysis.analysis import Analysis
+from androguard.core.apk import APK
 from androguard.decompiler import decompiler as _decompiler
 from androguard.misc import AnalyzeAPK
 from loguru import logger
@@ -257,7 +258,9 @@ def extract_intent_actions(apk_obj) -> list[str]:
     return sorted(actions)
 
 
-def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, list]:
+def ingest_apk(
+    filepath: str, *, skip_dex_analysis: bool = False
+) -> tuple[IngestionResult, object, object, object, list]:
     """
     Runs Androguard's full analysis pass and performs advanced static APK analysis.
 
@@ -267,28 +270,58 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
     The raw objects are returned alongside the parsed schema because CFG
     construction (cfg.py) needs direct access to the DalvikVMFormat /
     Analysis objects — don't re-parse the APK a second time downstream.
+
+    `skip_dex_analysis` parses the manifest and the raw ZIP payloads but not the
+    DEX cross-reference graph, returning `dvm` and `analysis` as None. That pass
+    is the whole cost of ingestion and none of its value on a cache hit — measured
+    on a 7.5 MB sample: AnalyzeAPK 13.42s, against APK() 0.061s and
+    inspect_apk_payloads 0.059s. The hot path answers from a stored verdict and
+    never builds a CFG, so it was paying thirteen seconds to construct an object
+    it then discarded.
+
+    Every IngestionResult field except `dex_method_count` is populated either way,
+    which is what makes this safe to use behind the cache: app_label, icon_phash
+    and cert_thumbprint still reach the impersonation check, so brand-table
+    updates keep taking effect on already-cached samples. `dex_method_count` is
+    the one casualty and it reports 0 — only the cold-path scorer reads it.
     """
     sha256 = compute_sha256(filepath)
 
     manifest_parse_failed = False
-    try:
-        apk_obj, dvm, analysis = AnalyzeAPK(filepath)
-    except Exception as e:
-        logger.warning(
-            f"AndroidManifest.xml parsing failed ({e}) — likely a deliberately "
-            "corrupted manifest (junk bytes between AXML chunk headers is a known "
-            "anti-analysis technique). Falling back to manifest-independent DEX/CFG "
-            "extraction; permission/component/cert fields will be unavailable, not "
-            "analysed."
-        )
-        apk_obj = None
-        dvm, analysis = _fallback_dex_analysis(filepath)
-        manifest_parse_failed = True
-        if analysis is None:
-            # Both the manifest AND a raw-ZIP DEX read failed — nothing left to
-            # analyze. Re-raise so the caller's existing unparseable-sample
-            # handling takes over, same as before this fallback existed.
-            raise
+    dvm = analysis = None
+    if skip_dex_analysis:
+        try:
+            apk_obj = APK(filepath)
+        except Exception as e:
+            # No DEX fallback here, and deliberately no re-raise: the caller has
+            # already found a cached verdict for this hash, so a manifest it
+            # cannot parse costs the freshly-derived fields and nothing else.
+            # The cold path below still fails loudly, which is where it matters.
+            logger.warning(
+                f"AndroidManifest.xml parsing failed ({e}) on a cache hit — "
+                "manifest-derived fields will be empty for this response."
+            )
+            apk_obj = None
+            manifest_parse_failed = True
+    else:
+        try:
+            apk_obj, dvm, analysis = AnalyzeAPK(filepath)
+        except Exception as e:
+            logger.warning(
+                f"AndroidManifest.xml parsing failed ({e}) — likely a deliberately "
+                "corrupted manifest (junk bytes between AXML chunk headers is a known "
+                "anti-analysis technique). Falling back to manifest-independent DEX/CFG "
+                "extraction; permission/component/cert fields will be unavailable, not "
+                "analysed."
+            )
+            apk_obj = None
+            dvm, analysis = _fallback_dex_analysis(filepath)
+            manifest_parse_failed = True
+            if analysis is None:
+                # Both the manifest AND a raw-ZIP DEX read failed — nothing left to
+                # analyze. Re-raise so the caller's existing unparseable-sample
+                # handling takes over, same as before this fallback existed.
+                raise
 
     # 1. Inspect payloads (secondary DEX and assets) — reads the raw ZIP directly,
     #    independent of apk_obj, so this still runs even without a parsed manifest.
@@ -365,11 +398,17 @@ def ingest_apk(filepath: str) -> tuple[IngestionResult, object, object, object, 
     #    because the scorer needs it to read a zero analysed-method count correctly
     #    (N7): a stub APK with a rich manifest and no recoverable code is evasion,
     #    an app whose methods simply matched nothing in the dictionary is not.
-    try:
-        dex_method_count = sum(1 for _ in analysis.get_methods())
-    except Exception as e:
-        logger.warning(f"DEX method count unavailable: {e}")
+    if analysis is None:
+        # skip_dex_analysis — no DEX pass ran, so this is "not counted" rather
+        # than "counted zero". Checked explicitly so it does not surface as the
+        # warning below, which means something went wrong.
         dex_method_count = 0
+    else:
+        try:
+            dex_method_count = sum(1 for _ in analysis.get_methods())
+        except Exception as e:
+            logger.warning(f"DEX method count unavailable: {e}")
+            dex_method_count = 0
 
     result = IngestionResult(
         sha256=sha256,

@@ -249,12 +249,20 @@ def _select_topology_subgraphs(
 class AnalysisPipeline:
     @staticmethod
     def run_phase1_ingestion(
-        filepath: str,
+        filepath: str, skip_dex_analysis: bool = False
     ) -> Tuple[IngestionResult, Any, Any, Any, List[Tuple[str, bytes]]]:
-        """Phase 1: Hashing, cert, structure, and Android malware static enrichments."""
+        """
+        Phase 1: Hashing, cert, structure, and Android malware static enrichments.
+
+        `skip_dex_analysis` is for the hot path only — see ingest_apk. It returns
+        no DalvikVMFormat/Analysis object, so a caller that goes on to build a CFG
+        must not use it.
+        """
         logger.info("[Phase 1] Starting Ingestion & Metadata Extraction...")
         start_time = time.time()
-        ingestion, apk_obj, dvm, analysis_obj, yara_targets = ingest_apk(filepath)
+        ingestion, apk_obj, dvm, analysis_obj, yara_targets = ingest_apk(
+            filepath, skip_dex_analysis=skip_dex_analysis
+        )
         duration = time.time() - start_time
         logger.info(
             f"[Phase 1] Completed in {duration:.3f}s. Package: {ingestion.package_name} | "
@@ -806,7 +814,8 @@ class AnalysisPipeline:
         method has one clean early-return rather than duplicating that gate.
 
         static_predictions passed in only carries fields this module actually
-        uses (c2_indicators, dcl_targets, native_targets, intent_actions) —
+        uses (c2_indicators, dcl_targets, native_targets, intent_actions,
+        activities, services) —
         resolved_dcl_targets/resolved_native_targets are human-readable
         "ClassName(\"path\")" / 'System.loadLibrary("x") -> ...' describe()
         strings from dcl_tracing.py/native_bridge.py, so only a resolved
@@ -832,6 +841,11 @@ class AnalysisPipeline:
                 "dcl_targets": resolved_dcl_targets,
                 "native_targets": resolved_native_targets or [],
                 "intent_actions": ingestion.intent_actions,
+                # Declared activities/services let a sample with no LAUNCHER
+                # category still be started explicitly by component name —
+                # see _start_declared_components.
+                "activities": ingestion.activities,
+                "services": ingestion.services,
             },
             sha256=ingestion.sha256,
         )

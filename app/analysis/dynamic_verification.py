@@ -15,9 +15,13 @@ as a free-standing new claim — this is what lets GraphRAG say "static
 analysis predicted X; dynamic execution confirmed it" instead of bolting a
 second, disconnected report onto the narrative.
 
-This module does NOT manage emulator lifecycle — a booted AVD is a
-precondition, checked implicitly by every adb call failing cleanly if it's
-absent. frida-server itself IS self-healed (see _ensure_frida_server_running):
+A booted AVD is no longer a precondition a human has to satisfy: when nothing
+is attached, _ensure_device_booted starts the AVD named by AVD_NAME (or the
+only installed one) and waits for sys.boot_completed before going further, so
+`enable_dynamic=true` is all a request needs. It is NOT shut down afterwards —
+subsequent runs reuse it and skip the boot entirely. Set
+DYNAMIC_ANALYSIS_AUTO_BOOT=false for the old fail-fast behaviour.
+frida-server itself IS self-healed (see _ensure_frida_server_running):
 confirmed live, repeatedly, across this feature's own testing that
 frida-server on the AVD dies between runs on its own, so every dynamic pass
 verifies it's running and restarts it if not, rather than depending on a
@@ -125,6 +129,15 @@ class DynamicVerificationOutcome:
     sms_destinations: list[str] = field(default_factory=list)
     accessibility_services: list[str] = field(default_factory=list)
     crypto_algorithms: list[str] = field(default_factory=list)
+    # Cheap substitute for real parameterized string-decryption (see
+    # hooks.js's hookCrypto): the actual doFinal() return value, captured
+    # live and truncated (CRYPTO_OUTPUT_PREVIEW_CAP in hooks.js), plus
+    # Cipher.init's encrypt/decrypt mode. Reported as independent
+    # observations, not correlated per-Cipher-instance — see hookCrypto's
+    # comment on why that correlation isn't attempted. Each entry:
+    # {"algorithm": ..., "preview": ...} or {"algorithm": ..., "mode": ...}.
+    crypto_outputs: list[dict] = field(default_factory=list)
+    crypto_modes_observed: list[str] = field(default_factory=list)
     # Incoming-SMS interception — the actual OTP-theft path this project is
     # aimed at (sms_api_invoked above only ever covered the app SENDING a
     # message). Non-empty means the app parsed an incoming SMS's sender
@@ -207,6 +220,8 @@ class DynamicVerificationOutcome:
             "sms_destinations": self.sms_destinations,
             "accessibility_services": self.accessibility_services,
             "crypto_algorithms": self.crypto_algorithms,
+            "crypto_outputs": self.crypto_outputs,
+            "crypto_modes_observed": self.crypto_modes_observed,
             "sms_intercepted": self.sms_intercepted,
             "overlay_detected": self.overlay_detected,
             "overlay_window_types": self.overlay_window_types,
@@ -493,11 +508,55 @@ def _broadcast_declared_actions(package_name: str, intent_actions: list[str] | N
             # action, which is unnecessary noise (and, on a shared AVD,
             # could exercise components that have nothing to do with the
             # sample under test).
-            _adb(["shell", "am", "broadcast", "-p", package_name, "-a", action], timeout=10)
+            # --include-stopped-packages is required, not optional: `pm install`
+            # leaves an app in the STOPPED state until something starts it, and
+            # the framework drops broadcasts to stopped packages by default.
+            # Without this flag the intent is accepted (result=0) and delivered
+            # to nothing, which looks identical to "the app ignored it".
+            _adb(["shell", "am", "broadcast", "--include-stopped-packages",
+                  "-p", package_name, "-a", action], timeout=10)
             sent += 1
         except _DynamicVerificationError as e:
             logger.warning(f"[Phase 8] fallback broadcast {action} failed (non-fatal): {e}")
     return sent
+
+
+def _start_declared_components(
+    package_name: str, activities: list[str] | None, services: list[str] | None
+) -> str | None:
+    """
+    Activation tier between `monkey` and broadcast fallback: start the app's
+    own declared components explicitly, by component name.
+
+    `monkey -c android.intent.category.LAUNCHER` can only start an activity
+    that declares the LAUNCHER category. Malware routinely declares activities
+    WITHOUT it — hiding the launcher icon is itself a common evasion — and for
+    those `monkey` exits 252 ("no activities found") even though the activity
+    exists and starts perfectly well via `am start -n <pkg>/<component>`.
+    Confirmed live on a corpus sample: two declared activities, no launcher
+    category, monkey failed, explicit start produced a live process.
+
+    Tries activities first (an Activity brings the process up in the
+    foreground, which is what the UI-driven hooks and screenshots want), then
+    services. Returns a short description of what worked, or None if nothing
+    did; each failure is non-fatal so the caller can still fall through to
+    broadcasts.
+    """
+    for component in list(activities or []):
+        try:
+            _adb(["shell", "am", "start", "-n", f"{package_name}/{component}"], timeout=15)
+            if _find_pid(package_name, retries=3, delay=1.0):
+                return f"activity {component}"
+        except _DynamicVerificationError as e:
+            logger.debug(f"[Phase 8] explicit activity start {component} failed: {e}")
+    for component in list(services or []):
+        try:
+            _adb(["shell", "am", "start-service", "-n", f"{package_name}/{component}"], timeout=15)
+            if _find_pid(package_name, retries=3, delay=1.0):
+                return f"service {component}"
+        except _DynamicVerificationError as e:
+            logger.debug(f"[Phase 8] explicit service start {component} failed: {e}")
+    return None
 
 
 def _find_pid(package_name: str, retries: int = 10, delay: float = 1.0) -> int:
@@ -539,6 +598,124 @@ def _teardown(package_name: str) -> None:
         _adb(["uninstall", package_name], timeout=30)
     except _DynamicVerificationError as e:
         logger.warning(f"[Phase 8] uninstall failed (non-fatal): {e}")
+
+
+def _device_is_online() -> bool:
+    """True when `adb devices` lists at least one device in state `device`.
+    States like `offline`/`unauthorized`/`booting` are deliberately NOT counted
+    — a half-attached emulator accepts a connection but fails every real
+    command, which is exactly the confusing half-broken state this gate is
+    meant to keep the pipeline out of."""
+    try:
+        out = _adb(["devices"], timeout=15)
+    except _DynamicVerificationError:
+        return False
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "device":
+            return True
+    return False
+
+
+def _list_avds() -> list[str]:
+    try:
+        result = subprocess.run(
+            [settings.emulator_path, "-list-avds"],
+            capture_output=True, text=True, timeout=30, env=_adb_env(),
+        )
+    except (subprocess.TimeoutExpired, OSError) as e:
+        raise _DynamicVerificationError(
+            f"could not run '{settings.emulator_path} -list-avds' ({e}) — set EMULATOR_PATH "
+            "in .env to the full path of the SDK's emulator binary."
+        ) from e
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _resolve_avd_name() -> str:
+    """AVD_NAME from .env wins. Otherwise auto-select, but only when the choice
+    is unambiguous — see settings.avd_name for why guessing between several
+    AVDs is unsafe rather than merely arbitrary."""
+    if settings.avd_name:
+        return settings.avd_name
+    avds = _list_avds()
+    if not avds:
+        raise _DynamicVerificationError(
+            "no AVD is attached and none is installed to boot — create one (API 30+, "
+            "'google_apis', x86_64) via Android Studio's Device Manager or avdmanager; "
+            "see app/analysis/frida_scripts/README.md."
+        )
+    if len(avds) > 1:
+        raise _DynamicVerificationError(
+            f"no AVD is attached and several are installed ({', '.join(avds)}) — set "
+            "AVD_NAME in .env to the one to boot. Pick the 'google_apis' image, not "
+            "'google_apis_playstore': the Play-signed image blocks Frida from injecting."
+        )
+    return avds[0]
+
+
+def _ensure_device_booted() -> None:
+    """
+    Boots the AVD when nothing is attached, so a request only has to ask for
+    dynamic analysis rather than a human also having to remember to start an
+    emulator first. No-op (and costs one `adb devices` call) when a device is
+    already up, which is the common case once the first run of the day has
+    booted it — this deliberately does NOT shut the AVD down afterwards, so
+    subsequent runs stay fast.
+
+    Two concurrent jobs can both find no device and both try to boot: the
+    second emulator process fails on its own (an AVD can't boot twice) and is
+    harmless, because the wait loop below only cares that SOME device reaches
+    `device` state, which the first boot delivers.
+    """
+    if _device_is_online():
+        return
+    if not settings.dynamic_analysis_auto_boot:
+        raise _DynamicVerificationError(
+            "no AVD attached and auto-boot is disabled (DYNAMIC_ANALYSIS_AUTO_BOOT=false) "
+            "— boot one manually, or re-enable auto-boot."
+        )
+
+    avd = _resolve_avd_name()
+    logger.info(f"[Phase 8] No device attached — booting AVD '{avd}' (this can take a minute).")
+    try:
+        # Fire-and-forget, like _ensure_frida_server_running: the emulator runs
+        # for the lifetime of the server, not of this request, so this must not
+        # wait on it. Its stdout/stderr go nowhere on purpose — a booted AVD is
+        # verified below by polling adb, which is the signal that actually
+        # matters, not whatever the emulator logs on the way up.
+        subprocess.Popen(
+            [settings.emulator_path, "-avd", avd, "-no-snapshot",
+             "-gpu", settings.emulator_gpu_mode, "-no-boot-anim"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+            env=_adb_env(),
+        )
+    except OSError as e:
+        raise _DynamicVerificationError(
+            f"could not launch the emulator ({e}) — set EMULATOR_PATH in .env to the full "
+            "path of the SDK's emulator binary."
+        ) from e
+
+    # `adb wait-for-device` is deliberately not used: it blocks forever when no
+    # emulator ever appears (a bad AVD name, a failed launch), turning a clean
+    # failure into a hung request. Polling bounds that.
+    deadline = time.time() + settings.avd_boot_timeout_seconds
+    while time.time() < deadline:
+        # sys.boot_completed only flips to 1 once the framework is actually up.
+        # `adb devices` reporting `device` comes minutes earlier on a cold boot,
+        # and installing against that half-booted window fails in confusing ways.
+        if _device_is_online():
+            try:
+                if _adb(["shell", "getprop", "sys.boot_completed"], timeout=15).strip() == "1":
+                    logger.info(f"[Phase 8] AVD '{avd}' booted and ready.")
+                    return
+            except _DynamicVerificationError:
+                pass
+        time.sleep(3)
+    raise _DynamicVerificationError(
+        f"AVD '{avd}' did not finish booting within {settings.avd_boot_timeout_seconds}s "
+        "(AVD_BOOT_TIMEOUT_SECONDS). Try booting it by hand to see what it reports — a "
+        "hang here is usually GPU-related (try EMULATOR_GPU_MODE=swiftshader_indirect)."
+    )
 
 
 def _ensure_frida_server_running() -> None:
@@ -704,7 +881,16 @@ def _run_capture_window_with_stimuli(timeout_s: int, sha256: str | None) -> str 
     time.sleep(settle)
 
     try:
-        _adb(["emu", "sms", "send", "+15551234567", "Your OTP code is 482913. Do not share it."], timeout=10)
+        # +91 98765 43210 is India's conventional placeholder mobile number —
+        # the same role US "555" numbers play — used ubiquitously in Indian
+        # docs/tutorials/examples, so it reads as obviously synthetic rather
+        # than a real subscriber number. Deliberately NOT a real bank's
+        # DLT-registered sender ID (e.g. "VM-SBIINB"): making the injected
+        # stimulus look like an authentic bank text would blur "we triggered
+        # this ourselves" into "this looks like a real SMS", which is a
+        # deception this project's screenshots must not risk — see the OTP
+        # text below, generic for the same reason.
+        _adb(["emu", "sms", "send", "+919876543210", "Your OTP code is 482913. Do not share it."], timeout=10)
     except _DynamicVerificationError as e:
         logger.warning(f"[Phase 8] simulated SMS injection failed (non-fatal): {e}")
 
@@ -909,6 +1095,11 @@ def _diff_against_predictions(events: list[dict], static_predictions: dict) -> D
     outcome.accessibility_services = sorted({e["value"] for e in events if e.get("kind") == "accessibility_bound" and e.get("value")})
     outcome.crypto_invoked = any(e.get("kind") == "crypto_invoked" for e in events)
     outcome.crypto_algorithms = sorted({e["value"] for e in events if e.get("kind") == "crypto_invoked" and e.get("value")})
+    outcome.crypto_outputs = [
+        {"algorithm": e.get("algorithm", ""), "preview": e.get("value", "")}
+        for e in events if e.get("kind") == "crypto_output"
+    ]
+    outcome.crypto_modes_observed = sorted({e["value"] for e in events if e.get("kind") == "crypto_mode" and e.get("value")})
 
     loaded_libs = sorted({e["value"] for e in events if e.get("kind") == "native_library_loaded" and e.get("value")})
     outcome.native_libraries_loaded = loaded_libs
@@ -1085,6 +1276,9 @@ def run_dynamic_verification(
     installed = False
     installed_path = apk_path
     try:
+        # First, before anything that talks to a device — including the egress
+        # probe below, which needs one to measure and fails closed without it.
+        _ensure_device_booted()
         if settings.dynamic_analysis_require_network_isolation and not _egress_appears_blocked():
             raise _DynamicVerificationError(
                 "AVD egress does not measure as blocked (a real TCP connection to a public "
@@ -1105,12 +1299,25 @@ def run_dynamic_verification(
             # malware (see _broadcast_declared_actions' docstring) — fall back
             # to activating it via its own declared broadcast actions instead
             # of letting this abort the whole pass with ran=False.
-            logger.warning(
-                f"[Phase 8] launcher start failed ({e}); falling back to "
-                "declared-action broadcasts"
-            )
             launch_fallback_used = True
-            _broadcast_declared_actions(package_name, static_predictions.get("intent_actions"))
+            # Ladder, cheapest and most faithful first: an explicit component
+            # start is far closer to a normal launch than a synthetic broadcast,
+            # so it is tried before falling back to one.
+            started_via = _start_declared_components(
+                package_name,
+                static_predictions.get("activities"),
+                static_predictions.get("services"),
+            )
+            if started_via:
+                logger.warning(
+                    f"[Phase 8] launcher start failed ({e}); started explicitly via {started_via}"
+                )
+            else:
+                logger.warning(
+                    f"[Phase 8] launcher start failed ({e}) and no declared component "
+                    "started; falling back to declared-action broadcasts"
+                )
+                _broadcast_declared_actions(package_name, static_predictions.get("intent_actions"))
         pid = _find_pid(package_name)
         events, reaction_screenshot_url = _collect_events(pid, timeout_s, sha256)
         outcome = _diff_against_predictions(events, static_predictions)
@@ -1119,9 +1326,13 @@ def run_dynamic_verification(
         outcome.screenshot_url = _capture_screenshot(sha256, tag="final")
         if launch_fallback_used:
             outcome.coverage_note = (
-                "app has no launcher activity — activated via its own declared "
-                "broadcast-receiver actions instead of am start; findings below "
-                "still reflect this sample's real runtime behavior. "
+                f"app declares no launcher activity (a common way to hide the icon) — "
+                f"activated via {started_via} instead of a launcher start; "
+                if started_via else
+                "app has no launcher activity and no declared component would start — "
+                "activated via its own declared broadcast-receiver actions instead; "
+            ) + (
+                "findings below still reflect this sample's real runtime behavior. "
             ) + outcome.coverage_note
         if installed_path != apk_path:
             # Analyst-facing honesty: the DEX/manifest/behavior observed below

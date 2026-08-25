@@ -1,105 +1,175 @@
 {
   "schema_version": 1,
   "description": "Protected brands for app/analysis/impersonation.py. Each entry names an app that fraudsters clone; the module flags APKs that wear a brand's package name, display name, or icon without being that brand's app.",
-  "status": "SEED — package names and labels only. Every entry has verified=false because no icon hash or signing certificate has been recorded yet, and those two fields power the two strongest checks (icon reuse, certificate mismatch). Run scripts/build_brand_reference.py against real APKs to fill them in and flip verified.",
+  "status": "15 of 66 brands carry a signing certificate read from a real APK, so the certificate check runs for them; 6 also carry a launcher icon hash. The remainder are package/label entries verified against a live store listing.",
   "how_to_extend": "Do not hand-write icon_phash or cert_sha256 — both must come from a genuine APK obtained from the official listing, which is what scripts/build_brand_reference.py does. Adding a brand by package name alone still powers the typosquat and label checks.",
-  "warning": "A WRONG package name here creates a false positive on the real app: the genuine bank APK would read as a typosquat of a package that does not exist. Verify each entry against the official store listing before relying on this table in a deployment.",
+  "warning": "A WRONG package name here creates a false positive on the real app: the genuine bank APK would read as a typosquat of a package that does not exist. Verify each entry against the official store listing before relying on this table in a deployment. SECOND RULE, equally load-bearing: once a brand has ANY cert_sha256 recorded, EVERY package listed under it is certificate-checked against that list, so a package whose own signing key has not been recorded will make the genuine app on it read as a clone. Only list packages you have verified.",
   "brands": [
     {
       "brand": "PhonePe",
       "category": "upi",
-      "packages": ["com.phonepe.app"],
-      "labels": ["PhonePe"],
+      "packages": [
+        "com.phonepe.app"
+      ],
+      "labels": [
+        "PhonePe"
+      ],
       "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "cert_sha256": [
+        "5335bc4961580b2e39cfe661355386636840686ad00b8dc16061d22236aa7d13"
+      ],
+      "verified": true
     },
     {
       "brand": "Paytm",
       "category": "upi",
-      "packages": ["net.one97.paytm"],
-      "labels": ["Paytm"],
+      "packages": [
+        "net.one97.paytm"
+      ],
+      "labels": [
+        "Paytm"
+      ],
       "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "cert_sha256": [
+        "6cc26cfce7ef3e839102d19da83be4caa855120b351d949287d05a06a2ea65ca"
+      ],
+      "verified": true
     },
     {
       "brand": "Google Pay (India)",
       "category": "upi",
-      "packages": ["com.google.android.apps.nbu.paisa.user"],
-      "labels": ["Google Pay", "GPay"],
+      "packages": [
+        "com.google.android.apps.nbu.paisa.user"
+      ],
+      "labels": [
+        "Google Pay",
+        "GPay"
+      ],
       "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "cert_sha256": [
+        "c17b8e3e427bfcd99cc65ec24ff53ae917424292d723615b74636468e3223c0b"
+      ],
+      "verified": true
     },
     {
       "brand": "BHIM",
       "category": "upi",
-      "packages": ["in.org.npci.upiapp"],
-      "labels": ["BHIM"],
+      "packages": [
+        "in.org.npci.upiapp"
+      ],
+      "labels": [
+        "BHIM"
+      ],
       "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "cert_sha256": [
+        "dfc31887e1b4c91ff18cc757de348beec88eae98500a5f7cc2c4095d4c27421a"
+      ],
+      "verified": true
     },
     {
       "brand": "YONO SBI",
       "category": "bank",
-      "packages": ["com.sbi.lotusintouch"],
-      "labels": ["YONO SBI", "YONO"],
-      "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "packages": [
+        "com.sbi.lotusintouch"
+      ],
+      "labels": [
+        "YONO SBI",
+        "YONO"
+      ],
+      "icon_phash": "d6d9a1255876a68b",
+      "cert_sha256": [
+        "435776891f2ca214e3ed167c42f60e47d96fa49e0c9ea76dbd9936fa54f15f42"
+      ],
+      "verified": true
     },
     {
       "brand": "HDFC Bank",
       "category": "bank",
-      "packages": ["com.snapwork.hdfc"],
-      "labels": ["HDFC Bank"],
-      "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "packages": [
+        "com.hdfcbank.android.now"
+      ],
+      "labels": [
+        "HDFC Bank",
+        "HDFC Bank App"
+      ],
+      "icon_phash": "cc199169d1bc93f1",
+      "cert_sha256": [
+        "3592a726ce955e3df3bd0b5953b487a874ba3c6a201b2666ac4f4f871cd650f3"
+      ],
+      "verified": true
     },
     {
       "brand": "ICICI iMobile",
       "category": "bank",
-      "packages": ["com.csam.icici.bank.imobile"],
-      "labels": ["iMobile Pay"],
-      "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "packages": [
+        "com.csam.icici.bank.imobile"
+      ],
+      "labels": [
+        "iMobile Pay",
+        "iMobile"
+      ],
+      "icon_phash": "c90d39b335c3c617",
+      "cert_sha256": [
+        "c204492d7445d35231b2cf32b4f0693bb14cd648bf973ac912a2c13d230d4efc"
+      ],
+      "verified": true
     },
     {
       "brand": "Axis Mobile",
       "category": "bank",
-      "packages": ["com.axis.mobile"],
-      "labels": ["Axis Mobile"],
-      "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "packages": [
+        "com.axis.mobile"
+      ],
+      "labels": [
+        "Axis Mobile"
+      ],
+      "icon_phash": "441d09d7767c05f5",
+      "cert_sha256": [
+        "ea40b45b42db0453b93390f21f45a442ceac10bf55d7bc124cdc3b045b7a5cfe"
+      ],
+      "verified": true
     },
     {
       "brand": "Kotak Mobile Banking",
       "category": "bank",
-      "packages": ["com.msf.kbank.mobile"],
-      "labels": ["Kotak Mobile Banking", "Kotak811"],
+      "packages": [
+        "com.kotak811mobilebankingapp.instantsavingsupiscanandpayrecharge"
+      ],
+      "labels": [
+        "Kotak Mobile Banking",
+        "Kotak811"
+      ],
       "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "cert_sha256": [
+        "2d3326a8a6efba13cc7f20f00fe3f0992ae0c7474eec846361cd0d902fd7c9f9"
+      ],
+      "verified": true
     },
     {
       "brand": "Bank of Baroda M-Connect",
       "category": "bank",
-      "packages": ["com.bankofbaroda.mconnect"],
-      "labels": ["bob World", "M-Connect Plus"],
+      "packages": [
+        "com.bankofbaroda.mconnect"
+      ],
+      "labels": [
+        "bob World",
+        "M-Connect Plus"
+      ],
       "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "cert_sha256": [
+        "86734f0ce04de5bce31b1978b5dac7f938feecdfe01908f5a1ae3cdcceb43003"
+      ],
+      "verified": true
     },
     {
       "brand": "Roblox",
       "category": "gaming",
-      "packages": ["com.roblox.client"],
-      "labels": ["Roblox"],
+      "packages": [
+        "com.roblox.client"
+      ],
+      "labels": [
+        "Roblox"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -107,8 +177,12 @@
     {
       "brand": "PNB ONE",
       "category": "bank",
-      "packages": ["com.Version1"],
-      "labels": ["PNB ONE"],
+      "packages": [
+        "com.Version1"
+      ],
+      "labels": [
+        "PNB ONE"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -116,8 +190,13 @@
     {
       "brand": "Union Bank of India",
       "category": "bank",
-      "packages": ["com.infrasoft.uboi"],
-      "labels": ["Vyom", "Union Ease"],
+      "packages": [
+        "com.infrasoft.uboi"
+      ],
+      "labels": [
+        "Vyom",
+        "Union Ease"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -125,8 +204,12 @@
     {
       "brand": "Canara Bank",
       "category": "bank",
-      "packages": ["com.canarabank.mobility"],
-      "labels": ["Canara ai1"],
+      "packages": [
+        "com.canarabank.mobility"
+      ],
+      "labels": [
+        "Canara ai1"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -134,8 +217,12 @@
     {
       "brand": "IDFC FIRST Bank",
       "category": "bank",
-      "packages": ["com.idfcfirstbank.optimus"],
-      "labels": ["IDFC FIRST Bank"],
+      "packages": [
+        "com.idfcfirstbank.optimus"
+      ],
+      "labels": [
+        "IDFC FIRST Bank"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -143,8 +230,13 @@
     {
       "brand": "IndusInd Bank",
       "category": "bank",
-      "packages": ["com.indusind.indie"],
-      "labels": ["INDIE", "IndusInd Bank"],
+      "packages": [
+        "com.indusind.indie"
+      ],
+      "labels": [
+        "INDIE",
+        "IndusInd Bank"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -152,8 +244,12 @@
     {
       "brand": "Federal Bank",
       "category": "bank",
-      "packages": ["com.fedmobile"],
-      "labels": ["FedMobile"],
+      "packages": [
+        "com.fedmobile"
+      ],
+      "labels": [
+        "FedMobile"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -161,8 +257,13 @@
     {
       "brand": "RBL Bank",
       "category": "bank",
-      "packages": ["com.rblbank.mobank"],
-      "labels": ["RBL MyBank", "RBL MoBank"],
+      "packages": [
+        "com.rblbank.mobank"
+      ],
+      "labels": [
+        "RBL MyBank",
+        "RBL MoBank"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -170,8 +271,12 @@
     {
       "brand": "Airtel Thanks",
       "category": "fintech",
-      "packages": ["com.myairtelapp"],
-      "labels": ["Airtel Thanks"],
+      "packages": [
+        "com.myairtelapp"
+      ],
+      "labels": [
+        "Airtel Thanks"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -179,8 +284,12 @@
     {
       "brand": "CRED",
       "category": "fintech",
-      "packages": ["com.dreamplug.androidapp"],
-      "labels": ["CRED"],
+      "packages": [
+        "com.dreamplug.androidapp"
+      ],
+      "labels": [
+        "CRED"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -188,8 +297,12 @@
     {
       "brand": "Truecaller",
       "category": "utility",
-      "packages": ["com.truecaller"],
-      "labels": ["Truecaller"],
+      "packages": [
+        "com.truecaller"
+      ],
+      "labels": [
+        "Truecaller"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -197,8 +310,12 @@
     {
       "brand": "Instagram",
       "category": "social",
-      "packages": ["com.instagram.android"],
-      "labels": ["Instagram"],
+      "packages": [
+        "com.instagram.android"
+      ],
+      "labels": [
+        "Instagram"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -206,8 +323,12 @@
     {
       "brand": "Facebook",
       "category": "social",
-      "packages": ["com.facebook.katana"],
-      "labels": ["Facebook"],
+      "packages": [
+        "com.facebook.katana"
+      ],
+      "labels": [
+        "Facebook"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -215,17 +336,28 @@
     {
       "brand": "Telegram",
       "category": "messaging",
-      "packages": ["org.telegram.messenger"],
-      "labels": ["Telegram"],
+      "packages": [
+        "org.telegram.messenger"
+      ],
+      "labels": [
+        "Telegram"
+      ],
       "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "cert_sha256": [
+        "49c1522548ebacd46ce322b6fd47f6092bb745d0f88082145caf35e14dcc38e1"
+      ],
+      "verified": true
     },
     {
       "brand": "Google Play Store",
       "category": "utility",
-      "packages": ["com.android.vending"],
-      "labels": ["Google Play Store", "Play Store"],
+      "packages": [
+        "com.android.vending"
+      ],
+      "labels": [
+        "Google Play Store",
+        "Play Store"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -233,8 +365,12 @@
     {
       "brand": "Flipkart",
       "category": "commerce",
-      "packages": ["com.flipkart.android"],
-      "labels": ["Flipkart"],
+      "packages": [
+        "com.flipkart.android"
+      ],
+      "labels": [
+        "Flipkart"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -242,26 +378,44 @@
     {
       "brand": "WhatsApp",
       "category": "messaging",
-      "packages": ["com.whatsapp"],
-      "labels": ["WhatsApp"],
+      "packages": [
+        "com.whatsapp"
+      ],
+      "labels": [
+        "WhatsApp"
+      ],
       "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "cert_sha256": [
+        "3987d043d10aefaf5a8710b3671418fe57e0e19b653c9df82558feb5ffce5d44"
+      ],
+      "verified": true
     },
     {
       "brand": "Amazon Shopping",
       "category": "commerce",
-      "packages": ["com.amazon.mShop.android.shopping"],
-      "labels": ["Amazon Shopping", "Amazon"],
+      "packages": [
+        "in.amazon.mShop.android.shopping"
+      ],
+      "labels": [
+        "Amazon Shopping",
+        "Amazon"
+      ],
       "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "cert_sha256": [
+        "2f19adeb284eb36f7f07786152b9a1d14b21653203ad0b04ebbf9c73ab6d7625"
+      ],
+      "verified": true
     },
     {
       "brand": "RBI MANI",
       "category": "government",
-      "packages": ["com.rbi.mani"],
-      "labels": ["MANI", "RBI MANI"],
+      "packages": [
+        "com.rbi.mani"
+      ],
+      "labels": [
+        "MANI",
+        "RBI MANI"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -269,8 +423,14 @@
     {
       "brand": "Indian Bank",
       "category": "bank",
-      "packages": ["com.IndianBank.IndOASIS", "com.iexceed.ib.digitalbankingprod"],
-      "labels": ["IndOASIS", "IndSMART"],
+      "packages": [
+        "com.IndianBank.IndOASIS",
+        "com.iexceed.ib.digitalbankingprod"
+      ],
+      "labels": [
+        "IndOASIS",
+        "IndSMART"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -278,17 +438,32 @@
     {
       "brand": "Bank of India",
       "category": "bank",
-      "packages": ["com.boi.ua.android"],
-      "labels": ["BOI Mobile"],
-      "icon_phash": null,
-      "cert_sha256": [],
-      "verified": false
+      "packages": [
+        "com.boi.ua.android",
+        "com.boi.erupee.prod"
+      ],
+      "labels": [
+        "BOI Mobile",
+        "Bank of India",
+        "BOI Omni Neo",
+        "Bank of India Digital Rupee"
+      ],
+      "icon_phash": "999c66f1c91322cf",
+      "cert_sha256": [
+        "018672474e1b89cfcef70ffd3f96ef40c2502ec7564213a072b62d7aabb962f9",
+        "cccc85792ea739ae3ce0a47014edaae12b9a1b59e45aaec3c2e75ab775d8db94"
+      ],
+      "verified": true
     },
     {
       "brand": "Central Bank of India",
       "category": "bank",
-      "packages": ["com.infrasofttech.CentralBank"],
-      "labels": ["Cent Mobile"],
+      "packages": [
+        "com.infrasofttech.CentralBank"
+      ],
+      "labels": [
+        "Cent Mobile"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -296,8 +471,12 @@
     {
       "brand": "UCO Bank",
       "category": "bank",
-      "packages": ["com.lcode.ucomobilebanking"],
-      "labels": ["UCO mBanking Plus"],
+      "packages": [
+        "com.lcode.ucomobilebanking"
+      ],
+      "labels": [
+        "UCO mBanking Plus"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -305,8 +484,12 @@
     {
       "brand": "Bank of Maharashtra",
       "category": "bank",
-      "packages": ["com.kiya.mahaplus"],
-      "labels": ["Mahamobile Plus"],
+      "packages": [
+        "com.kiya.mahaplus"
+      ],
+      "labels": [
+        "Mahamobile Plus"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -314,8 +497,12 @@
     {
       "brand": "Punjab & Sind Bank",
       "category": "bank",
-      "packages": ["com.psb.omniretail"],
-      "labels": ["PSB UnIC"],
+      "packages": [
+        "com.psb.omniretail"
+      ],
+      "labels": [
+        "PSB UnIC"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -323,8 +510,12 @@
     {
       "brand": "IDBI Bank",
       "category": "bank",
-      "packages": ["com.snapwork.IDBI"],
-      "labels": ["IDBI Bank GO Mobile+"],
+      "packages": [
+        "com.snapwork.IDBI"
+      ],
+      "labels": [
+        "IDBI Bank GO Mobile+"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -332,8 +523,13 @@
     {
       "brand": "Yes Bank",
       "category": "bank",
-      "packages": ["in.irisbyyes.app"],
-      "labels": ["IRIS by YES BANK", "YES BANK"],
+      "packages": [
+        "in.irisbyyes.app"
+      ],
+      "labels": [
+        "IRIS by YES BANK",
+        "YES BANK"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -341,8 +537,12 @@
     {
       "brand": "India Post Payments Bank",
       "category": "bank",
-      "packages": ["com.iexceed.appzillon.ippbMB"],
-      "labels": ["IPPB Mobile Banking"],
+      "packages": [
+        "com.iexceed.appzillon.ippbMB"
+      ],
+      "labels": [
+        "IPPB Mobile Banking"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -350,8 +550,12 @@
     {
       "brand": "Yono Lite SBI",
       "category": "bank",
-      "packages": ["com.sbi.SBIFreedomPlus"],
-      "labels": ["Yono Lite SBI"],
+      "packages": [
+        "com.sbi.SBIFreedomPlus"
+      ],
+      "labels": [
+        "Yono Lite SBI"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -359,8 +563,12 @@
     {
       "brand": "Jio",
       "category": "utility",
-      "packages": ["com.jio.myjio"],
-      "labels": ["MyJio"],
+      "packages": [
+        "com.jio.myjio"
+      ],
+      "labels": [
+        "MyJio"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -368,8 +576,12 @@
     {
       "brand": "LIC",
       "category": "insurance",
-      "packages": ["com.lic.liccustomer"],
-      "labels": ["LIC Digital"],
+      "packages": [
+        "com.lic.liccustomer"
+      ],
+      "labels": [
+        "LIC Digital"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -377,8 +589,12 @@
     {
       "brand": "DigiLocker",
       "category": "government",
-      "packages": ["com.digilocker.android"],
-      "labels": ["DigiLocker"],
+      "packages": [
+        "com.digilocker.android"
+      ],
+      "labels": [
+        "DigiLocker"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -386,8 +602,12 @@
     {
       "brand": "mAadhaar",
       "category": "government",
-      "packages": ["in.gov.uidai.mAadhaarPlus"],
-      "labels": ["mAadhaar"],
+      "packages": [
+        "in.gov.uidai.mAadhaarPlus"
+      ],
+      "labels": [
+        "mAadhaar"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -395,8 +615,12 @@
     {
       "brand": "Swiggy",
       "category": "commerce",
-      "packages": ["in.swiggy.android"],
-      "labels": ["Swiggy"],
+      "packages": [
+        "in.swiggy.android"
+      ],
+      "labels": [
+        "Swiggy"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -404,8 +628,12 @@
     {
       "brand": "Zomato",
       "category": "commerce",
-      "packages": ["com.application.zomato"],
-      "labels": ["Zomato"],
+      "packages": [
+        "com.application.zomato"
+      ],
+      "labels": [
+        "Zomato"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -413,8 +641,12 @@
     {
       "brand": "Ola",
       "category": "utility",
-      "packages": ["com.olacabs.customer"],
-      "labels": ["Ola"],
+      "packages": [
+        "com.olacabs.customer"
+      ],
+      "labels": [
+        "Ola"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -422,8 +654,12 @@
     {
       "brand": "Uber",
       "category": "utility",
-      "packages": ["com.ubercab"],
-      "labels": ["Uber"],
+      "packages": [
+        "com.ubercab"
+      ],
+      "labels": [
+        "Uber"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -431,8 +667,12 @@
     {
       "brand": "Myntra",
       "category": "commerce",
-      "packages": ["com.myntra.android"],
-      "labels": ["Myntra"],
+      "packages": [
+        "com.myntra.android"
+      ],
+      "labels": [
+        "Myntra"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -440,8 +680,12 @@
     {
       "brand": "Meesho",
       "category": "commerce",
-      "packages": ["com.meesho.supply"],
-      "labels": ["Meesho"],
+      "packages": [
+        "com.meesho.supply"
+      ],
+      "labels": [
+        "Meesho"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -449,8 +693,12 @@
     {
       "brand": "Groww",
       "category": "fintech",
-      "packages": ["com.nextbillion.groww"],
-      "labels": ["Groww"],
+      "packages": [
+        "com.nextbillion.groww"
+      ],
+      "labels": [
+        "Groww"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -458,8 +706,13 @@
     {
       "brand": "Zerodha Kite",
       "category": "fintech",
-      "packages": ["com.zerodha.kite3"],
-      "labels": ["Zerodha Kite", "Kite"],
+      "packages": [
+        "com.zerodha.kite3"
+      ],
+      "labels": [
+        "Zerodha Kite",
+        "Kite"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -467,8 +720,12 @@
     {
       "brand": "Slice",
       "category": "fintech",
-      "packages": ["indwin.c3.shareapp"],
-      "labels": ["slice"],
+      "packages": [
+        "indwin.c3.shareapp"
+      ],
+      "labels": [
+        "slice"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -476,8 +733,12 @@
     {
       "brand": "Snapdeal",
       "category": "commerce",
-      "packages": ["com.snapdeal.main"],
-      "labels": ["Snapdeal"],
+      "packages": [
+        "com.snapdeal.main"
+      ],
+      "labels": [
+        "Snapdeal"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -485,8 +746,12 @@
     {
       "brand": "SBI Card",
       "category": "bank",
-      "packages": ["com.ge.capital.konysbiapp"],
-      "labels": ["SBI Card"],
+      "packages": [
+        "com.ge.capital.konysbiapp"
+      ],
+      "labels": [
+        "SBI Card"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -494,8 +759,12 @@
     {
       "brand": "HDFC PayZapp",
       "category": "bank",
-      "packages": ["com.hdfcbank.payzapp"],
-      "labels": ["PayZapp"],
+      "packages": [
+        "com.hdfcbank.payzapp"
+      ],
+      "labels": [
+        "PayZapp"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -503,8 +772,14 @@
     {
       "brand": "Income Tax Department",
       "category": "government",
-      "packages": ["in.gov.incometaxindia.android", "io.lntinfotech.AIStaxpayer"],
-      "labels": ["My I-tax", "AIS for Taxpayer"],
+      "packages": [
+        "in.gov.incometaxindia.android",
+        "io.lntinfotech.AIStaxpayer"
+      ],
+      "labels": [
+        "My I-tax",
+        "AIS for Taxpayer"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -512,8 +787,12 @@
     {
       "brand": "UMANG",
       "category": "government",
-      "packages": ["in.gov.umang.negd.g2c"],
-      "labels": ["UMANG"],
+      "packages": [
+        "in.gov.umang.negd.g2c"
+      ],
+      "labels": [
+        "UMANG"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -521,8 +800,12 @@
     {
       "brand": "MobiKwik",
       "category": "fintech",
-      "packages": ["com.mobikwik_new"],
-      "labels": ["MobiKwik"],
+      "packages": [
+        "com.mobikwik_new"
+      ],
+      "labels": [
+        "MobiKwik"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -530,8 +813,12 @@
     {
       "brand": "Dhani",
       "category": "fintech",
-      "packages": ["com.indiaBulls"],
-      "labels": ["Dhani"],
+      "packages": [
+        "com.indiaBulls"
+      ],
+      "labels": [
+        "Dhani"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -539,8 +826,12 @@
     {
       "brand": "KreditBee",
       "category": "fintech",
-      "packages": ["com.kreditbee.android"],
-      "labels": ["KreditBee"],
+      "packages": [
+        "com.kreditbee.android"
+      ],
+      "labels": [
+        "KreditBee"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -548,8 +839,13 @@
     {
       "brand": "BGMI",
       "category": "gaming",
-      "packages": ["com.pubg.imobile"],
-      "labels": ["Battlegrounds Mobile India", "BGMI"],
+      "packages": [
+        "com.pubg.imobile"
+      ],
+      "labels": [
+        "Battlegrounds Mobile India",
+        "BGMI"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -557,8 +853,12 @@
     {
       "brand": "Free Fire MAX",
       "category": "gaming",
-      "packages": ["com.dts.freefiremax"],
-      "labels": ["Free Fire MAX"],
+      "packages": [
+        "com.dts.freefiremax"
+      ],
+      "labels": [
+        "Free Fire MAX"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -566,8 +866,12 @@
     {
       "brand": "Netflix",
       "category": "streaming",
-      "packages": ["com.netflix.mediaclient"],
-      "labels": ["Netflix"],
+      "packages": [
+        "com.netflix.mediaclient"
+      ],
+      "labels": [
+        "Netflix"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -575,8 +879,13 @@
     {
       "brand": "JioHotstar",
       "category": "streaming",
-      "packages": ["in.startv.hotstar"],
-      "labels": ["JioHotstar", "Disney+ Hotstar"],
+      "packages": [
+        "in.startv.hotstar"
+      ],
+      "labels": [
+        "JioHotstar",
+        "Disney+ Hotstar"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
@@ -584,11 +893,31 @@
     {
       "brand": "Spotify",
       "category": "streaming",
-      "packages": ["com.spotify.music"],
-      "labels": ["Spotify"],
+      "packages": [
+        "com.spotify.music"
+      ],
+      "labels": [
+        "Spotify"
+      ],
       "icon_phash": null,
       "cert_sha256": [],
       "verified": false
+    },
+    {
+      "brand": "Google Fit",
+      "category": "health",
+      "packages": [
+        "com.google.android.apps.fitness"
+      ],
+      "labels": [
+        "Google Fit",
+        "Fit"
+      ],
+      "cert_sha256": [
+        "7fd2cea30c3a6022eb29419ce8f6f92ce8a4bd35b0cc879ed3cca6cbf5e9992d"
+      ],
+      "icon_phash": "9c7363946b948e69",
+      "verified": true
     }
   ]
 }

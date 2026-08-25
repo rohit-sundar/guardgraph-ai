@@ -7,6 +7,8 @@ real AVD (see app/analysis/frida_scripts/README.md).
 import sys
 import os
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import app.analysis.dynamic_verification as dv
@@ -79,6 +81,29 @@ def test_diff_reports_actual_sms_accessibility_crypto_values():
     assert outcome.accessibility_services == ["com.evil.KeyloggerService"]
     assert outcome.crypto_invoked is True
     assert outcome.crypto_algorithms == ["DES/ECB/PKCS5Padding"]
+
+
+def test_diff_reports_crypto_output_preview_and_mode():
+    # Cheap substitute for real parameterized string-decryption (see
+    # hooks.js's hookCrypto docstring): the actual doFinal() return value,
+    # captured live, plus Cipher.init's encrypt/decrypt mode. Reported as
+    # independent observations, not correlated per-Cipher-instance.
+    events = [
+        {"kind": "crypto_invoked", "value": "AES/CBC/PKCS5Padding"},
+        {"kind": "crypto_output", "value": "http://evil.example.com/gate.php", "algorithm": "AES/CBC/PKCS5Padding"},
+        {"kind": "crypto_mode", "value": "decrypt", "algorithm": "AES/CBC/PKCS5Padding"},
+    ]
+    outcome = _diff_against_predictions(events, {})
+    assert outcome.crypto_outputs == [
+        {"algorithm": "AES/CBC/PKCS5Padding", "preview": "http://evil.example.com/gate.php"}
+    ]
+    assert outcome.crypto_modes_observed == ["decrypt"]
+
+
+def test_diff_crypto_output_absent_when_no_crypto_events():
+    outcome = _diff_against_predictions([{"kind": "network", "value": "1.2.3.4:443"}], {})
+    assert outcome.crypto_outputs == []
+    assert outcome.crypto_modes_observed == []
 
 
 def test_diff_event_summary_counts_by_kind():
@@ -400,3 +425,108 @@ def test_dynamic_verification_ran_but_empty_never_lowers_score():
         dynamic_verification={"ran": True, "network_confirmed": [], "dcl_payload_executed": False},
     )
     assert with_empty.total_score == baseline.total_score
+
+
+# ─── AVD auto-boot (Phase 8 no longer requires a hand-started emulator) ───────
+# A booted AVD used to be a precondition a human had to satisfy before every
+# dynamic run. These lock in the parts that must not regress: an already-online
+# device costs nothing, an ambiguous AVD choice refuses rather than guessing
+# (picking a google_apis_playstore image silently breaks Frida injection much
+# later), and a boot that never completes fails cleanly instead of hanging.
+
+def _boom(*args, **kwargs):
+    """Stand-in for a call that must NOT happen on the path under test."""
+    raise AssertionError(f"unexpected call: args={args} kwargs={kwargs}")
+
+
+_DEVICES_ONLINE = "List of devices attached\nemulator-5554\tdevice\n"
+_DEVICES_NONE = "List of devices attached\n"
+_DEVICES_OFFLINE = "List of devices attached\nemulator-5554\toffline\n"
+
+
+def test_ensure_device_booted_is_a_noop_when_a_device_is_already_online(monkeypatch):
+    calls = []
+
+    def fake_adb(args, timeout=30):
+        calls.append(args)
+        return _DEVICES_ONLINE
+
+    monkeypatch.setattr(dv, "_adb", fake_adb)
+    # Would raise OSError if it tried to launch anything.
+    monkeypatch.setattr(dv.subprocess, "Popen", _boom)
+    dv._ensure_device_booted()
+    assert calls == [["devices"]]
+
+
+def test_ensure_device_booted_does_not_count_an_offline_device(monkeypatch):
+    # A half-attached emulator accepts a connection but fails every real
+    # command — it must not be mistaken for a usable device.
+    monkeypatch.setattr(dv, "_adb", lambda args, timeout=30: _DEVICES_OFFLINE)
+    assert dv._device_is_online() is False
+
+
+def test_ensure_device_booted_refuses_when_auto_boot_is_disabled(monkeypatch):
+    monkeypatch.setattr(dv, "_adb", lambda args, timeout=30: _DEVICES_NONE)
+    monkeypatch.setattr(dv.settings, "dynamic_analysis_auto_boot", False)
+    monkeypatch.setattr(dv.subprocess, "Popen", _boom)
+    with pytest.raises(dv._DynamicVerificationError, match="auto-boot is disabled"):
+        dv._ensure_device_booted()
+
+
+def test_resolve_avd_name_refuses_to_guess_between_several_avds(monkeypatch):
+    monkeypatch.setattr(dv.settings, "avd_name", "")
+    monkeypatch.setattr(dv, "_list_avds", lambda: ["Pixel_5", "Pixel_10_Pro_XL"])
+    with pytest.raises(dv._DynamicVerificationError) as exc:
+        dv._resolve_avd_name()
+    # Names them, so the fix is obvious, and warns about the Play-signed trap.
+    assert "Pixel_5" in str(exc.value) and "Pixel_10_Pro_XL" in str(exc.value)
+    assert "AVD_NAME" in str(exc.value)
+
+
+def test_resolve_avd_name_auto_selects_the_only_installed_avd(monkeypatch):
+    monkeypatch.setattr(dv.settings, "avd_name", "")
+    monkeypatch.setattr(dv, "_list_avds", lambda: ["guardgraph_test"])
+    assert dv._resolve_avd_name() == "guardgraph_test"
+
+
+def test_resolve_avd_name_prefers_the_configured_name_over_autodetection(monkeypatch):
+    monkeypatch.setattr(dv.settings, "avd_name", "Pixel_5")
+    monkeypatch.setattr(dv, "_list_avds", _boom)
+    assert dv._resolve_avd_name() == "Pixel_5"
+
+
+def test_ensure_device_booted_waits_for_boot_completed_not_just_attachment(monkeypatch):
+    # `adb devices` reports `device` well before the framework is up; installing
+    # into that window fails in confusing ways, so boot_completed is the signal.
+    states = iter([
+        (_DEVICES_NONE, None),
+        (_DEVICES_ONLINE, "0"),   # attached but still booting
+        (_DEVICES_ONLINE, "1"),   # ready
+    ])
+    current = {"devices": _DEVICES_NONE, "booted": None}
+
+    def fake_adb(args, timeout=30):
+        if args == ["devices"]:
+            current["devices"], current["booted"] = next(states)
+            return current["devices"]
+        if args[:2] == ["shell", "getprop"]:
+            return current["booted"] or ""
+        return ""
+
+    monkeypatch.setattr(dv, "_adb", fake_adb)
+    monkeypatch.setattr(dv.settings, "dynamic_analysis_auto_boot", True)
+    monkeypatch.setattr(dv.settings, "avd_name", "Pixel_5")
+    monkeypatch.setattr(dv.subprocess, "Popen", lambda *a, **k: None)
+    monkeypatch.setattr(dv.time, "sleep", lambda s: None)
+    dv._ensure_device_booted()  # returns only once getprop reports "1"
+
+
+def test_ensure_device_booted_times_out_instead_of_hanging(monkeypatch):
+    monkeypatch.setattr(dv, "_adb", lambda args, timeout=30: _DEVICES_NONE)
+    monkeypatch.setattr(dv.settings, "dynamic_analysis_auto_boot", True)
+    monkeypatch.setattr(dv.settings, "avd_name", "Pixel_5")
+    monkeypatch.setattr(dv.settings, "avd_boot_timeout_seconds", 0)
+    monkeypatch.setattr(dv.subprocess, "Popen", lambda *a, **k: None)
+    monkeypatch.setattr(dv.time, "sleep", lambda s: None)
+    with pytest.raises(dv._DynamicVerificationError, match="did not finish booting"):
+        dv._ensure_device_booted()

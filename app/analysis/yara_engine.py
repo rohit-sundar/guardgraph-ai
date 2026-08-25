@@ -180,6 +180,16 @@ rule AndroidPacker_KnownStubs {
         $ijiami1 = "libexec" ascii wide
         $ijiami2 = "ijiami" ascii wide
 
+        // APKProtect — a distinct open packer, not the same product as Jiagu
+        // above (Qihoo 360's own packer IS Jiagu; a separately-named "Qihoo360"
+        // family was deliberately not added here, since inventing markers for
+        // it beyond the Jiagu strings already covered would be an unverified
+        // guess — this project's own signature data (protected_brands.json)
+        // requires real-artifact provenance, not guessed strings).
+        $apkprot1 = "libAPKProtect" ascii wide
+        $apkprot2 = "APKProtect.dat" ascii wide
+        $apkprot3 = "com.apkprotect" ascii wide
+
     condition:
         any of them
 }
@@ -281,6 +291,40 @@ rule AndroidMalware_AntiAnalysis {
         3 of ($emu*) or 2 of ($dbg*) or 2 of ($root*) or 1 of ($frida*)
 }
 """
+
+
+# ── Packer family identification ─────────────────────────────────────────
+
+# AndroidPacker_KnownStubs's own matched_strings (e.g. "$jiagu1") name which
+# specific commercial packer fired, but scan_file()/scan_bytes() only surface
+# the generic rule name/description. Mapping identifier prefix -> readable
+# family name turns "AndroidPacker_KnownStubs matched" into "Jiagu (Qihoo
+# 360)" in the manifest/report — same underlying detection, more useful text.
+_PACKER_FAMILY_BY_PREFIX = {
+    "jiagu": "Jiagu (Qihoo 360)",
+    "bangcle": "Bangcle / SecNeo",
+    "dexprot": "DexProtector",
+    "legu": "Tencent Legu",
+    "baidu": "Baidu Protect",
+    "ijiami": "iJiami",
+    "apkprot": "APKProtect",
+}
+
+
+def identify_packer_families(matched_strings: list[str]) -> list[str]:
+    """
+    Given AndroidPacker_KnownStubs's matched_strings (identifiers like
+    "$jiagu1", "$bangcle2"), returns the distinct packer family names they
+    correspond to, in the order first seen. Empty if none recognized (e.g.
+    called on a different rule's matches, or an empty list).
+    """
+    families: list[str] = []
+    for identifier in matched_strings:
+        prefix = identifier.lstrip("$").rstrip("0123456789")
+        family = _PACKER_FAMILY_BY_PREFIX.get(prefix)
+        if family and family not in families:
+            families.append(family)
+    return families
 
 
 # ── Module-level compiled rules cache ────────────────────────────────────
@@ -545,4 +589,11 @@ def _dedupe_yara_matches(matches: list[dict]) -> list[dict]:
         targets.add(str(m.get("scan_target", "")))
         existing["scan_target"] = "|".join(sorted(t for t in targets if t))
 
-    return list(by_rule.values())
+    merged = list(by_rule.values())
+    for match in merged:
+        if match["rule_name"] != "AndroidPacker_KnownStubs":
+            continue
+        families = identify_packer_families(match["matched_strings"])
+        if families:
+            match["description"] = f'{match["description"]} — matched: {", ".join(families)}'
+    return merged

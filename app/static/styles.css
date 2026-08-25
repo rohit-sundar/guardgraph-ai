@@ -140,14 +140,26 @@ body {
   border-radius: 50%;
 }
 
-.pulse-green .dot {
+/* Dependency state, driven by GET /health — see the pills in index.html.
+   "warn" is a real state, not a softened error: Neo4j up but unloaded, or Ollama
+   up with a cold model, both keep working while degrading something specific. */
+.status-ok .dot {
   background: var(--primary);
   box-shadow: 0 0 8px var(--primary);
 }
 
-.pulse-purple .dot {
-  background: var(--accent-purple);
-  box-shadow: 0 0 8px var(--accent-purple);
+.status-warn .dot {
+  background: var(--warning);
+  box-shadow: 0 0 8px var(--warning);
+}
+
+.status-down .dot {
+  background: var(--danger);
+  box-shadow: 0 0 8px var(--danger);
+}
+
+.status-unknown .dot {
+  background: var(--text-muted);
 }
 
 /* Glass Card Utility */
@@ -601,6 +613,27 @@ body {
   background: rgba(239, 68, 68, 0.15);
   color: var(--danger);
   border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.feedback-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+}
+
+.feedback-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-right: 0.25rem;
+}
+
+.feedback-status {
+  font-size: 0.8rem;
+  color: var(--text-muted);
 }
 
 /* Specs Grid */

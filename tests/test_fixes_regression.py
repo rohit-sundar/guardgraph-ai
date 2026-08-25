@@ -93,7 +93,12 @@ class TestStoreSigAlwaysCalledAfterColdPath(unittest.TestCase):
         # Pydantic validates signature_yara strictly — pass a real schema instance.
         real_sig_yara = SignatureYaraResult()
 
+        # _run_analysis hashes the file before deciding whether to parse it,
+        # so the hash is its own dependency now, not something the mocked
+        # pipeline supplies. The value does not matter (lookup_signature is
+        # patched) but the read is real, and /fake/test.apk does not exist.
         with patch("app.api.routes.AnalysisPipeline") as mp, \
+             patch("app.api.routes.compute_sha256", return_value="dd" * 32), \
              patch("app.api.routes.lookup_signature", return_value=None), \
              patch("app.api.routes.store_signature") as mock_store, \
              patch("app.api.routes.compute_risk_score", return_value=mock_risk):
@@ -637,6 +642,69 @@ class TestSectionContractCheck(unittest.TestCase):
         )
         self.assertEqual(_strip_unauthorized_sections(narrative).strip(), "")
 
+    # ── Bug: a heading on the opening verdict sentence deleted the sentence ──
+    # Observed live (2026-08-25): the model wrote "### Opening Verdict Sentence"
+    # (echoing the contract's own wording) above the rule 11 sentence. The
+    # contract check treated it as a fabricated section, _strip_unauthorized_
+    # sections removed the header AND its body, and because it sits before any
+    # allowed section there was no earlier unheaded prose to fall back on — the
+    # report shipped with no verdict sentence at all. "## Executive Summary" is
+    # the same mistake and was 13 of the 15 historical occurrences.
+
+    def test_unwraps_heading_placed_on_opening_verdict_sentence(self):
+        from app.reports.graphrag import _unwrap_opening_section
+        narrative = (
+            "### Opening Verdict Sentence\n"
+            "Malicious, score 58.8/100 — impersonates HDFC Bank.\n\n"
+            "### Key Evidence\nParsed an incoming SMS.\n"
+        )
+        cleaned, removed = _unwrap_opening_section(narrative)
+        self.assertEqual(removed, "### Opening Verdict Sentence")
+        # The sentence itself — the whole point — survives.
+        self.assertIn("Malicious, score 58.8/100 — impersonates HDFC Bank.", cleaned)
+        self.assertNotIn("Opening Verdict Sentence", cleaned)
+        # And the result is now contract-clean, so nothing gets stripped.
+        from app.reports.graphrag import _section_contract_check
+        self.assertEqual(_section_contract_check(cleaned), [])
+
+    def test_unwraps_executive_summary_heading(self):
+        from app.reports.graphrag import _unwrap_opening_section
+        narrative = "## Executive Summary\nSuspicious, score 44.0/100.\n\n### Key Evidence\nX.\n"
+        cleaned, removed = _unwrap_opening_section(narrative)
+        self.assertEqual(removed, "## Executive Summary")
+        self.assertIn("Suspicious, score 44.0/100.", cleaned)
+
+    def test_unwrap_is_a_no_op_on_a_compliant_narrative(self):
+        from app.reports.graphrag import _unwrap_opening_section
+        narrative = (
+            "Malicious, score 73.7/100 — a confirmed banking trojan.\n\n"
+            "### Key Evidence\nRequests SEND_SMS and RECEIVE_SMS together.\n"
+        )
+        cleaned, removed = _unwrap_opening_section(narrative)
+        self.assertIsNone(removed)
+        self.assertEqual(cleaned, narrative)
+
+    def test_unwrap_does_not_rescue_a_genuinely_fabricated_leading_section(self):
+        # The security property that must not regress: a fabricated section is
+        # still fabrication even though it leads the document.
+        from app.reports.graphrag import _unwrap_opening_section
+        cleaned, removed = _unwrap_opening_section(self._FABRICATED_NARRATIVE)
+        self.assertIsNone(removed)
+        self.assertEqual(cleaned, self._FABRICATED_NARRATIVE)
+
+    def test_unwrap_does_not_rescue_a_summary_section_further_down(self):
+        # Only the FIRST heading is eligible — a mid-report "Summary" restating
+        # the JSON is fabrication and must still be flagged and stripped.
+        from app.reports.graphrag import _unwrap_opening_section, _section_contract_check
+        narrative = (
+            "Malicious, score 73.7/100.\n\n"
+            "### Key Evidence\nRequests SEND_SMS.\n\n"
+            "## Summary\n- **Total Score:** 73.7\n"
+        )
+        cleaned, removed = _unwrap_opening_section(narrative)
+        self.assertIsNone(removed)
+        self.assertIn("## Summary", _section_contract_check(cleaned))
+
 
 # ─── Bug: greedy-decode degenerate repetition loop ───────────────────────────
 # Observed live (2026-08-23): qwen2.5:7b-instruct-q4_K_M repeated "API Coverage
@@ -900,3 +968,60 @@ class TestPreloadDoesNotFakeTheWarmup(unittest.TestCase):
              patch.object(g, "_post_native_chat") as mock_post:
             self.assertTrue(g.preload_model())
         mock_post.assert_not_called()
+
+    # ── Rule 12 was asked for but never enforced ──────────────────────────────
+    # SYSTEM_PROMPT has banned "isolate the device" / "keep AV updated" /
+    # "educate users" since it was written, and the model kept writing them —
+    # confirmed live even after ATT&CK mitigations were added to the prompt. Every
+    # other rule that matters is enforced after generation; this is rule 12's.
+
+    def test_generic_recommendations_are_flagged(self):
+        from app.reports.graphrag import _generic_action_check
+        narrative = (
+            "Malicious, 78.2/100.\n\n### Recommended Analyst Actions\n"
+            "1. **Isolate the Device**: Isolate the device from the network.\n"
+            "2. **Educate Users**: Inform users about permission risks.\n"
+        )
+        found = _generic_action_check(narrative)
+        self.assertIn("isolate the device", found)
+        self.assertIn("educate users", found)
+
+    def test_grounded_recommendations_pass(self):
+        """A mitigation-cited action names the control and the finding it answers."""
+        from app.reports.graphrag import _generic_action_check
+        narrative = (
+            "Malicious, 78.2/100.\n\n### Recommended Analyst Actions\n"
+            "1. M1011 User Guidance — covers T1417, the input capture this sample's "
+            "accessibility service enables.\n"
+            "2. Block the extracted C2 host nexuspay.shop at the perimeter.\n"
+        )
+        self.assertEqual(_generic_action_check(narrative), [])
+
+    def test_check_is_case_insensitive(self):
+        from app.reports.graphrag import _generic_action_check
+        self.assertEqual(_generic_action_check("ISOLATE THE DEVICE now"), ["isolate the device"])
+
+    def test_mitigation_block_renders_id_name_description_and_coverage(self):
+        """The whole point: an ID and a title tell an analyst nothing, so the
+        description has to be in the report, not just in the prompt."""
+        from app.reports.graphrag import _render_mitigations
+        out = _render_mitigations([{
+            "mitigation_id": "M1012", "name": "Enterprise Policy",
+            "description": "An EMM/MDM system can provision policies to mobile devices.",
+            "covers": ["T1417", "T1636"],
+        }])
+        self.assertIn("M1012", out)
+        self.assertIn("Enterprise Policy", out)
+        self.assertIn("An EMM/MDM system can provision policies", out)
+        self.assertIn("T1417, T1636", out)
+        self.assertIn("not model-generated", out)   # labelled as matrix-sourced
+
+    def test_mitigation_block_is_empty_when_nothing_applies(self):
+        from app.reports.graphrag import _render_mitigations
+        self.assertEqual(_render_mitigations([]), "")
+
+    def test_mitigation_block_skips_malformed_rows_without_raising(self):
+        """Report generation must not die because the graph returned an odd row."""
+        from app.reports.graphrag import _render_mitigations
+        out = _render_mitigations([{"name": "no id here"}, None, "junk"])
+        self.assertEqual(out, "")

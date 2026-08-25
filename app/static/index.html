@@ -8,11 +8,15 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css">
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- Vendored, not CDN-loaded. Cytoscape draws the threat landscape and the CFG
+       explorer, so a blocked CDN on conference wifi would take out the graph half
+       of the product with no error the user can act on. Provenance and refresh
+       commands: the "Vendored frontend libraries" section of README.md. -->
+  <script src="/static/vendor/marked.min.js"></script>
   <!-- Sanitizes the LLM narrative before it is rendered as HTML: the report is
        written from strings the analyzed malware controls. See renderMarkdown(). -->
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
+  <script src="/static/vendor/cytoscape.min.js"></script>
 </head>
 <body>
   <div class="app-background"></div>
@@ -33,12 +37,17 @@
           <p class="tagline">GraphRAG Android Threat Intelligence Platform</p>
         </div>
       </div>
+      <!-- Both pills were hardcoded green and stayed green through a 43-minute
+           Neo4j outage. They now report GET /health. "Backend Engine" was replaced
+           by "Knowledge Graph" on purpose: if this page rendered, the backend is up
+           by definition, so that pill could never have told anyone anything — the
+           graph is the dependency that fails silently. -->
       <div class="status-badges">
-        <div class="status-badge pulse-green">
-          <span class="dot"></span> Backend Engine: Active
+        <div class="status-badge status-unknown" id="pillGraph">
+          <span class="dot"></span><span id="pillGraphText">Knowledge Graph: checking&hellip;</span>
         </div>
-        <div class="status-badge pulse-purple">
-          <span class="dot"></span> Qwen2.5 7B LLM: Ready
+        <div class="status-badge status-unknown" id="pillLlm">
+          <span class="dot"></span><span id="pillLlmText">Qwen2.5 7B LLM: checking&hellip;</span>
         </div>
       </div>
     </div>
@@ -210,6 +219,18 @@
             <span class="badge badge-zero-day hidden" id="zeroDayBadge">Zero-Day Anomaly Detected</span>
             <span class="badge badge-malware hidden" id="impersonationBadge"></span>
             <span class="badge badge-malware hidden" id="knownMalwareBadge">Known VirusTotal Signature Match</span>
+            <span class="badge badge-zero-day hidden" id="packerBadge"></span>
+          </div>
+          <!-- Analyst feedback — the first half of an active-learning loop
+               (see scripts/export_feedback_for_training.py for the second
+               half). Recording only, no live retraining: a correction here
+               becomes a training-ready row the next time that script runs,
+               a deliberate manual step, not something this click triggers. -->
+          <div class="feedback-row" id="feedbackRow">
+            <span class="feedback-label">Is this verdict right?</span>
+            <button type="button" class="btn btn-sm btn-control" id="btnFeedbackConfirmed" title="This verdict looks correct">👍 Correct</button>
+            <button type="button" class="btn btn-sm btn-control" id="btnFeedbackFalsePositive" title="This verdict is wrong">👎 False positive</button>
+            <span class="feedback-status hidden" id="feedbackStatus"></span>
           </div>
         </div>
 

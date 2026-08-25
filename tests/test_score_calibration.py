@@ -49,11 +49,17 @@ from app.reports.scoring import (
     BAND_LOW_CEILING,
     BAND_MEDIUM_CEILING,
     BAND_SUSPICIOUS_CEILING,
+    CODE_NOT_RECOVERED_WEIGHT,
     MATRIX_FLAG_SEVERITY,
+    OPAQUE_REPUTATION_SCORE_FLOOR,
+    OPAQUE_DEX_MAX_METHODS,
+    TOTAL_METHOD_PARSE_FAILURE_WEIGHT,
     _band_for,
     classifier_confidence_component,
+    compute_risk_score,
     ioc_component,
     obfuscation_component,
+    opaque_reputation_floor,
 )
 
 A11Y_PERMISSION = "android.permission.BIND_ACCESSIBILITY_SERVICE"
@@ -465,3 +471,217 @@ class TestVerdictBands(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ─── Total static-parse failure: opacity is evidence, not absence of it ───────
+# Before this existed, an APK that defeated the parser entirely had
+# classifier_confidence (25), ttp_severity (15) and forensic_anchor (15) all read
+# 0 together — 55 of 100 points structurally unreachable — while the component
+# that exists to measure evasion paid the same 0.60 it pays a loader stub that at
+# least shipped some code. Meanwhile reputation is capped at 5.0, so an externally
+# damning verdict could not compensate. Found live: 02c08ec2…, 41/77 VirusTotal
+# engines malicious, scored 29.8 `low`.
+
+class TestTotalMethodParseFailure(unittest.TestCase):
+
+    def _no_cfgs_normal_dex(self):
+        """02c08ec2… as the corpus actually recorded it: 59 methods sitting in the
+        DEX, zero CFGs recovered, and a manifest small enough that the
+        methods-per-component ratio test does not fire either."""
+        return _obfuscation(
+            string_entropy_score=0.0, flattening_suspected=False,
+            flattening_method_count=0, analyzed_method_count=0,
+            flattening_method_ratio=0.0, dex_method_count=59,
+            declared_component_count=8,
+        )
+
+    def test_zero_cfgs_scores_even_when_the_dex_is_not_empty(self):
+        """The actual gap. This sample scored 0.0 here — the component that exists
+        to measure evasion read nothing on a sample that defeated the analyser
+        outright. Keyed on analyzed_method_count: a dex_method_count test misses it,
+        because 59 methods are present and simply could not be parsed into graphs."""
+        self.assertEqual(obfuscation_component(self._no_cfgs_normal_dex()),
+                         TOTAL_METHOD_PARSE_FAILURE_WEIGHT)
+
+    def test_nothing_recovered_at_all_saturates_the_component(self):
+        """No methods necessarily means no CFGs, so that case takes both weights and
+        saturates — the right answer for "we recovered literally nothing"."""
+        nothing = _obfuscation(
+            string_entropy_score=0.0, flattening_suspected=False,
+            flattening_method_count=0, analyzed_method_count=0,
+            flattening_method_ratio=0.0, dex_method_count=0,
+            declared_component_count=70,
+        )
+        self.assertEqual(obfuscation_component(nothing), 1.0)
+        self.assertGreater(
+            obfuscation_component(nothing),
+            obfuscation_component(self._no_cfgs_normal_dex()),
+        )
+
+    def test_an_analysed_app_is_never_charged_this_weight(self):
+        """The gate is "no code was examined" — one recovered CFG is enough to be
+        outside this signal entirely."""
+        barely = _obfuscation(analyzed_method_count=1, dex_method_count=59,
+                              declared_component_count=8)
+        self.assertEqual(obfuscation_component(barely), 0.0)
+
+    def test_relevance_filter_on_a_normal_sized_app_is_still_not_evasion(self):
+        """The half that keeps this honest, and the reason the DEX-size test exists.
+        com.reteclock recovers zero CFGs from 1444 methods — the pre-filter found
+        nothing touching the forensic dictionary, which is not evidence of anything.
+        The three clean corpus apps in this state carry 117, 184 and 1444 methods,
+        all above OPAQUE_DEX_MAX_METHODS, so none of them is charged."""
+        for dex_methods in (117, 184, 1444):
+            signal = _obfuscation(
+                flattening_suspected=False, flattening_method_count=0,
+                analyzed_method_count=0, flattening_method_ratio=0.0,
+                dex_method_count=dex_methods, declared_component_count=8,
+            )
+            self.assertEqual(obfuscation_component(signal), 0.0, dex_methods)
+
+    def test_the_boundary_sits_in_the_measured_gap(self):
+        """Malware with no recovered CFGs tops out at 61 methods on the 2026-08-25
+        corpus and 87 on the 2026-08-24 one; the lowest clean app in that state is
+        117 on both. The boundary must stay strictly inside that empty gap, and is
+        pinned against the WIDER of the two malware maxima so a future corpus change
+        cannot silently move it onto data."""
+        self.assertGreater(OPAQUE_DEX_MAX_METHODS, 87)
+        self.assertLess(OPAQUE_DEX_MAX_METHODS, 117)
+
+    def test_unmeasured_dex_count_is_not_charged(self):
+        """`None` means not measured, and must stay absence-of-evidence."""
+        unmeasured = _obfuscation(dex_method_count=None, analyzed_method_count=0,
+                                  declared_component_count=8)
+        self.assertEqual(obfuscation_component(unmeasured), 0.0)
+
+    def test_the_three_benign_corpus_rows_stay_low_even_if_charged(self):
+        """Defence in depth: even if a small clean app did land in this signal, the
+        weight cannot carry it out of `low` on its own — 2.12 -> 11.12, with 19
+        points of headroom to the boundary."""
+        benign_like = 2.12 + TOTAL_METHOD_PARSE_FAILURE_WEIGHT * 15
+        self.assertEqual(_band_for(benign_like), "low")
+        self.assertLess(benign_like, BAND_LOW_CEILING)
+
+
+# ─── OPAQUE_REPUTATION_SCORE_FLOOR ───────────────────────────────────────────
+
+class TestOpaqueReputationFloor(unittest.TestCase):
+
+    def _opaque(self):
+        """Shaped like 02c08ec2…: methods in the DEX, zero CFGs recovered."""
+        return _obfuscation(
+            string_entropy_score=0.0, flattening_suspected=False,
+            flattening_method_count=0, analyzed_method_count=0,
+            flattening_method_ratio=0.0, dex_method_count=59,
+            declared_component_count=8,
+        )
+
+    def test_floor_lands_in_its_intended_band(self):
+        """Pinned the same way the impersonation floors are: moving a band boundary
+        must not silently demote this verdict. `suspicious`, deliberately not
+        `high` — internal analysis contributed nothing, so the claim being made is
+        "a human should look", not "this is malicious"."""
+        floor = OPAQUE_REPUTATION_SCORE_FLOOR["known_malware_no_static_coverage"]
+        self.assertEqual(_band_for(floor), "suspicious")
+
+    def test_requires_both_halves_reputation_alone_is_not_enough(self):
+        """A sample the analyser could read scores on its own evidence and needs no
+        floor."""
+        readable = _obfuscation()
+        self.assertEqual(opaque_reputation_floor(True, readable), 0.0)
+
+    def test_requires_both_halves_opacity_alone_is_not_enough(self):
+        """THE false-positive guard. A benign app this parser simply fails on must
+        never be raised by our own failure to read it."""
+        self.assertEqual(opaque_reputation_floor(False, self._opaque()), 0.0)
+
+    def test_fires_when_externally_flagged_and_unreadable(self):
+        expected = OPAQUE_REPUTATION_SCORE_FLOOR["known_malware_no_static_coverage"]
+        self.assertEqual(opaque_reputation_floor(True, self._opaque()), expected)
+
+    def test_a_corrupt_manifest_counts_as_degraded_coverage_too(self):
+        """Same situation for scoring: the feature vector the weighted components
+        need was never produced."""
+        corrupt = _obfuscation(manifest_parse_failed=True)
+        expected = OPAQUE_REPUTATION_SCORE_FLOOR["known_malware_no_static_coverage"]
+        self.assertEqual(opaque_reputation_floor(True, corrupt), expected)
+
+    def test_end_to_end_the_live_sample_no_longer_reads_low(self):
+        """The regression this whole change exists for: externally flagged AND
+        unparseable used to land in `low`."""
+        result = compute_risk_score(
+            predicted_ttps={},
+            permissions=["android.permission.INTERNET"],
+            obfuscation=self._opaque(),
+            entropy_threshold=7.2,
+            classifier_evidence_present=False,   # nothing to classify — the real gate
+            is_known_malware=True,
+        )
+        self.assertGreater(result.total_score, BAND_MEDIUM_CEILING)
+        self.assertEqual(result.verdict_band, "suspicious")
+        self.assertTrue(result.opaque_reputation_floor_applied)
+
+    def test_floor_never_lowers_a_score_that_earned_more_on_its_own(self):
+        """Floors raise, never cap — a sample that is both opaque AND independently
+        damning keeps the higher arithmetic verdict, and the flag reads False so the
+        report does not credit the floor for a score the evidence earned."""
+        loud = compute_risk_score(
+            predicted_ttps={},
+            permissions=[
+                "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                "android.permission.READ_SMS",
+                "android.permission.RECEIVE_SMS",
+                "android.permission.SEND_SMS",
+                "android.permission.SYSTEM_ALERT_WINDOW",
+            ],
+            obfuscation=self._opaque(),
+            entropy_threshold=7.2,
+            classifier_evidence_present=False,
+            is_known_malware=True,
+            matched_anchor_behaviors={"STEALTH_SMS_INTERCEPTION", "OTP_INTERCEPTION",
+                                      "CREDENTIAL_HARVESTING"},
+            permission_matrix_flags=["SMS_OTP_STEALER_PATTERN", "ACCESSIBILITY_FULL_CONTROL"],
+            signature_match_count=3,
+            matched_c2_indicators=4,
+        )
+        floor = OPAQUE_REPUTATION_SCORE_FLOOR["known_malware_no_static_coverage"]
+        self.assertGreater(loud.weighted_score, floor)
+        self.assertEqual(loud.total_score, loud.weighted_score)
+        self.assertFalse(loud.opaque_reputation_floor_applied)
+
+    def test_holdout_false_positive_stays_low(self):
+        """The one never-trained clean app inside the boundary (player.efis.data.
+        ant.spl, 60 methods, no CFGs, no permissions) is charged the weight and
+        still cannot leave `low`. Pinned because it is the documented limit of how
+        far this signal generalizes — see OPAQUE_DEX_MAX_METHODS."""
+        after = 2.12 - 0.0 + TOTAL_METHOD_PARSE_FAILURE_WEIGHT * 15
+        self.assertAlmostEqual(after, 11.12, places=2)
+        self.assertEqual(_band_for(after), "low")
+
+    # ── Regression: a weight that armed itself when its input stopped being a stub ──
+    # UNRESOLVED_REFLECTION_WEIGHT was calibrated while the input always returned 0,
+    # and was deliberately "wired so that implementing the taint pass turns it on".
+    # The taint pass landed; the weight armed; nobody re-measured. It then paid
+    # 1.50/15 to 88.2% of CLEAN corpus apps against 76.9% of malware — a constant
+    # pointing the wrong way, the exact defect N7 removed three other inputs for.
+
+    def test_unresolved_reflection_does_not_move_the_score(self):
+        """Reported in the coverage note, never scored."""
+        none_ = _obfuscation(unresolved_reflection_targets=0)
+        many = _obfuscation(unresolved_reflection_targets=12)
+        self.assertEqual(obfuscation_component(none_), obfuscation_component(many))
+        self.assertEqual(obfuscation_component(many), 0.0)
+
+    def test_a_normal_app_with_reflection_scores_zero_obfuscation(self):
+        """The user-visible symptom: a healthy app showing '12 reflection call
+        targets not statically resolved' rendered a constant 1.50/15 forever."""
+        realistic = _obfuscation(dex_method_count=28241, declared_component_count=12,
+                                 unresolved_reflection_targets=12, analyzed_method_count=288)
+        self.assertEqual(obfuscation_component(realistic) * 15, 0.0)
+
+    def test_the_real_signal_still_fires(self):
+        """Removing the noise term must not touch CODE_NOT_RECOVERED, which is the
+        only part of this component that discriminates (malware-only in the corpus)."""
+        stub = _obfuscation(dex_method_count=57, declared_component_count=630,
+                            unresolved_reflection_targets=12, analyzed_method_count=5)
+        self.assertEqual(obfuscation_component(stub), CODE_NOT_RECOVERED_WEIGHT)

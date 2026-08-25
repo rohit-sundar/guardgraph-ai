@@ -56,6 +56,9 @@ sys.path.insert(0, PROJECT_ROOT)
 ONLINE_SECONDS_PER_SAMPLE = 15.0
 ONLINE_DAILY_STOP = 450
 
+# Set by --use-signature-db and forwarded to the children. Off by default: see score_one.
+_USE_SIGNATURE_DB = False
+
 DEFAULT_BENIGN_DIR = "data/benign_apks"
 DEFAULT_MALWARE_DIR = "data/ttp_apks"
 DEFAULT_OUT = "data/corpus_scores.json"
@@ -78,6 +81,20 @@ def score_one(apk_path: str) -> dict:
     from loguru import logger
 
     logger.remove()  # the parent prints progress; per-phase logs would drown it
+
+    # The local hash/cert DB is neutralised for calibration, for the same reason online
+    # lookups are: data/signatures/known_hashes.json now holds the SHA-256 of every APK
+    # in this corpus, so leaving it enabled means each malware sample matches itself —
+    # is_known_malware True, reputation_component 0.95 against the 0.3 unknown prior,
+    # plus a signature term in ioc_component. That is +5 to +8 points on every malware
+    # sample and exactly 0 on every benign one, injected into the run that decides where
+    # the verdict bands go: they would separate beautifully because the score would be
+    # reading the answer key. scoring.py's boundary block documents "signature_matches 0
+    # for every sample" as a precondition, and this is what keeps that true.
+    # --use-signature-db opts back in, for measuring the hot path rather than calibrating.
+    from app.core.config import settings
+    if not os.environ.get("GUARDGRAPH_SCORE_WITH_SIGDB"):
+        settings.signature_db_path = os.path.join(PROJECT_ROOT, "_no_signature_db.json")
 
     from app.core.pipeline import AnalysisPipeline, has_deterministic_evidence
 
@@ -151,6 +168,8 @@ def score_one(apk_path: str) -> dict:
 
 def _run_child(label: str, path: str, index: int, total: int, started: float) -> dict:
     env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    if _USE_SIGNATURE_DB:
+        env["GUARDGRAPH_SCORE_WITH_SIGDB"] = "1"
     try:
         proc = subprocess.run(
             [sys.executable, os.path.abspath(__file__), "--score-one", path],
@@ -329,11 +348,22 @@ def main() -> None:
                         help="load --out if it exists, skip APKs already scored, and "
                              "merge before writing. Also lets several --benign-dir "
                              "runs accumulate into one file.")
+    parser.add_argument("--use-signature-db", action="store_true",
+                        help="let the local hash/cert DB match during scoring. OFF by "
+                             "default: the DB holds this corpus's own hashes, so enabling "
+                             "it while re-deriving verdict bands feeds the answer key into "
+                             "the calibration. Use only for hot-path measurement.")
     parser.add_argument("--online", action="store_true",
                         help="enable VirusTotal/MalwareBazaar lookups. Forces "
                              "--workers 1 and paces at 4/min, so expect ~15s per APK "
                              "and a hard stop at the daily budget.")
     args = parser.parse_args()
+
+    global _USE_SIGNATURE_DB
+    _USE_SIGNATURE_DB = args.use_signature_db
+    if _USE_SIGNATURE_DB:
+        print("WARNING: --use-signature-db is ON. The local DB holds this corpus's own "
+              "hashes, so these scores must NOT be used to re-derive the verdict bands.")
 
     # Children inherit this through _run_child's env copy. Default off: see the
     # module docstring for the quota arithmetic.

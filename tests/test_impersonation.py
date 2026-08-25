@@ -21,6 +21,7 @@ import io
 
 import pytest
 
+from app.analysis import brand_lookup
 from app.analysis.impersonation import (
     ICON_MATCH_MAX_DISTANCE,
     Brand,
@@ -30,6 +31,7 @@ from app.analysis.impersonation import (
     normalize_confusables,
     perceptual_hash,
 )
+from app.core.config import settings
 
 PIL = pytest.importorskip("PIL", reason="Pillow is required for icon hashing")
 
@@ -327,6 +329,86 @@ def test_shipped_reference_brands_do_not_collide_with_each_other():
             )
 
 
+def test_no_label_is_an_unresolved_resource_reference():
+    """
+    An app installed from a bundle keeps its strings in a language split, so parsing
+    base.apk alone resolves the label to a raw resource id — "@7F124DF6", or
+    "<0x5120, type 0x00>". Both were written into the table as display names when it was
+    first populated from pulled APKs. _check_label then fuzzy-matches real app names
+    against that garbage, so it must never be recorded.
+    """
+    import re
+
+    from app.analysis.impersonation import load_reference
+
+    unresolved = re.compile(r"^(@[0-9A-Fa-f]+|<0x[0-9A-Fa-f]+,.*>)$")
+    for b in load_reference():
+        for label in b.labels:
+            assert not unresolved.match(label), (
+                f"{b.name} carries an unresolved resource reference as a label: {label!r}. "
+                "scripts/build_brand_reference.py filters these; it was regenerated with an "
+                "older copy, or the value was hand-edited in."
+            )
+            assert label.strip(), f"{b.name} has a blank label"
+
+
+def test_verified_means_a_certificate_was_recorded():
+    """
+    `verified` is what the status line and the README count, so it has to mean one thing:
+    a signing certificate came off a real APK. It deliberately does NOT also require an
+    icon hash — most modern apps ship an adaptive (XML) launcher icon, which has no pixels
+    to hash, so requiring it would pin `verified: false` forever on brands whose
+    certificate check works perfectly.
+    """
+    import json
+    import os
+
+    path = os.path.join(os.path.dirname(__file__), "..", "data", "reference",
+                        "protected_brands.json")
+    with open(path, encoding="utf-8") as fh:
+        raw = json.load(fh)
+
+    for entry in raw["brands"]:
+        has_cert = bool(entry.get("cert_sha256"))
+        assert bool(entry.get("verified")) == has_cert, (
+            f"{entry['brand']}: verified={entry.get('verified')} but "
+            f"{len(entry.get('cert_sha256') or [])} certificate(s) recorded"
+        )
+
+
+def test_every_package_of_a_certified_brand_is_covered():
+    """
+    Once a brand carries any certificate, EVERY package listed under it is checked against
+    that list — so a package whose own signing key was never recorded makes the genuine app
+    on it read as a clone of itself. Measured: a two-package brand with one recorded key
+    flags the genuine sibling as certificate_mismatch.
+
+    There is no way to tell from the file alone whether one key legitimately covers several
+    packages (publishers often sign every variant with one key) — so this asserts the weaker
+    invariant that actually catches the mistake: a certified brand must not list more
+    packages than it has recorded keys, unless a human recorded that they share a key.
+    """
+    import json
+    import os
+
+    path = os.path.join(os.path.dirname(__file__), "..", "data", "reference",
+                        "protected_brands.json")
+    with open(path, encoding="utf-8") as fh:
+        raw = json.load(fh)
+
+    for entry in raw["brands"]:
+        certs = entry.get("cert_sha256") or []
+        packages = entry.get("packages") or []
+        if not certs or len(packages) <= 1:
+            continue
+        assert len(certs) >= len(packages) or entry.get("shared_signing_key") is True, (
+            f"{entry['brand']} lists {len(packages)} packages but only {len(certs)} "
+            f"certificate(s). Either record a key for each package, drop the unverified "
+            f"ones, or set \"shared_signing_key\": true if the publisher genuinely signs "
+            f"them all with one key."
+        )
+
+
 # ── scoring integration ───────────────────────────────────────────────────────
 
 def _obfuscation():
@@ -423,3 +505,290 @@ def test_no_findings_leaves_the_weighted_score_untouched():
     result = _score([])
     assert result.impersonation_floor_applied is False
     assert result.total_score == result.weighted_score
+
+
+# ── package_namespace_squat ───────────────────────────────────────────────────
+# A package that is a protected package plus a suffix. Added after measuring the
+# malware corpus: three samples wear org.telegram.messenger.<random> and NONE of
+# the four original checks fired on any of them — the typosquat check cannot see
+# them, because appending ".wgstjg" is an edit distance of 6-7 against a cap of 2.
+
+
+def test_namespace_squat_is_caught_where_the_typosquat_check_cannot_reach():
+    from app.analysis.impersonation import PACKAGE_MAX_EDIT_DISTANCE, edit_distance
+
+    squat = "com.phonepe.app.wgstjg"
+    # The premise: this is genuinely out of the typosquat check's range, so the new
+    # check is covering a real gap rather than duplicating an existing one.
+    assert edit_distance(
+        squat.replace(".", ""), "comphonepeapp", PACKAGE_MAX_EDIT_DISTANCE
+    ) > PACKAGE_MAX_EDIT_DISTANCE
+
+    result = detect_impersonation(
+        package_name=squat, app_label="Redeem Code", brands=[brand()]
+    )
+    assert [f.kind for f in result.findings] == ["package_namespace_squat"]
+    assert result.findings[0].expected == "com.phonepe.app"
+
+
+def test_a_brands_own_extended_package_is_not_a_squat():
+    """
+    The false positive this check could most easily create. Telegram ships
+    org.telegram.messenger.beta itself; listing a brand's own extended builds in
+    `packages` is what keeps them exempt.
+    """
+    result = detect_impersonation(
+        package_name="com.phonepe.app.beta",
+        app_label="PhonePe",
+        brands=[brand(packages=["com.phonepe.app", "com.phonepe.app.beta"])],
+    )
+    assert result.findings == []
+
+
+def test_a_longer_package_sharing_only_a_prefix_is_not_a_squat():
+    """
+    The dot is the whole point. `com.phonepe.application` starts with the brand's
+    package as a *string* but does not extend its *namespace*, so it must not be
+    reported — this is why the check runs on the raw package rather than the
+    confusable-normalised form, which strips the dots that mark the boundary.
+    """
+    result = detect_impersonation(
+        package_name="com.phonepe.application", app_label="Something Else",
+        brands=[brand()],
+    )
+    assert [f.kind for f in result.findings] != ["package_namespace_squat"]
+
+
+def test_namespace_squat_floors_the_verdict_at_high():
+    """
+    Floored the same as a typosquat, for a stronger reason: a package cannot reach
+    "<brand's full namespace>.<random>" by mistyping.
+    """
+    result = _score([{"kind": "package_namespace_squat", "brand": "PhonePe"}])
+    assert result.impersonation_floor_applied is True
+    assert result.verdict_band == "high"
+
+
+def test_a_genuine_package_is_not_accused_by_a_similarly_named_brand():
+    """
+    Two protected brands can have similar names, and then each one's REAL app reads
+    as impersonating the other. Found the moment Bank of India was added: "BOI Mobile"
+    is an edit distance of 2 from ICICI's "iMobile", so the genuine BOI APK was
+    reported as impersonating ICICI iMobile.
+
+    A package listed in the reference table is a known-genuine app, so the name-based
+    checks are silenced for it.
+    """
+    boi = brand(name="Bank of India", packages=["com.boi.ua.android"],
+                labels=["BOI Mobile"], cert_sha256=[], verified=False)
+    icici = brand(name="ICICI iMobile", packages=["com.csam.icici.bank.imobile"],
+                  labels=["iMobile"], cert_sha256=[], verified=False)
+
+    result = detect_impersonation(
+        package_name="com.boi.ua.android", app_label="BOI Mobile", brands=[boi, icici]
+    )
+    assert result.findings == []
+
+
+def test_silencing_a_genuine_package_does_not_silence_the_evidence_checks():
+    """
+    The other half of that fix, and the more important half. Name-based checks are
+    suppressed for a known-genuine package; certificate and icon checks are NOT —
+    a wrong signing key on a genuine package name is precisely the clone this module
+    exists to catch, and no amount of brand-name similarity can produce one.
+    """
+    result = detect_impersonation(
+        package_name="com.phonepe.app", app_label="PhonePe",
+        cert_sha256=CLONE_CERT, brands=[brand()],
+    )
+    assert [f.kind for f in result.findings] == ["certificate_mismatch"]
+
+
+def test_a_disproven_owner_stops_silencing_the_other_brands():
+    """
+    The narrowing that makes the rule above safe. A package is only known-genuine
+    while nothing contradicts it — a wrong signing key does contradict it, and then
+    an APK wearing one brand's package while displaying another's name must still
+    report both findings.
+    """
+    phonepe = brand()
+    paytm = brand(name="Paytm", packages=["net.one97.paytm"], labels=["Paytm"],
+                  cert_sha256=[REAL_CERT])
+    result = detect_impersonation(
+        package_name="net.one97.paytm", app_label="PhonePe",
+        cert_sha256=CLONE_CERT, brands=[phonepe, paytm],
+    )
+    assert [f.kind for f in result.findings] == ["certificate_mismatch", "label_impersonation"]
+
+
+# ── live Play Store check (fifth signal) ───────────────────────────────────────
+# app.analysis.brand_lookup's HTTP seam is monkeypatched in every test below —
+# tests/conftest.py disables brand_live_lookup_enabled suite-wide by default, and
+# each of these re-enables it deliberately alongside the mock, so nothing here
+# ever touches the real network.
+
+def test_live_lookup_skipped_when_a_static_finding_already_fired(monkeypatch):
+    monkeypatch.setattr(settings, "brand_live_lookup_enabled", True)
+    calls = []
+    monkeypatch.setattr(
+        brand_lookup, "fetch_play_listing",
+        lambda pkg, timeout=None: (calls.append(("listing", pkg)), (None, "not_found"))[1],
+    )
+    monkeypatch.setattr(
+        brand_lookup, "search_play_by_title",
+        lambda title, max_results=5, timeout=None: (calls.append(("search", title)), ([], "ok"))[1],
+    )
+
+    result = detect_impersonation(
+        package_name="com.phonpe.app",  # typosquat of com.phonepe.app
+        app_label="PhonePe",
+        brands=[brand()],
+    )
+    assert any(f.kind == "package_typosquat" for f in result.findings)
+    assert calls == []  # static evidence already found — live lookup never attempted
+
+
+def test_live_lookup_skipped_for_a_known_genuine_package(monkeypatch):
+    monkeypatch.setattr(settings, "brand_live_lookup_enabled", True)
+    calls = []
+    monkeypatch.setattr(
+        brand_lookup, "fetch_play_listing",
+        lambda pkg, timeout=None: (calls.append(pkg), (None, "not_found"))[1],
+    )
+
+    result = detect_impersonation(
+        package_name="com.phonepe.app", app_label="PhonePe",
+        cert_sha256=REAL_CERT, brands=[brand()],
+    )
+    assert result.findings == []
+    assert calls == []  # already vouched for by the static table
+
+
+def test_live_lookup_flags_a_package_identity_mismatch(monkeypatch):
+    monkeypatch.setattr(settings, "brand_live_lookup_enabled", True)
+    monkeypatch.setattr(
+        brand_lookup, "fetch_play_listing",
+        lambda pkg, timeout=None: (
+            brand_lookup.PlayListing(pkg, "Totally Different Real App"), "found"
+        ),
+    )
+    monkeypatch.setattr(
+        brand_lookup, "search_play_by_title",
+        lambda title, max_results=5, timeout=None: ([], "ok"),
+    )
+
+    result = detect_impersonation(
+        package_name="com.unknown.example",
+        app_label="Some Unrelated Label",
+        brands=[brand()],  # PhonePe — not involved in this package at all
+    )
+    assert [f.kind for f in result.findings] == ["package_identity_mismatch_live"]
+    assert result.max_severity < 0.75  # strictly weaker than any static finding
+
+
+def test_live_lookup_flags_a_label_impersonation_via_search(monkeypatch):
+    monkeypatch.setattr(settings, "brand_live_lookup_enabled", True)
+    monkeypatch.setattr(
+        brand_lookup, "fetch_play_listing",
+        lambda pkg, timeout=None: (None, "not_found"),
+    )
+    monkeypatch.setattr(
+        brand_lookup, "search_play_by_title",
+        lambda title, max_results=5, timeout=None: (
+            [brand_lookup.PlayListing("com.realapp.example", "Totally Real Brand")], "ok"
+        ),
+    )
+
+    result = detect_impersonation(
+        package_name="com.clone.example",
+        app_label="Totally Real Brand",
+        brands=[brand()],
+    )
+    assert [f.kind for f in result.findings] == ["label_impersonation_live"]
+    assert result.findings[0].expected == "Totally Real Brand (com.realapp.example)"
+
+
+# ── generic bait label (sixth check) ────────────────────────────────────────
+# The case that motivated this check: a synthetic SpyNote sample labeled
+# "Customer Support" produced zero findings from every check above (confirmed
+# live 2026-08-25) because there is no single real "Customer Support" company
+# for checks 1-5 to compare against. Fully offline — no network involved.
+
+def test_generic_bait_label_is_flagged_advisory_only():
+    result = detect_impersonation(
+        package_name="rolling.investigations.novel",
+        app_label="Customer Support",
+        brands=[],
+    )
+    assert [f.kind for f in result.findings] == ["generic_bait_label"]
+    assert result.findings[0].severity < 0.6  # weaker than every other check
+
+
+def test_generic_bait_label_matching_is_case_and_whitespace_insensitive():
+    result = detect_impersonation(
+        package_name="x.y.z", app_label="  CUSTOMER   support  ", brands=[]
+    )
+    assert [f.kind for f in result.findings] == ["generic_bait_label"]
+
+
+def test_generic_bait_label_matches_a_tagline_variant():
+    result = detect_impersonation(
+        package_name="x.y.z", app_label="Speed Post - Track Your Parcel", brands=[]
+    )
+    assert [f.kind for f in result.findings] == ["generic_bait_label"]
+
+
+@pytest.mark.parametrize("label", [
+    "Income Tax Refund 2026",
+    "KYC Update Required",
+    "FedEx Delivery Tracker",
+    "Instant Personal Loan App",
+])
+def test_generic_bait_label_widened_list_catches_india_specific_lures(label):
+    result = detect_impersonation(package_name="x.y.z", app_label=label, brands=[])
+    assert [f.kind for f in result.findings] == ["generic_bait_label"]
+
+
+def test_generic_bait_label_does_not_fire_on_unrelated_labels():
+    result = detect_impersonation(package_name="x.y.z", app_label="My Cool Game", brands=[])
+    assert result.findings == []
+
+
+def test_generic_bait_label_runs_alongside_a_static_finding():
+    """Orthogonal check — it isn't skipped just because a static finding fired."""
+    result = detect_impersonation(
+        package_name="com.phonpe.app",  # typosquat
+        app_label="Customer Support",
+        brands=[brand()],
+    )
+    kinds = {f.kind for f in result.findings}
+    assert "package_typosquat" in kinds
+    assert "generic_bait_label" in kinds
+
+
+def test_generic_bait_label_never_moves_the_verdict_band():
+    """No entry in IMPERSONATION_SCORE_FLOOR — advisory only, by design."""
+    from app.reports.scoring import IMPERSONATION_SCORE_FLOOR
+
+    assert "generic_bait_label" not in IMPERSONATION_SCORE_FLOOR
+
+
+def test_live_lookup_disabled_setting_skips_the_network_entirely(monkeypatch):
+    # Default from tests/conftest.py — asserted explicitly here so the intent is
+    # visible in this file too, not only in the fixture.
+    assert settings.brand_live_lookup_enabled is False
+    calls = []
+    monkeypatch.setattr(
+        brand_lookup, "fetch_play_listing",
+        lambda pkg, timeout=None: (calls.append(pkg), (None, "not_found"))[1],
+    )
+    monkeypatch.setattr(
+        brand_lookup, "search_play_by_title",
+        lambda title, max_results=5, timeout=None: (calls.append(title), ([], "ok"))[1],
+    )
+
+    result = detect_impersonation(
+        package_name="com.unknown.example", app_label="Whatever", brands=[brand()]
+    )
+    assert calls == []
+    assert any("disabled" in note for note in result.coverage)
