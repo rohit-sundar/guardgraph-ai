@@ -1,23 +1,115 @@
-# GuardGraph AI — Prototype Skeleton
+# GuardGraph AI
 
-Android malware risk-scoring engine. CFG/ACFG graph features + XGBoost
-multi-label classification + Neo4j knowledge graph + local-LLM GraphRAG
-report generation (Ollama) on the static/default path, plus an **opt-in
-dynamic-analysis pass** (Android emulator + Frida) that confirms/refutes
-specific static predictions at runtime — see step 7 of the quickstart below,
-`app/analysis/frida_scripts/README.md` for the containment rules, and
-`TEAM_CONTEXT.md`'s Session 14 for the full design writeup.
+**AI-powered Android malware analysis and risk scoring** — upload a suspicious APK
+and get a MITRE ATT&CK-mapped, evidence-grounded verdict in minutes, not hours.
 
-The dynamic pass is **opt-in per request** and off by default: nothing on the
-normal `/analyze` path touches an emulator unless you ask for it.
+GuardGraph combines deterministic threat intelligence (SHA-256/certificate reputation,
+YARA, VirusTotal/MalwareBazaar), graph-based static analysis (control-flow graphs,
+behavioral subgraph mining), a Neo4j knowledge graph for cross-sample correlation, a
+**dynamic-analysis pass** (Android emulator + Frida) that confirms static predictions
+at runtime, and a local LLM (GraphRAG, via Ollama) that writes a narrative report
+grounded in — and checked against — the graph's own facts, so nothing in the report is
+invented.
 
-## Status
-This is a **skeleton**, not a finished product. Every module has a working
-interface and honest stubs where real logic goes. Nothing here fakes success —
-unimplemented paths raise `NotImplementedError` or return explicit
-`"not_implemented"` markers so you never mistake a stub for a working feature.
+Built for a bank-fraud-prevention context: banking/UPI-app impersonation detection,
+OTP/SMS-interception checks, and overlay-attack (fake login screen) detection are
+first-class, not afterthoughts.
 
-## Structure
+## Table of contents
+
+- [Features](#features)
+- [Tech stack](#tech-stack)
+- [Project structure](#project-structure)
+- [Installation](#installation)
+- [Usage](#usage)
+- [What's real vs. stubbed right now](#whats-real-vs-stubbed-right-now)
+- [Model training & calibration](#wiring-in-your-trained-model)
+- [Scalability](#scalability--what-it-costs-and-what-actually-scales)
+- [Known limitations](#known-limitation-23-of-57-techniques-are-never-predicted)
+- [Vendored frontend libraries](#vendored-frontend-libraries)
+
+## Features
+
+- **Deterministic threat intel** — SHA-256 hash and signing-certificate lookups against
+  a local signature DB, VirusTotal, and MalwareBazaar; known threats resolve in
+  milliseconds without touching the analysis pipeline.
+- **YARA + signature scanning** — 8 built-in rules plus the ~500-rule community corpus,
+  run alongside every analysis.
+- **Control-flow graph analysis** — CFG/ACFG construction via Androguard + NetworkX,
+  4-hop behavioral subgraph extraction, topological feature mining (degree, closeness,
+  clustering), and obfuscation/anti-analysis scoring (control-flow flattening, string
+  entropy, packed-manifest detection).
+- **Reverse-engineering deep dive** — a shared register-constant propagation engine
+  statically resolves reflection targets, crypto configuration
+  (`Cipher.getInstance`/`SecretKeySpec` chains), `DexClassLoader` payload targets,
+  `addJavascriptInterface` WebView bridges, and `System.loadLibrary`/JNI symbol
+  correlation — all static, fails closed rather than guessing.
+- **Brand & app-identity impersonation detection** — five checks (signing-certificate
+  mismatch, launcher-icon perceptual hash, package typosquatting, package-namespace
+  squatting, display-name impersonation) against a reference table of 66 protected
+  brands (Indian banks/UPI/government apps plus major global apps), after
+  Unicode-confusable normalization. Answers "is this app pretending to be a different,
+  legitimate app?" — a floor under the verdict, independent of payload analysis.
+- **Multi-label MITRE ATT&CK Mobile classifier** — predicts techniques directly
+  (Binary Relevance, one XGBoost per technique) from graph-invariant topology +
+  manifest/API presence features, with a family-held-out (not just stratified)
+  accuracy evaluation reported honestly in the UI.
+- **Weighted risk scoring** — seven calibrated components (classifier confidence,
+  permission/API analysis, forensic-anchor matching, obfuscation signals, reputation,
+  IoC matches, TTP severity) summing to a 0–100 score with five verdict bands, all
+  boundaries calibrated against a 633-APK corpus and reproducible on disk.
+- **Zero-day indicator** — flags strong deterministic/structural evidence paired with
+  low model confidence and a cache miss, so a genuinely novel sample doesn't hide
+  behind "the model doesn't recognize this."
+- **Opt-in dynamic verification** — installs the sample on a network-isolated Android
+  emulator, hooks 13 APIs (SMS interception, overlay-window creation, native library
+  loads, C2 contact, crypto invocation, accessibility binding, and more) for a bounded
+  capture window, and reports **CONFIRMED vs. not-observed** against each static
+  prediction — plus screenshots and a full event timeline.
+- **GraphRAG report generation** — a local LLM (Qwen2.5 7B via Ollama, no cloud key
+  needed) writes the narrative report grounded in retrieved graph facts. Grounding is
+  *enforced*, not just prompted: three independent post-generation checks verify every
+  cited technique, permission, and identifier actually appears in the manifest, and a
+  failed check is shown as a failed check, never silently hidden.
+- **Cross-sample correlation** — every analyzed sample joins a live Neo4j graph, so a
+  new upload is instantly checked against previously-seen samples sharing MITRE
+  techniques, C2 infrastructure, or a reused signing certificate — explorable live in
+  the UI via Cytoscape (Threat Landscape tab), no separate Neo4j Desktop needed.
+- **Real-time pipeline progress** — Server-Sent Events stream each of the ten backend
+  phases' actual start/done/skipped boundaries to the UI as they happen; a dropped
+  connection resumes from wherever the job currently is.
+- **Analyst feedback loop** — one-click Correct / False Positive on any verdict, logged
+  against the sample for later export into a training-ready dataset.
+- **Report export** — JSON (full structured report), Markdown (the AI narrative), or
+  PDF (via the browser's native print-to-PDF) — no server-side rendering dependency.
+- **Zero CDN dependencies** — every JS library (Cytoscape, the markdown renderer, the
+  HTML sanitizer) and both UI fonts are vendored locally; a blocked CDN on conference
+  wifi can't take out any part of the product.
+
+## Tech stack
+
+| Layer | Technology |
+|---|---|
+| Backend API | Python 3.12, FastAPI, Uvicorn |
+| Static analysis | Androguard, NetworkX (CFG/ACFG), yara-python |
+| Machine learning | XGBoost (multi-label Binary Relevance), scikit-learn, pandas |
+| Knowledge graph | Neo4j (hot-path cache, ontology grounding, cross-sample correlation) |
+| Report generation | Ollama (local LLM inference) running Qwen2.5 7B Instruct |
+| Dynamic analysis | Android Virtual Device (emulator) + Frida instrumentation |
+| Threat intel | VirusTotal API, MalwareBazaar API (optional, online) |
+| Frontend | Vanilla HTML/CSS/JS — no build step, no framework |
+| Frontend libraries | Cytoscape.js (graph visualization), marked.js (markdown), DOMPurify (sanitization) — all vendored locally |
+| Infrastructure | Docker Compose (Neo4j only — API runs locally) |
+
+## Dynamic verification is on by default
+
+This is an **opt-in-by-design capability that the UI enables by default** — every
+analysis run from the web UI includes the dynamic verification pass. The backend still
+accepts `enable_dynamic=false` for API callers who want the faster static-only path
+(see [Usage](#usage) below); it just isn't exposed as a UI toggle anymore.
+
+## Project structure
+
 ```
 guardgraph-ai/
 ├── app/
@@ -26,12 +118,12 @@ guardgraph-ai/
 │   ├── analysis/       Androguard ingestion, CFG/ACFG, forensic dictionary, obfuscation
 │   ├── ml/             feature vectorization, XGBoost inference
 │   ├── graph/          Neo4j client, cache lookup, ontology loader
-│   └── reports/        risk scoring, GraphRAG report generation
+│   ├── reports/        risk scoring, GraphRAG report generation
+│   └── static/         frontend (HTML/CSS/JS, vendored libraries + fonts)
 ├── data/
 │   ├── samples/        put test APKs here (gitignored)
 │   ├── benign_apks/    known-clean Stage C corpus, 299 apps (gitignored, ~3.0 GB)
-│   ├── benign_holdout/ 30 clean apps held out of training, for calibration only (~0.8 GB).
-│   │                   Kept in its own directory on purpose — see the quickstart.
+│   ├── benign_holdout/ 30 clean apps held out of training, for calibration only (~0.8 GB)
 │   └── models/         put trained model.json here
 ├── scripts/
 │   ├── train_model.py            CICMalDroid2020 training script skeleton
@@ -45,7 +137,7 @@ guardgraph-ai/
 └── .env.example
 ```
 
-## Quickstart
+## Installation
 
 First-time setup, in order. Assumes **Docker**, **Python 3.12**, and
 [**Ollama**](https://ollama.com) are installed. Report generation runs fully
@@ -92,8 +184,11 @@ python scripts/download_yara_rules.py
 uvicorn app.main:app --reload --port 8000
 ```
 
+Open `http://localhost:8000` — the UI is served from the same process.
+
 ```bash
-# 7. Dynamic analysis (Android emulator + Frida). 
+# 7. Dynamic analysis (Android emulator + Frida) — optional, needed for the
+#    dynamic-verification pass the UI runs by default.
 python scripts/setup_dynamic_analysis.py
 ```
 
@@ -128,23 +223,24 @@ emulator by hand. Per-machine settings — all optional, all documented in
 | `EMULATOR_GPU_MODE` | `swiftshader_indirect` (software) by default — hardware GPU passthrough is the usual cause of an emulator that hangs on boot. |
 | `AVD_BOOT_TIMEOUT_SECONDS` | Cold-boot budget, default 300. |
 
-Trigger it per request with `?enable_dynamic=true`, or tick **"🧪 Also run
-dynamic verification"** in the UI (the checkbox appears after you pick a file,
-above the analyse button — it is off by default):
-
-```bash
-curl -X POST "http://localhost:8000/analyze?enable_dynamic=true" \
-  -F "file=@data/ttp_apks/<sample>.apk"
-```
-
-Results render in the **🧪 Dynamic Verification** tab. `ran: false` there means
+Results render in the **Dynamic Verification** tab. `ran: false` there means
 the pass did not complete (no AVD, install failure, app crashed on launch) — it
 never means "no malicious behaviour found", and the coverage note says which.
 Note that an x86_64 AVD cannot install ARM-only APKs, and API 30+ refuses APKs
 whose `resources.arsc` is compressed; both are reported honestly rather than
 scored as clean.
 
-Then upload an APK. A sample ships with the repository:
+## Usage
+
+### Via the web UI
+
+Open `http://localhost:8000`, drag an APK onto the upload zone, and click **Run
+GraphRAG Threat Analysis**. Analysis history (every sample this instance has
+analyzed) is browsable from the same screen without re-uploading.
+
+### Via the API
+
+A sample ships with the repository:
 ```bash
 curl -X POST http://localhost:8000/analyze -F "file=@guardgraph_test/guardgraph_test.apk"
 ```
@@ -152,6 +248,24 @@ The first analysis of a given file takes roughly two to three minutes, almost al
 Phase 7's local LLM call — append `?skip_report=true` to get the verdict, score and full
 manifest without the narrative. Upload the same file again and it returns from the Neo4j
 cache instead of re-analysing.
+
+```bash
+# Static analysis only (skips the emulator pass, faster)
+curl -X POST "http://localhost:8000/analyze?enable_dynamic=false" \
+  -F "file=@data/ttp_apks/<sample>.apk"
+```
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/analyze` | POST | Synchronous full analysis; returns the complete `AnalysisReport` |
+| `/analyze/start` | POST | Starts an analysis job, returns a `job_id` immediately |
+| `/analyze/stream/{job_id}` | GET | Server-Sent Events stream of live pipeline progress, ending in the full report |
+| `/analyses` | GET | List every previously-analyzed sample (history) |
+| `/analyses/{sha256}` | GET | Fetch a previously-analyzed sample's report from the cache |
+| `/analyses/{sha256}/feedback` | POST | Record analyst feedback (`confirmed` / `false_positive`) on a verdict |
+| `/graph/landscape` | GET | The whole correlation graph (samples, families, techniques, C2, certs) for the Threat Landscape tab |
+| `/model/metrics` | GET | Measured accuracy of the MITRE TTP classifier (stratified vs. family-held-out) |
+| `/health` | GET | Neo4j and Ollama reachability, for the UI's status pills |
 
 ## What's real vs stubbed right now
 
@@ -166,13 +280,13 @@ cache instead of re-analysing.
 | 4-hop subgraph extraction | Working |
 | Topological feature mining | Working (degree/closeness/clustering; eigenvector/Katz stubbed — slow on large graphs, add if needed) |
 | Obfuscation / anti-analysis scoring | Working, recalibrated. String-pool entropy and control-flow flattening are still measured and reported, but neither is scored: measured over the 633-APK corpus, entropy cannot reach its threshold and runs backwards (mean benign 3.18 vs malware 2.71; it peaks at 3.86 against a 7.2 threshold), and flattening prevalence has no lift (benign p75 0.126 vs malware 0.112). Rebuilding the corpus twice reversed neither — those figures are within 0.03 of what the 618-row and 353-row corpora gave, which is the most stable measurement in the project. The component now scores the one thing that held up: a DEX too small to implement its own manifest. The CFG parse-failure branch was **deleted**, not left unscored: it measured 0.0 on all 353 samples of the first corpus, all 616 of the second, and all 633 of this one. |
-| Signature + YARA scanning (hash/cert DB, VirusTotal, MalwareBazaar, YARA rules) | Working; online triage (VT/MalwareBazaar) needs API keys in `.env`, otherwise local hash/cert + YARA run offline. 8 built-in rules always load; the ~500 community rule *files* require quickstart step 5 — without it the engine runs built-in-only and says so in the startup log |
+| Signature + YARA scanning (hash/cert DB, VirusTotal, MalwareBazaar, YARA rules) | Working; online triage (VT/MalwareBazaar) needs API keys in `.env`, otherwise local hash/cert + YARA run offline. 8 built-in rules always load; the ~500 community rule *files* require the "download YARA rules" install step — without it the engine runs built-in-only and says so in the startup log |
 | Brand / app-identity impersonation detection | Working (`app/analysis/impersonation.py`). Separate from every other row here — it answers "is this app pretending to be a different, legitimate app?" rather than "how malicious does the code look?". **Five** checks against a reference table of protected brands: signing-certificate mismatch on an exact package match (definitive — Android identifies publishers by key), launcher-icon reuse (64-bit DCT perceptual hash, survives rescale/recompress), package-name typosquatting, **package-namespace squatting** (a package that is a protected package *plus* a suffix — `org.telegram.messenger.wgstjg` — which typosquatting cannot catch, since appending 6 characters is far outside the edit-distance bound), and display-name impersonation, all after Unicode-confusable normalization. A match raises a **floor** under the verdict rather than adding to the weighted score, since a cloned banking app can carry a deliberately unremarkable payload — see `IMPERSONATION_SCORE_FLOOR` in `app/reports/scoring.py`. Ships with `data/reference/protected_brands.json` **populated from genuine APKs**: 66 brands — Indian banks/UPI/government apps plus the global social, commerce and streaming apps commonly used as fraud lures, every package name verified against a live Play listing. **15 of them carry a real signing certificate** read off a Play-installed APK, so the strongest check runs for those; the rest are package/label entries. The certified set includes **Bank of India** (`com.boi.ua.android`, `com.boi.erupee.prod`), Telegram, WhatsApp, PhonePe, Paytm, GPay, BHIM and the major Indian banks. Each app was installed from **Google Play onto an emulator with Play services** and pulled with `adb`, so the recorded signing key is the one Android actually verifies on device — not an APK-mirror copy, which re-signs and would invert the check. 6 also carry a launcher-icon hash (the rest ship adaptive XML icons, which have no pixels to hash — a permanent property of those apps, not work left undone). Regenerate with `python scripts/build_brand_reference.py --apk-dir <dir>`, then `--collisions`. Measured over the malware corpus, the name-based checks produce **22 findings across 344 samples with 0 false positives on 329 clean apps**. With the certificates now recorded, the **5 exact-package clones** on disk — trojans wearing Telegram's and Google Fit's exact package names — fire `certificate_mismatch` and go **35.62 `medium` → 72.01 `malicious` on identity evidence alone**, with no payload analysis involved. All 16 genuine brand APKs produce **zero** findings. Populate them for real with `python scripts/build_brand_reference.py --apk-dir <dir-of-genuine-APKs>` (get the APKs from official listings, not a mirror), then `--collisions` to confirm the icon threshold doesn't confuse two of your own brands. |
-| **Dynamic verification (opt-in, Android emulator + Frida)** | Working (`app/analysis/dynamic_verification.py`, `app/analysis/frida_scripts/`). Off by default on every request (`enable_dynamic` query param AND `settings.dynamic_analysis_enabled`, both must be true) — installs the sample on a network-isolated AVD, launches it (falling back to broadcasting its own declared intent-filter actions for headless/receiver-only malware with no launcher activity), and hooks 13 APIs for a bounded capture window to confirm/refute specific static predictions already made elsewhere in the pipeline: C2 contact, DCL payload execution, native library loads, SMS interception, overlay-attack windows, accessibility binding, crypto invocation, plus standalone IoCs (URLs/files/commands) and up to 3 screenshots per run (reaction / event-triggered / end-of-window). A confirmed C2 contact is also written to Neo4j as `dynamically_confirmed=true` on that sample's `CONTACTS` relationship, letting cross-sample correlation distinguish "shares this C2 string" from the stronger "was caught actually calling it". See `app/analysis/frida_scripts/README.md` for full setup (AVD, frida-server, containment firewall rules) and `TEAM_CONTEXT.md`'s Session 14 for the design writeup and every failure mode found live. |
+| **Dynamic verification (Android emulator + Frida)** | Working (`app/analysis/dynamic_verification.py`, `app/analysis/frida_scripts/`). Enabled by default from the web UI; API callers can pass `enable_dynamic=false` for the faster static-only path (`settings.dynamic_analysis_enabled` must also be true — see Installation step 7). Installs the sample on a network-isolated AVD, launches it (falling back to broadcasting its own declared intent-filter actions for headless/receiver-only malware with no launcher activity), and hooks 13 APIs for a bounded capture window to confirm/refute specific static predictions already made elsewhere in the pipeline: C2 contact, DCL payload execution, native library loads, SMS interception, overlay-attack windows, accessibility binding, crypto invocation, plus standalone IoCs (URLs/files/commands) and up to 3 screenshots per run (reaction / event-triggered / end-of-window). A confirmed C2 contact is also written to Neo4j as `dynamically_confirmed=true` on that sample's `CONTACTS` relationship, letting cross-sample correlation distinguish "shares this C2 string" from the stronger "was caught actually calling it". See `app/analysis/frida_scripts/README.md` for full setup (AVD, frida-server, containment firewall rules) and `TEAM_CONTEXT.md`'s Session 14 for the design writeup and every failure mode found live. |
 | Family XGBoost inference (auxiliary) | **Not shipped, deliberately.** `data/models/guardgraph_xgb_v1.json` was removed rather than retrained, for two independent reasons. (1) It was trained on the 33-feature schema and `BEHAVIOR_FEATURES` later grew in the *middle*, so a length-based compatibility slice kept the vector the right size while shifting every column from index 12 onward — a silent misalignment producing confident, wrong families. `app/ml/classifier.py` now compares the booster's stored `feature_names` against `FEATURE_NAMES` and refuses to predict on a mismatch, naming the first column that diverges. (2) Its training data, `data/cicmaldroid_features.csv`, is synthetic — exactly 250 rows per family, all 15 topology columns identically zero, `string_entropy_score` up to 7.79 where the real pipeline's measured maximum is 3.47 — so `predicted_family` was never trustworthy regardless of the alignment. **Do not retrain from that CSV.** With no artifact present, `predicted_family` comes from a deterministic hash/certificate match when there is one and is otherwise blank; the primary cold path predicts techniques directly and does not depend on it. |
 | Multi-label MITRE ATT&CK TTP classifier (primary, cold path) | Trained — `data/models/guardgraph_ttp_br_v1.joblib` is committed. Trained on **633 rows — 299 benign / 334 malware across 21 families**, 34 of 57 techniques carrying enough positives to train (the other 23 are listed in `dropped_labels` and are never predicted; see the limitation note below the table). **The stratified-split metrics this repo used to quote were measuring family memorisation, not technique inference** — every malware row's label comes from its family's ATT&CK software entry, so a split that stratifies on labels puts identical label vectors on both sides of the train/test boundary by construction. `ttp_metrics.json` therefore also carries `family_held_out`, a `GroupKFold` evaluation with whole families held out of each fold. Both numbers, side by side: **stratified micro-F1 0.87** against **family-held-out micro-F1 0.29, Jaccard 0.087**. Note the direction — nearly doubling the corpus (364 → 633 rows) *raised* the stratified figure and *lowered* the held-out one. More data does not buy generalization to a family the model has never seen, which is precisely why the risk score puts 60% of its weight on deterministic evidence. Quote the held-out number, not the leaky one. Re-derive both with `python scripts/train_model.py --target ttp`, which prints them side by side. |
 | Neo4j cache lookup (hot path) | Working, needs Neo4j running + ontology loaded. The full cached record (risk components, obfuscation signal, permissions, signature/YARA data) now persists to Neo4j as a JSON property on the `Sample` node, not only to an in-process dict — a cache hit after a server restart used to silently return a total score with every component blank while the cached narrative still described them. **The lookup runs before the APK is parsed, not after** — it is keyed on the SHA-256 of the raw bytes, which needs no parsing, but it used to sit behind a full Androguard pass, so a sample answered from cache still paid the entire cost of analysing it. A hit now parses the manifest only (no DEX cross-reference build): measured end to end at **0.75 s**, from 6.6 s of Phase 1 ingestion down to 0.24 s on the same 3.9 MB sample. The manifest parse is kept rather than answering from the stored record alone because the impersonation check re-runs on every hit — so an updated brand table applies to already-cached samples without re-analysis — and it needs the app label, launcher-icon hash and signing certificate, none of which are cached. |
-| Reverse-engineering deep dive (reflection, crypto config, dynamic code loading, WebView JS bridges, native/JNI bridges) | Working. Shared register-constant propagation engine (`app/analysis/static_resolution.py`) resolves reflection targets, `Cipher.getInstance`/`SecretKeySpec` chains, `DexClassLoader` targets, `addJavascriptInterface` bridges, and `System.loadLibrary` symbol correlation — all static, fails closed on ambiguous dataflow rather than guessing. Surfaced in the "🔬 Reverse Engineering" report tab |
+| Reverse-engineering deep dive (reflection, crypto config, dynamic code loading, WebView JS bridges, native/JNI bridges) | Working. Shared register-constant propagation engine (`app/analysis/static_resolution.py`) resolves reflection targets, `Cipher.getInstance`/`SecretKeySpec` chains, `DexClassLoader` targets, `addJavascriptInterface` bridges, and `System.loadLibrary` symbol correlation — all static, fails closed on ambiguous dataflow rather than guessing. Surfaced in the "Reverse-Engineering Indicators" report tab |
 | Manifest-corruption / anti-analysis resilience | Working. AXML chunk-header corruption and ZIP EOCD/local-header corruption both fall back to manifest-independent DEX/CFG recovery instead of aborting the whole analysis; unrecognized parser failures get a probable-cause explanation (`app/analysis/failure_diagnostics.py`) instead of a raw traceback, and the GraphRAG narrative always runs (never a hardcoded empty placeholder) even on total parse failure |
 | Neo4j graph correlation (beyond the cache) | Working. `ttp_context` grounds the "MITRE ATT&CK Mapping" tab in real ontology facts (name/tactic/description), `find_related_samples` correlates the current sample against previously-cached ones via shared MITRE techniques / shared C2 infrastructure / a reused signing certificate ("Correlated Samples" tab), and `get_threat_landscape` + `/graph/landscape` render the whole correlation graph live inside the app via Cytoscape ("Threat Landscape" tab) — no separate Neo4j Desktop window needed for a demo |
 | Risk scoring formula | Working. **Seven weighted components, which is a deliberate departure from the paper's six** — GuardGraph adds a `forensic_anchor` term (0.15) because the paper scores no equivalent, and matched API/permission anchors are the evidence that survives when the model meets an unfamiliar family; the remaining weights were rebalanced to accommodate it rather than copied. Two of the paper's inputs are also measured and *not* scored, for reasons given in the obfuscation row above. The component internals were calibrated against a **633-APK corpus — 299 benign / 334 malware across 21 families**, with a further 30 clean apps held out of training entirely and used to validate the boundaries rather than set them. **This is reproducible from what is on disk**: `data/benign_apks` + `data/ttp_apks` are the same 643 APKs the calibration ran over (10 malware are permanently unparseable, which is why 633 is scored, not 643), so `python scripts/score_corpus.py` re-derives every number in this table and in `app/reports/scoring.py`'s comment block. Earlier revisions of this README carried a caveat that the checked-out corpus was smaller than the calibration one and the figures could not be reproduced — that is no longer true, and the run takes about 100 minutes on four cores. One boundary moved in the 2026-08-24 re-derivation: the `high` ceiling went 70 → 72, because the highest-scoring clean app rose to 71.54 and would otherwise have read `malicious`. Calibrated with reputation **disabled**, which is the conservative direction — and that is measured, not asserted: turning it on moves malware **+4.75 to +5.75** points and clean apps **exactly 0.00**, because a clean app matches neither the local signature DB nor VirusTotal, which only returns a verdict when `malicious > 0`. **The demo runs with reputation on.** Since the local hash DB is checked first and the online branch runs only when it finds nothing, a known sample resolves offline in milliseconds and never spends VirusTotal quota; the third-party lookup is reserved for genuinely unknown APKs, which is where it earns its latency. So the shipped bands sit *below* where a live run places malware, and no boundary was drawn in a regime kinder to malware than the one you will see. `ttp_severity_component` and `forensic_anchor_component` sum evidence into a saturating mass rather than averaging it (`python scripts/measure_saturation.py` reproduces the derivation) — the averaged form used to make the score *fall* as more corroborating evidence was found. |
@@ -245,7 +359,7 @@ apps ship an adaptive (XML) launcher icon, which has no pixels to hash, so requi
 pin `verified: false` on brands whose certificate check works perfectly. `icon_phash: null`
 already says the icon check is unavailable for that brand.
 
-### Vendored frontend libraries
+## Vendored frontend libraries
 
 `app/static/vendor/` holds three scripts and two font files that were CDN `<script>`/`<link>`
 tags until they were pulled local. Cytoscape draws the Threat Landscape tab and the CFG
@@ -411,3 +525,13 @@ costs one sample rather than the whole pass, and a rerun skips what is already i
 change, since appending mismatched columns is refused rather than silently misaligned.
 Both phases tee their output to `logs/build_ttp_dataset_<phase>_<timestamp>.log`, which is
 what survives if the terminal dies with the process.
+
+## Project status
+
+Every module in the table above marked **Working** is real, running code — not a mock or
+a hardcoded demo response. Two things are deliberately not built: family classification
+via XGBoost (removed rather than shipped on bad training data — see the table above for
+why), and auth/queues/multi-user support, which is out of scope for a single-analyst
+prototype. Nothing here fakes success: unimplemented paths raise `NotImplementedError` or
+return an explicit `"not_implemented"` marker so a stub is never mistaken for a working
+feature.
