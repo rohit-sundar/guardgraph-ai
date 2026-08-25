@@ -1,0 +1,47 @@
+{
+  "_comment": "Modern Android banking families that MalwareBazaar carries but MITRE ATT&CK has no software entry for. Each inherits its parent's technique_ids so it can be used as a training positive. This is NOT STIX-sourced: rows built from these are stamped label_source='lineage_ref', never 'stix_ref', so they can be filtered or down-weighted independently. 'basis' records WHY the inheritance is defensible, and 'confidence' how strong that link is - read it before trusting a row.",
+  "families": [
+    {
+      "name": "Alien",
+      "parent": "Cerberus",
+      "confidence": "documented_fork",
+      "basis": "Alien was built directly on Cerberus source code after that source leaked publicly in 2020; ThreatFabric documented the two as the same codebase lineage. Technique inheritance here is close to an identity, not an analogy."
+    },
+    {
+      "name": "ERMAC",
+      "parent": "Cerberus",
+      "confidence": "documented_fork",
+      "basis": "ERMAC is a Cerberus derivative - ThreatFabric's teardown found large portions of Cerberus code reused verbatim."
+    },
+    {
+      "name": "Hook",
+      "parent": "Cerberus",
+      "confidence": "documented_fork",
+      "basis": "Hook was released by the ERMAC author and built on the ERMAC codebase, which is itself Cerberus-derived. Two hops from Cerberus, both documented."
+    },
+    {
+      "name": "Octo",
+      "parent": "Exobot",
+      "confidence": "documented_fork",
+      "basis": "Octo is the rebranded continuation of ExoCompact, which is a direct descendant of Exobot."
+    },
+    {
+      "name": "Coper",
+      "parent": "Exobot",
+      "confidence": "documented_fork",
+      "basis": "Coper is the same malware family as Octo under a different vendor name, so it inherits the same Exobot lineage."
+    },
+    {
+      "name": "Hydra",
+      "parent": "Anubis",
+      "confidence": "shared_lineage",
+      "basis": "Hydra descends from the BankBot/Anubis line of Android bankers. Weaker than a documented source fork - the shared ancestry is real but the codebases have diverged."
+    },
+    {
+      "name": "Vultur",
+      "parent": "Anubis",
+      "confidence": "behavioral_analogue",
+      "basis": "WEAKEST ENTRY. No documented code relationship to Anubis. Mapped on capability overlap only: both are bankers combining overlay credential theft with remote screen observation. Treat rows from this family as the least trustworthy of the derived set, and drop it first if the derived labels ever look like they are hurting the model."
+    }
+  ]
+}
