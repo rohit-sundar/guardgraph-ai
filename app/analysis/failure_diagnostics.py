@@ -24,6 +24,20 @@ import traceback
 # Order matters: more specific signatures are checked before generic ones.
 _SIGNATURES: list[tuple[str, str, str]] = [
     (
+        # Checked before the parser signatures below: when AV pulls the file
+        # mid-analysis the traceback can also contain a dex/axml frame, but the
+        # antivirus is the cause and the parser frame is just where it surfaced.
+        "errno 22",
+        "Sample removed by host antivirus (not an APK defect)",
+        "Reading the staged copy failed with EINVAL on a file that exists — on "
+        "Windows this is the signature of resident antivirus quarantining the "
+        "sample out from under the analyzer, not of a malformed APK. The file on "
+        "disk is almost certainly intact and re-analysing it will fail the same "
+        "way until the staging directory is excluded from scanning: see "
+        "settings.upload_staging_dir. Confirm with `Get-MpThreatDetection` — the "
+        "quarantined path is listed there.",
+    ),
+    (
         "axml",
         "Malformed AndroidManifest.xml (AXML)",
         "The manifest's binary XML structure is corrupted or deliberately padded "
@@ -32,6 +46,20 @@ _SIGNATURES: list[tuple[str, str, str]] = [
         "even though manifest-derived fields (permissions, components) are not; "
         "see manifest_parse_failed in the coverage note if this sample recovered "
         "partial coverage rather than failing outright.",
+    ),
+    (
+        # Androguard raises a plain ValueError naming the EOCD rather than a
+        # BadZipFile, so the needle below never matched it and a deliberately
+        # broken central directory — a technique this project already handles
+        # in ingest._raw_scan_dex_from_corrupted_zip — was reported as an
+        # unrecognised, possibly novel failure.
+        "end of central directory",
+        "Corrupted or non-standard ZIP structure",
+        "The APK's ZIP container doesn't parse cleanly — the End of Central "
+        "Directory record is missing or malformed. Android's own ZIP reader is "
+        "more permissive than desktop tooling, so an archive shaped like this "
+        "can still install and run on a device while defeating static analysis, "
+        "which is exactly why packers do it.",
     ),
     (
         "badzipfile",

@@ -17,18 +17,49 @@ class TestApkEnhancements(unittest.TestCase):
             "https://api.telegram.org/bot123456789:ABCdefGHIjklMNOpqrsTUVwxyz1234567/sendMessage",
             "https://my-malware-c2.firebaseio.com/data.json",
             "https://discord.com/api/webhooks/1234567890/token_string_here",
-            "http://192.168.1.50:8080/gate.php",
+            # Public routable IP — this is what a raw_ip indicator must be.
+            # Previously this fixture used 192.168.1.50, which is now excluded
+            # (see test_private_and_resolver_ips_are_not_c2 below).
+            "http://185.220.101.44:8080/gate.php",
             "http://v3toraddress234567abcdef234567.onion",
             "normal string here with no c2",
         ]
         indicators = extract_c2_indicators(sample_strings)
-        
+
         self.assertTrue(any("telegram_bot:" in i for i in indicators))
         self.assertTrue(any("firebase:" in i for i in indicators))
         self.assertTrue(any("discord_webhook:" in i for i in indicators))
         self.assertTrue(any("onion:" in i for i in indicators))
         self.assertTrue(any("raw_ip:" in i for i in indicators))
         self.assertTrue(any("panel_url:" in i for i in indicators))
+
+    def test_private_and_resolver_ips_are_not_c2(self):
+        """
+        An RFC1918 address cannot be a C2 channel: the victim's device is not on
+        the operator's LAN, so it is unreachable no matter what port it carries.
+        The string is usually a real dev/test backend left in the build, but
+        "the string exists" does not make it attacker infrastructure, and a
+        knowledge graph that says otherwise is asserting something impossible.
+        Public DNS resolvers are excluded for the same reason — a DoH endpoint
+        is not the C2, the host it resolves is.
+        """
+        indicators = extract_c2_indicators([
+            "http://192.168.8.230:8000",
+            "http://10.1.2.3:4444/gate.php",
+            "http://172.16.5.5:1337",
+            "http://169.254.1.1:9999",
+            "https://1.1.1.1/dns-query?ct=application/dns-udpwireformat",
+            "https://8.8.8.8/resolve",
+        ])
+        self.assertEqual(
+            [i for i in indicators if i.startswith("raw_ip:")], [],
+            f"non-routable or resolver address recorded as C2: {indicators}",
+        )
+
+    def test_public_ip_on_a_nonstandard_port_is_still_c2(self):
+        """The private-range exclusion must not suppress genuine raw-IP C2."""
+        indicators = extract_c2_indicators(["http://154.216.20.57:3434/api/bot"])
+        self.assertTrue(any(i.startswith("raw_ip:") for i in indicators), indicators)
 
     def test_permission_matrix_detection(self):
         # Test Overlay Attack Pattern

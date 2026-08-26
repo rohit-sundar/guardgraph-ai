@@ -66,6 +66,7 @@ from pathlib import Path
 
 from loguru import logger
 
+from app.analysis.apk_static import c2_host
 from app.core.config import settings
 
 _AGENT_SCRIPT_PATH = Path(__file__).parent / "frida_scripts" / "_agent.js"
@@ -79,6 +80,59 @@ class _DynamicVerificationError(Exception):
     couldn't attach) produces the same shaped `ran: False` outcome rather
     than a different partial state per failure site.
     """
+
+
+def is_harness_endpoint(value: str) -> bool:
+    """
+    Is this endpoint the analysis harness talking to itself rather than the
+    sample contacting anything?
+
+    The AVD's own adbd listens on :5555 and is reachable from inside the
+    emulator, so the network hooks record it like any other connection. It was
+    landing in network_observed_all and being read as attacker infrastructure —
+    exactly the kind of unfounded claim this graph cannot afford. 10.0.2.x is
+    qemu's user-mode network (the emulator itself, the host alias, its DNS).
+    """
+    v = (value or "").lower()
+    return (
+        ":5555" in v
+        or "10.0.2." in v
+        or v.startswith("0.0.0.0")
+        or "127.0.0.1" in v
+        or "localhost" in v
+    )
+
+
+def _is_frida_error(exc: BaseException) -> bool:
+    """
+    Is this exception frida's (the target went away), or ours (a fault in our
+    own capture code)?
+
+    Not `isinstance(exc, frida.Error)`: frida 17 dropped that base class, and
+    its fourteen error types now inherit Exception directly. Referencing it
+    raised AttributeError from inside the capture window's exception handler,
+    which aborted an otherwise-healthy run and reported ran=False — observed
+    live as "unexpected error: module 'frida' has no attribute 'Error'". The
+    line that crashed existed precisely to avoid misreporting a capture-code
+    fault as the sample self-terminating, so its own failure cost exactly what
+    it was written to protect.
+
+    Matching the module's actual error classes keeps that original intent
+    without naming a base that no longer exists. An empty tuple (frida
+    unimportable, or renamed classes in some future version) makes this False,
+    which is the safe answer: "our bug", not a forensic claim about the
+    malware that was never observed.
+    """
+    try:
+        import frida
+    except ImportError:
+        return False
+    classes = tuple(
+        obj
+        for name, obj in vars(frida).items()
+        if isinstance(obj, type) and issubclass(obj, Exception) and name.endswith("Error")
+    )
+    return isinstance(exc, classes)
 
 
 @dataclass
@@ -1066,7 +1120,7 @@ def _collect_events(pid: int, timeout_s: int, sha256: str | None = None) -> tupl
         # healthy process, and the report told the analyst the sample had
         # detected instrumentation and killed itself. Partial events are kept
         # either way — what changes is only what this claims happened.
-        target_died = isinstance(e, frida.Error)
+        target_died = _is_frida_error(e)
         logger.warning(
             f"[Phase 8] capture window ended early for pid {pid} "
             f"({'target exited' if target_died else 'INTERNAL ERROR in capture code'}): {e!r}"
@@ -1102,20 +1156,38 @@ def _collect_events(pid: int, timeout_s: int, sha256: str | None = None) -> tupl
 def _diff_against_predictions(events: list[dict], static_predictions: dict) -> DynamicVerificationOutcome:
     outcome = DynamicVerificationOutcome(ran=True)
 
-    seen_network = {e["value"] for e in events if e.get("kind") == "network" and e.get("value")}
+    # Both event kinds carry a contacted endpoint. Only `network` was read
+    # here before, which discarded url_accessed entirely — corpus-wide that is
+    # ~6x more host observations thrown away than kept, since every HTTP stack
+    # that resolves DNS first reports through the URL hook rather than the raw
+    # socket one.
+    seen_network = {
+        e["value"] for e in events
+        if e.get("kind") in ("network", "url_accessed") and e.get("value")
+    }
     predicted_c2 = set(static_predictions.get("c2_indicators") or [])
-    # Substring match in either direction rather than exact equality: a
-    # static C2 indicator is often "telegram_bot:<token>" or a bare host
-    # extracted from a string literal, while the dynamic hook reports
-    # "host:port" off an actual InetSocketAddress — these were never going
-    # to be byte-identical, but one containing the other is a real match.
+
+    # Compare on normalised hosts, not raw strings. The previous substring test
+    # ("telegram_bot:<token>" in "1.2.3.4:443", or the reverse) could not match
+    # a static indicator against an observed endpoint even when the host was
+    # identical: the static side carries a type prefix, a scheme and often a
+    # path, the dynamic side is host:port. Every confirmation was a false
+    # negative by construction. See apk_static.c2_host.
+    seen_hosts = {
+        h for h in (c2_host(v) for v in seen_network if not is_harness_endpoint(v)) if h
+    }
     confirmed = {
         predicted for predicted in predicted_c2
-        if any(predicted in seen or seen in predicted for seen in seen_network)
+        if (h := c2_host(predicted)) and h in seen_hosts
     }
     outcome.network_confirmed = sorted(confirmed)
     outcome.network_predicted_not_seen = sorted(predicted_c2 - confirmed)
-    outcome.network_observed_all = sorted(seen_network)
+    # Harness traffic is not sample behaviour: the AVD's own adbd (10.0.2.x /
+    # 0.0.0.0 / 127.0.0.1 on :5555) is reachable from inside the emulator and
+    # was being recorded as attacker infrastructure the app contacted.
+    outcome.network_observed_all = sorted(
+        v for v in seen_network if not is_harness_endpoint(v)
+    )
 
     outcome.sms_api_invoked = any(e.get("kind") == "sms_send" for e in events)
     outcome.sms_destinations = sorted({e["value"] for e in events if e.get("kind") == "sms_send" and e.get("value")})

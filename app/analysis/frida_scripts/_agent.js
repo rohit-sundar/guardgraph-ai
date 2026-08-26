@@ -1,5 +1,5 @@
 📦
-451048 /hooks.js
+451660 /hooks.js
 ✄
 var __defProp = Object.defineProperty;
 var __export = (target, all) => {
@@ -13533,22 +13533,51 @@ function hookNetwork(Java) {
     safeSend("hook_error", "network: " + e);
   }
 }
+var SMS_SEND_METHODS = [
+  "sendTextMessage",
+  "sendTextMessageWithoutPersisting",
+  "sendMultipartTextMessage",
+  "sendDataMessage"
+];
 function hookSms(Java) {
+  let SmsManager;
   try {
-    const SmsManager = Java.use("android.telephony.SmsManager");
-    SmsManager.sendTextMessage.overload(
-      "java.lang.String",
-      "java.lang.String",
-      "java.lang.String",
-      "android.app.PendingIntent",
-      "android.app.PendingIntent"
-    ).implementation = function(destAddr, scAddr, text, sentIntent, deliveryIntent) {
-      safeSend("sms_send", destAddr);
-      return this.sendTextMessage(destAddr, scAddr, text, sentIntent, deliveryIntent);
-    };
-    safeSend("hook_installed", "sms");
+    SmsManager = Java.use("android.telephony.SmsManager");
   } catch (e) {
     safeSend("hook_error", "sms: " + e);
+    return;
+  }
+  let installed = 0;
+  SMS_SEND_METHODS.forEach(function(name) {
+    const method = SmsManager[name];
+    if (!method || !method.overloads) {
+      return;
+    }
+    let perMethod = 0;
+    method.overloads.forEach(function(ov, idx) {
+      try {
+        ov.implementation = function() {
+          try {
+            safeSend(
+              "sms_send",
+              arguments.length ? String(arguments[0]) : "<unknown destination>"
+            );
+          } catch (e) {
+          }
+          return ov.apply(this, arguments);
+        };
+        perMethod++;
+        installed++;
+      } catch (e) {
+        safeSend("hook_error", "sms:" + name + "#" + idx + ": " + e);
+      }
+    });
+    if (perMethod > 0) {
+      safeSend("hook_installed", "sms:" + name, { overloads: perMethod });
+    }
+  });
+  if (installed === 0) {
+    safeSend("hook_error", "sms: no send overloads could be hooked");
   }
 }
 function hookSmsRead(Java) {

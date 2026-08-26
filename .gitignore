@@ -48,6 +48,9 @@ AI_ENGINEER_TASKS.md
 test_malware_samples/
 # Downloaded APKs from MalwareBazaar (scripts/build_ttp_dataset.py) — real malware
 data/ttp_apks/
+# Per-request upload staging (settings.upload_staging_dir) — holds the uploaded
+# APK for the duration of one analysis, so it is real malware too
+data/upload_staging/
 
 # Benign APK corpus (scripts/build_ttp_dataset.py --stage c) — ~1GB, regeneratable
 data/benign_apks/*
@@ -106,3 +109,10 @@ data/analysis_history.json
 # in a private message, never in git history, because history outlives the decision
 # to make a repo public).
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Bulk-population run state and one-off validation output — regenerable, and
+# populate_progress.json is machine-specific run bookkeeping, not source.
+data/populate_progress.json
+data/populate_progress.json*.bak
+data/test30*.json
+app/analysis/frida_scripts/_agent.js.bak

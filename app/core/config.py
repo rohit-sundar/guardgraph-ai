@@ -98,6 +98,21 @@ class Settings(BaseSettings):
     model_path: str = "data/models/guardgraph_xgb_v1.json"
     samples_dir: str = "data/samples"
 
+    # Parent directory for the per-request scratch dir an upload is staged in.
+    # Empty = the OS temp dir, which is the right default nearly everywhere.
+    #
+    # It is overridable because on a Windows analyst workstation the OS temp dir
+    # is exactly where resident antivirus watches hardest, and the files this
+    # system stages there are real malware by design. Observed live: Defender
+    # quarantined the staged copy mid-analysis, after which compute_sha256's
+    # open() failed with OSError [Errno 22] and the whole analysis fell back to
+    # the unparseable verdict — for a sample that was perfectly intact on disk.
+    # Pointing this at one narrow directory that is excluded from AV scanning
+    # fixes that without excluding the OS temp dir wholesale, which would be a
+    # bad trade: %TEMP% is a standard malware drop location and blanket-
+    # excluding it weakens the host far beyond this project.
+    upload_staging_dir: str = ""
+
     # Signature detection & YARA scanning
     signature_db_path: str = "data/signatures/known_hashes.json"
     yara_rules_dir: str = "data/yara_rules"

@@ -80,19 +80,80 @@ function hookNetwork(Java) {
   }
 }
 
+// Every SmsManager method that can put a message on the air. This used to hook
+// exactly one 5-arg sendTextMessage overload, which left the rest of the API
+// uninstrumented: Android splits any message over 160 characters into
+// sendMultipartTextMessage, so an exfil payload of a stolen OTP plus device
+// identifiers routes straight past a single-overload hook. API 31 added
+// messageId variants that an app built against a recent SDK lands on instead,
+// and sendTextMessageWithoutPersisting deliberately skips the SMS database —
+// itself an evasion signal worth catching. destinationAddress is argument 0 on
+// all four.
+const SMS_SEND_METHODS = [
+  "sendTextMessage",
+  "sendTextMessageWithoutPersisting",
+  "sendMultipartTextMessage",
+  "sendDataMessage",
+];
+
 function hookSms(Java) {
+  let SmsManager;
   try {
-    const SmsManager = Java.use("android.telephony.SmsManager");
-    SmsManager.sendTextMessage.overload(
-      "java.lang.String", "java.lang.String", "java.lang.String",
-      "android.app.PendingIntent", "android.app.PendingIntent"
-    ).implementation = function (destAddr, scAddr, text, sentIntent, deliveryIntent) {
-      safeSend("sms_send", destAddr);
-      return this.sendTextMessage(destAddr, scAddr, text, sentIntent, deliveryIntent);
-    };
-    safeSend("hook_installed", "sms");
+    SmsManager = Java.use("android.telephony.SmsManager");
   } catch (e) {
     safeSend("hook_error", "sms: " + e);
+    return;
+  }
+
+  // Enumerate .overloads rather than naming each signature: the exact set
+  // varies by API level, and naming one that doesn't exist on the running
+  // device throws.
+  let installed = 0;
+  SMS_SEND_METHODS.forEach(function (name) {
+    const method = SmsManager[name];
+    if (!method || !method.overloads) {
+      return; // not present on this API level — not an error
+    }
+    let perMethod = 0;
+    method.overloads.forEach(function (ov, idx) {
+      // Per-overload try/catch on purpose. One wrapping try/catch (what this
+      // had) meant the first signature missing on this Android version took
+      // every SMS hook in the function down with it, including working ones.
+      try {
+        ov.implementation = function () {
+          try {
+            safeSend(
+              "sms_send",
+              arguments.length ? String(arguments[0]) : "<unknown destination>"
+            );
+          } catch (e) {
+            // Reporting must never stop the real send below.
+          }
+          return ov.apply(this, arguments);
+        };
+        perMethod++;
+        installed++;
+      } catch (e) {
+        safeSend("hook_error", "sms:" + name + "#" + idx + ": " + e);
+      }
+    });
+    // One install event per METHOD, the same shape hookNetwork and hookCrypto
+    // already use for their two targets each. Also the only way to tell from
+    // stored results which SMS paths a given run actually covered — the
+    // timeline drops hook_installed events, so a single aggregate "sms" event
+    // would make a widened agent indistinguishable from the old one-overload
+    // version in the corpus.
+    if (perMethod > 0) {
+      safeSend("hook_installed", "sms:" + name, { overloads: perMethod });
+    }
+  });
+
+  // AOSP's shorter overloads delegate to the longer ones, so a single app-level
+  // send can report twice. Harmless by construction: sms_api_invoked is a bool
+  // and sms_destinations is a set, and over-reporting into a deduplicated field
+  // beats missing the send entirely.
+  if (installed === 0) {
+    safeSend("hook_error", "sms: no send overloads could be hooked");
   }
 }
 

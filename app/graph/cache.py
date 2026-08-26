@@ -8,10 +8,19 @@ import json
 
 from loguru import logger
 
+from app.analysis.apk_static import c2_host, is_benign_host
+from app.analysis.dynamic_verification import is_harness_endpoint
+from app.core.config import settings
 from app.graph.neo4j_client import neo4j_client
 
 
 _MEMORY_CACHE: dict[str, dict] = {}
+
+# Above this many samples, a shared signing certificate stops being evidence of
+# a common author and becomes evidence of a common build tool. Set from the
+# observed distribution: plausible reuse clusters here run to 9 samples and
+# below, while the two default-key clusters are 54 and 33.
+MAX_SHARED_CERT_FOR_CORRELATION = 20
 
 
 def lookup_signature(sha256: str) -> dict | None:
@@ -125,6 +134,39 @@ def _decode_record(raw, sha256: str) -> dict:
         logger.warning(f"[cache] {sha256[:12]} has unreadable record_json: {e}")
         return {}
     return {k: v for k, v in decoded.items() if v is not None}
+
+
+
+def observed_endpoints(dynamic_verification: dict | None, c2_indicators: list[str] | None) -> list[dict]:
+    """
+    Rows for the NetworkEndpoint write: every distinct host the sample was seen
+    contacting at runtime, deduplicated and with harness traffic removed.
+
+    Draws on both network_observed_all (raw sockets) and urls_accessed — the
+    latter is where most host observations actually land, since every HTTP
+    stack that resolves DNS first reports through the URL hook.
+
+    statically_predicted marks the hosts that also appear in the static C2 set,
+    which is what makes "predicted and then observed" answerable from the graph
+    instead of only from a field inside record_json.
+    """
+    dv = dynamic_verification or {}
+    if not dv.get("ran"):
+        return []
+    predicted = {h for h in (c2_host(c) for c in (c2_indicators or [])) if h}
+    rows: dict[str, dict] = {}
+    for value in list(dv.get("network_observed_all") or []) + list(dv.get("urls_accessed") or []):
+        if is_harness_endpoint(value):
+            continue
+        host = c2_host(value)
+        if not host:
+            continue
+        rows[host] = {
+            "host": host,
+            "known_benign": is_benign_host(host),
+            "statically_predicted": host in predicted,
+        }
+    return list(rows.values())
 
 
 def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None, *, signature_yara_data: dict | None = None, permissions: list[str] | None = None, risk_components: dict | None = None, obfuscation_data: dict | None = None, package_name: str | None = None, c2_indicators: list[str] | None = None, cert_thumbprint: str | None = None, resolved_crypto_configs: list[str] | None = None, resolved_dcl_targets: list[str] | None = None, resolved_webview_bridges: list[str] | None = None, resolved_native_bridges: list[str] | None = None, grounding: dict | None = None, dynamic_verification: dict | None = None):
@@ -241,6 +283,34 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
     MERGE (c:Certificate {thumbprint: $cert_thumbprint})
     MERGE (s)-[:SIGNED_WITH]->(c)
     """
+    # Endpoints the sample was actually observed contacting at runtime.
+    #
+    # These used to live only inside record_json, invisible to every graph
+    # query: the graph held 46 C2Indicator nodes, all statically extracted,
+    # while 71 distinct hosts observed live across the corpus had no node at
+    # all — and static and dynamic turned out to find disjoint infrastructure
+    # (zero overlap), so the observed set was the only record of where these
+    # samples actually reach.
+    #
+    # A separate label, not C2Indicator: "the sample connected here" is an
+    # observation, "this is attacker infrastructure" is an inference, and the
+    # observed set legitimately includes SDK and CDN traffic. Conflating them
+    # would put googleapis.com in the graph as a C2 node. known_benign carries
+    # the triage judgement without overwriting the fact.
+    endpoint_query = """
+    MATCH (s:Sample {sha256: $sha256})
+    UNWIND $endpoints AS ep
+    MERGE (ne:NetworkEndpoint {host: ep.host})
+    SET ne.known_benign = ep.known_benign
+    MERGE (s)-[r:CONTACTED]->(ne)
+    SET r.observed_at_runtime = true,
+        r.statically_predicted = coalesce(r.statically_predicted, false) OR ep.statically_predicted,
+        // Egress is firewalled during detonation (see
+        // dynamic_analysis_require_network_isolation), so what is observed is
+        // an attempt, not a completed session. Saying "contacted" without this
+        // would overstate what the capture can actually support.
+        r.egress_blocked_during_capture = $egress_blocked
+    """
     try:
         neo4j_client.run(
             base_query,
@@ -266,6 +336,14 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
             )
         if cert_thumbprint:
             neo4j_client.run(cert_query, sha256=sha256, cert_thumbprint=cert_thumbprint)
+        endpoints = observed_endpoints(dynamic_verification, c2_indicators)
+        if endpoints:
+            neo4j_client.run(
+                endpoint_query,
+                sha256=sha256,
+                endpoints=endpoints,
+                egress_blocked=bool(settings.dynamic_analysis_require_network_isolation),
+            )
     except Exception:
         # Neo4j not reachable — skip Neo4j write silently rather than crashing.
         pass
@@ -478,7 +556,19 @@ def find_related_samples(
         if cert_thumbprint:
             cert_rows = neo4j_client.run(
                 """
-                MATCH (c:Certificate {thumbprint: $cert_thumbprint})<-[:SIGNED_WITH]-(other:Sample)
+                MATCH (c:Certificate {thumbprint: $cert_thumbprint})<-[:SIGNED_WITH]-(:Sample)
+                // A signing key shared this widely is a builder default, not an
+                // actor fingerprint, and correlating on it asserts a
+                // relationship that does not exist. Measured on this corpus:
+                // one key covers 54 samples spanning FluBot, Cerberus, SpyNote
+                // and Alien, and its subject is CN=Android, O=Android,
+                // android@android.com, self-signed — the AOSP test key, which
+                // is public and which anyone can sign with. Android app certs
+                // are self-generated with no CA above them, so a shared key
+                // means a shared toolchain, never a shared author.
+                WITH c, count(*) AS signed_total
+                WHERE signed_total <= $max_shared_cert
+                MATCH (c)<-[:SIGNED_WITH]-(other:Sample)
                 WHERE other.sha256 <> $exclude_sha256
                 OPTIONAL MATCH (other)-[:CLASSIFIED_AS_FAMILY]->(f:MalwareFamily)
                 RETURN other.sha256 AS sha256, other.app_name AS app_name,
@@ -486,6 +576,7 @@ def find_related_samples(
                        $cert_thumbprint AS shared_cert
                 """,
                 cert_thumbprint=cert_thumbprint, exclude_sha256=exclude_sha256,
+                max_shared_cert=MAX_SHARED_CERT_FOR_CORRELATION,
             )
             _merge(cert_rows, "shared_cert")
     except Exception:

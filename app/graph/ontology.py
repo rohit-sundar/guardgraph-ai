@@ -90,6 +90,11 @@ _CONSTRAINTS = [
     ("malware_family_name", "MalwareFamily", "name"),
     ("c2_indicator_value", "C2Indicator", "value"),
     ("mitigation_id", "Mitigation", "mitigation_id"),
+    # Hosts observed being contacted at runtime (cache.observed_endpoints).
+    # Keyed on the normalised host so two samples reaching the same
+    # infrastructure converge on one node, which is what makes the endpoint
+    # usable as a correlation pivot rather than a per-sample leaf.
+    ("network_endpoint_host", "NetworkEndpoint", "host"),
 ]
 
 

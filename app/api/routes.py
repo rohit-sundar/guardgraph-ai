@@ -113,6 +113,19 @@ MAX_UPLOAD_BYTES = 150 * 1024 * 1024
 _UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 
+def _make_staging_dir() -> str:
+    """
+    Per-request scratch dir for the uploaded APK, under settings.upload_staging_dir
+    when set and the OS temp dir otherwise. See that setting for why it is
+    overridable — resident AV quarantining a staged sample out from under the
+    analyzer is a real, observed failure mode, not a hypothetical one.
+    """
+    parent = settings.upload_staging_dir or None
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    return tempfile.mkdtemp(dir=parent)
+
+
 async def _save_upload_bounded(file: UploadFile, tmp_path: str) -> None:
     """
     Streams an upload to disk under MAX_UPLOAD_BYTES rather than `await file.read()`
@@ -416,7 +429,7 @@ async def analyze(file: UploadFile = File(...), skip_report: bool = False, enabl
     if not file.filename.endswith(".apk"):
         raise HTTPException(400, "Only .apk files are supported in this prototype.")
 
-    tmp_dir = tempfile.mkdtemp()
+    tmp_dir = _make_staging_dir()
     tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}.apk")
 
     try:
@@ -504,7 +517,7 @@ async def analyze_start(file: UploadFile = File(...), enable_dynamic: bool = Fal
     if not file.filename.endswith(".apk"):
         raise HTTPException(400, "Only .apk files are supported in this prototype.")
 
-    tmp_dir = tempfile.mkdtemp()
+    tmp_dir = _make_staging_dir()
     tmp_path = os.path.join(tmp_dir, f"{uuid.uuid4()}.apk")
     try:
         await _save_upload_bounded(file, tmp_path)

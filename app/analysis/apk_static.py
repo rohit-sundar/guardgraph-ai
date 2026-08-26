@@ -17,6 +17,7 @@ All extractors are pure / best-effort: malformed APKs never crash the pipeline.
 from __future__ import annotations
 
 import io
+import ipaddress
 import re
 import zipfile
 from datetime import datetime, timezone
@@ -116,6 +117,115 @@ _PRIVATE_IP_PREFIXES = (
 )
 
 
+# Public DNS resolvers. A DoH/DoT endpoint in a string pool is not attacker
+# infrastructure, but _RE_RAW_IP matches it like any other IP-in-a-URL, so
+# `raw_ip:https://1.1.1.1/dns-query?...` was being recorded as a C2Indicator —
+# a factual error in a graph whose whole value is that its contents are real.
+# Malware genuinely does use DoH to hide C2 *resolution*, but the resolver is
+# not the C2; the host it resolves is, and that is what the dynamic pass
+# observes. Keyed on address because that is what the regex yields.
+_PUBLIC_RESOLVERS = frozenset({
+    "1.1.1.1", "1.0.0.1",            # Cloudflare
+    "8.8.8.8", "8.8.4.4",            # Google
+    "9.9.9.9", "149.112.112.112",    # Quad9
+    "208.67.222.222", "208.67.220.220",  # OpenDNS
+    "94.140.14.14", "94.140.15.15",  # AdGuard
+})
+
+# Prefixes extract_c2_indicators() stamps onto every indicator it returns.
+_C2_TYPE_PREFIXES = (
+    "telegram_bot:", "firebase:", "discord_webhook:", "onion:",
+    "raw_ip:", "panel_url:",
+)
+
+
+def c2_host(indicator: str) -> str:
+    """
+    The bare hostname/IP an indicator refers to, for comparing a statically
+    extracted indicator against an endpoint observed at runtime.
+
+    These never had a common shape: static indicators carry a type prefix and
+    often a scheme and path (`raw_ip:https://1.2.3.4:8080/gate.php`), while the
+    dynamic hooks report `host:port` or a full URL. Comparing them raw — which
+    is what the confirmation check used to do — cannot match even when the host
+    is byte-identical, so every confirmation was a false negative by
+    construction.
+
+    A telegram_bot indicator maps to api.telegram.org rather than to its own
+    token: the token is a credential, not an address, and contact with the bot
+    shows up as a connection to Telegram's API host.
+
+    Returns "" when an indicator has no host to speak of, which callers treat
+    as unmatchable rather than as a wildcard.
+    """
+    s = (indicator or "").strip()
+    if s.startswith("telegram_bot:"):
+        return "api.telegram.org"
+    for prefix in _C2_TYPE_PREFIXES:
+        if s.startswith(prefix):
+            s = s[len(prefix):]
+            break
+    s = re.sub(r"^[a-z][a-z0-9+.\-]*://", "", s, flags=re.IGNORECASE)  # scheme
+    s = s.rsplit("@", 1)[-1]        # userinfo
+    s = re.split(r"[/?#]", s, 1)[0]  # path / query / fragment
+    s = re.sub(r":\d{1,5}$", "", s)  # trailing port
+    s = s.strip("[]").lower()
+    return s if _looks_like_host(s) else ""
+
+
+# A string pool contains plenty of things that survive prefix/scheme stripping
+# without being addresses. Observed landing in the graph as hosts before this
+# guard: the literal "null" (from a stringified null URL) and "file:" (a
+# single-slash file: URI, which the `://` scheme pattern does not strip). A
+# knowledge graph asserting that malware contacted a host named "null" is
+# exactly the kind of claim that makes the rest of it untrustworthy.
+_RE_IPV4 = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+_RE_HOSTNAME = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?"
+    r"(?:\.[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?)+$"
+)
+
+
+def _looks_like_host(s: str) -> bool:
+    """A dotted hostname or a valid dotted-quad. Anything else is not an address."""
+    if not s or len(s) > 253:
+        return False
+    if _RE_IPV4.match(s):
+        return all(o.isdigit() and int(o) <= 255 for o in s.split("."))
+    return bool(_RE_HOSTNAME.match(s))
+
+
+# Infrastructure a normal app legitimately talks to. Observing a connection to
+# one of these is a fact worth recording, but it is not evidence of anything —
+# an SDK phoning home looks identical whether the host app is malware or not.
+# Flagged rather than dropped: "the sample contacted X" stays true either way,
+# and triage queries filter on the flag.
+_BENIGN_HOST_SUFFIXES = (
+    "googleapis.com", "gstatic.com", "google.com", "googleusercontent.com",
+    "android.com", "crashlytics.com", "firebaseio.com", "firebase.com",
+    "doubleclick.net", "google-analytics.com", "facebook.com", "fbcdn.net",
+    "cloudflare.com", "akamaized.net", "amazonaws.com", "windowsupdate.com",
+)
+
+
+def is_benign_host(host: str) -> bool:
+    """
+    Does this host belong to well-known app infrastructure (SDKs, CDNs,
+    analytics) rather than to something worth investigating?
+
+    Suffix match on the registrable tail so subdomains resolve correctly
+    (firebaseinstallations.googleapis.com -> googleapis.com). Deliberately
+    conservative and short: a host missing from this list is only ever
+    *unflagged*, never asserted malicious, so a false negative here costs
+    nothing but triage noise — whereas wrongly flagging a real C2 as benign
+    would hide it.
+    """
+    h = (host or "").strip().lower().rstrip(".")
+    if not h:
+        return False
+    return any(h == suf or h.endswith("." + suf) for suf in _BENIGN_HOST_SUFFIXES)
+
+
 def extract_c2_indicators(strings: list[str]) -> list[str]:
     """
     Pull high-value C2 IoCs from a string pool (DEX string table, assets, etc.).
@@ -176,6 +286,21 @@ def extract_c2_indicators(strings: list[str]) -> list[str]:
             if ip.startswith("127.") and (not port or port in ("80", "443")):
                 continue
             if ip.startswith("0.") or ip.startswith("255."):
+                continue
+            # A public DNS resolver is not C2 — see _PUBLIC_RESOLVERS.
+            if ip in _PUBLIC_RESOLVERS:
+                continue
+            # RFC1918 / link-local cannot be C2. A victim's device is not on the
+            # operator's LAN, so an address in these ranges is unreachable as a
+            # channel no matter what port it carries — recording it as attacker
+            # infrastructure is a claim that cannot be true. (These strings are
+            # real, usually a dev/test backend left in the build, but "the string
+            # exists" does not make it C2, and the non-standard-port branch below
+            # was admitting them precisely because odd ports look suspicious.)
+            try:
+                if ipaddress.ip_address(ip).is_private or ipaddress.ip_address(ip).is_link_local:
+                    continue
+            except ValueError:
                 continue
             endpoint = m.group(0).rstrip("/")
             # Prefer flagging non-standard ports more aggressively; still keep all
@@ -496,30 +621,49 @@ def analyze_certificate_anomalies(der_certs: list[bytes]) -> list[str]:
 
 
 def extract_der_certificates(apk_obj) -> list[bytes]:
-    """Best-effort DER cert extraction across APK signature schemes."""
+    """
+    DER certificates for an APK, across all three signature schemes.
+
+    v3/v2 expose no-argument list getters. v1 (the legacy JAR signature, still
+    the only scheme on a large share of real malware) does NOT: androguard's
+    get_certificate_der() takes the signature filename and must be called once
+    per entry in get_signature_names().
+
+    That difference is why this used to return nothing for every v1-only APK.
+    get_certificate_der was listed alongside the v2/v3 getters and invoked with
+    no arguments, which raises TypeError — swallowed whole by a bare
+    `except Exception: continue`, so a third of the corpus silently had no
+    certificate, no SIGNED_WITH edge, and no cert-anomaly analysis, with
+    nothing anywhere reporting a failure.
+    """
     certs: list[bytes] = []
-    for getter in (
-        "get_certificates_der_v3",
-        "get_certificates_der_v2",
-        "get_certificate_der",
-    ):
-        try:
-            fn = getattr(apk_obj, getter, None)
-            if not fn:
-                continue
-            result = fn()
-            if result is None:
-                continue
-            if isinstance(result, (bytes, bytearray)):
-                certs.append(bytes(result))
-            elif isinstance(result, (list, tuple)):
-                for c in result:
-                    if isinstance(c, (bytes, bytearray)):
-                        certs.append(bytes(c))
-            if certs:
-                break
-        except Exception:
+
+    def _collect(result) -> None:
+        if isinstance(result, (bytes, bytearray)):
+            certs.append(bytes(result))
+        elif isinstance(result, (list, tuple)):
+            certs.extend(bytes(c) for c in result if isinstance(c, (bytes, bytearray)))
+
+    for getter in ("get_certificates_der_v3", "get_certificates_der_v2"):
+        fn = getattr(apk_obj, getter, None)
+        if not fn:
             continue
+        try:
+            _collect(fn())
+        except Exception as e:
+            logger.debug(f"[cert] {getter} failed: {e}")
+        if certs:
+            return certs
+
+    # v1 / JAR signing — one certificate per META-INF/*.(RSA|DSA|EC) entry.
+    try:
+        for name in apk_obj.get_signature_names() or []:
+            try:
+                _collect(apk_obj.get_certificate_der(name))
+            except Exception as e:
+                logger.debug(f"[cert] v1 cert {name} failed: {e}")
+    except Exception as e:
+        logger.debug(f"[cert] enumerating v1 signature names failed: {e}")
     return certs
 
 

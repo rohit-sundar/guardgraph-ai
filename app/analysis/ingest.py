@@ -217,9 +217,18 @@ def extract_cert_thumbprint(apk_obj) -> str | None:
     Returns SHA-256 of the signing certificate, or None if unsigned /
     extraction fails. An unsigned or malformed cert is itself a risk
     signal — don't silently treat None the same as "clean".
+
+    Delegates to apk_static.extract_der_certificates rather than reaching for
+    the scheme getters directly. This used to call get_certificates_der_v3/v2
+    itself, which silently returns nothing for a v1-only (legacy JAR) signature
+    — still the only scheme on a large share of real malware — so those samples
+    got no thumbprint and therefore no SIGNED_WITH edge at all. The same blind
+    spot existed in extract_der_certificates; fixing only that one left this
+    copy broken and the graph unchanged, which is the whole reason duplicating
+    the logic was a mistake.
     """
     try:
-        certs = apk_obj.get_certificates_der_v3() or apk_obj.get_certificates_der_v2()
+        certs = extract_der_certificates(apk_obj)
         if not certs:
             return None
         return hashlib.sha256(certs[0]).hexdigest()
