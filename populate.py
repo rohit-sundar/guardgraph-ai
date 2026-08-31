@@ -16,7 +16,11 @@ for i, path in enumerate(apks, 1):
                 # is the ~60-200s/request cost that made this loop impractical at
                 # volume. Neo4j still gets the full sha256/family/TTPs/risk_score
                 # write — skip_report only bypasses the narrative generation.
-                params={"skip_report": "true"},
+                # record_history=false: this is a knowledge-base load, not an
+                # analysis the operator ran. Without it every corpus sample lands
+                # in the Analysis History panel, and the panel's "Clear" button
+                # then deletes the whole corpus from Neo4j.
+                params={"skip_report": "true", "record_history": "false"},
                 timeout=600,
             )
         print(f"[{i}/{len(apks)}] {name}: {resp.status_code}")

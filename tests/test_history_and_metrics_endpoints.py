@@ -319,7 +319,10 @@ class TestClearAnalysesEndpoint(unittest.TestCase):
              patch.object(routes_module, "delete_sample", return_value=True) as deleted:
             resp = self.client.delete("/analyses")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json(), {"cleared": 2, "cached_verdicts_dropped": 2})
+        # corpus_samples_dropped reports how many of the cleared rows the graph
+        # records as corpus-loaded — see tests/test_history_clear_scope.py.
+        self.assertEqual(resp.json(), {"cleared": 2, "cached_verdicts_dropped": 2,
+                                       "corpus_samples_dropped": 0})
         self.assertEqual(deleted.call_count, 2)
 
     def test_one_failed_deletion_does_not_abort_the_rest(self):
@@ -339,7 +342,8 @@ class TestClearAnalysesEndpoint(unittest.TestCase):
         with patch.object(routes_module, "clear_history", return_value=[]), \
              patch.object(routes_module, "delete_sample") as deleted:
             resp = self.client.delete("/analyses")
-        self.assertEqual(resp.json(), {"cleared": 0, "cached_verdicts_dropped": 0})
+        self.assertEqual(resp.json(), {"cleared": 0, "cached_verdicts_dropped": 0,
+                                       "corpus_samples_dropped": 0})
         deleted.assert_not_called()
 
 

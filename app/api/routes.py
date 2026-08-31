@@ -27,15 +27,20 @@ import tempfile
 import threading
 import uuid
 
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from loguru import logger
 
 from app.analysis.ingest import compute_sha256
 from app.analysis.signatures import deterministic_family
-from app.core.history import record_analysis, list_history, clear_history
-from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape, delete_sample, record_feedback
+from app.core.history import (
+    record_analysis, list_history, clear_history, peek_history_shas,
+)
+from app.graph.cache import SAMPLE_SOURCE_CORPUS, SAMPLE_SOURCE_OPERATOR
+from app.graph.neo4j_client import neo4j_client
+from app.core.coverage import compute_coverage, unparseable_coverage
+from app.graph.cache import lookup_signature, store_signature, find_related_samples, get_threat_landscape, get_landscape_facets, delete_sample, record_feedback
 from app.graph.ontology import get_technique_context
 from app.ml.classifier import ttp_classifier
 from app.reports.scoring import (
@@ -148,13 +153,58 @@ async def _save_upload_bounded(file: UploadFile, tmp_path: str) -> None:
 
 
 @router.get("/graph/landscape")
-async def graph_landscape(limit: int = 30):
+async def graph_landscape(
+    limit: int = 30,
+    family: list[str] = Query(default=[]),
+    technique: list[str] = Query(default=[]),
+    c2: list[str] = Query(default=[]),
+    cert: list[str] = Query(default=[]),
+    band: list[str] = Query(default=[]),
+    search: str | None = None,
+    scope: str = "matches",
+):
     """
     Cytoscape-ready snapshot of the whole correlation graph (Sample/
     MalwareFamily/Technique/C2Indicator/Certificate) for the UI's "Threat
     Landscape" tab — not tied to any single analysis run.
+
+    Every filter parameter is repeatable and selects SAMPLES: `?family=Cerberus`
+    answers "which packages are Cerberus". Repeats within one parameter OR
+    together, different parameters AND — so `?family=Cerberus&band=malicious` is
+    the malicious-band Cerberus samples.
+
+    `scope=matches` (the default) draws those samples with only the nodes named
+    in the filter; `scope=neighborhood` also draws everything else the matched
+    samples touch. See get_threat_landscape for why that is two questions.
+
+    `limit` is applied after filtering (see get_threat_landscape), and the
+    response reports matched_samples/total_samples so the caller can tell
+    "nothing matched" from "the database is empty".
     """
-    return get_threat_landscape(limit=limit)
+    return get_threat_landscape(
+        limit=limit,
+        families=family,
+        techniques=technique,
+        c2=c2,
+        certificates=cert,
+        bands=band,
+        search=search,
+        scope=scope,
+    )
+
+
+@router.get("/graph/landscape/facets")
+async def graph_landscape_facets():
+    """
+    The filter vocabulary for the Threat Landscape tab — every family, technique,
+    C2 indicator, certificate and verdict band actually present in this
+    instance's graph, each with its sample count.
+
+    Served separately from /graph/landscape so the filter controls can be built
+    once per tab visit and stay populated while the graph itself is re-queried on
+    every change of selection.
+    """
+    return get_landscape_facets()
 
 
 _TTP_METRICS_PATH = "data/models/ttp_metrics.json"
@@ -240,22 +290,55 @@ async def list_analyses(limit: int = 30):
     ]
 
 
+# How many corpus-provenance samples a single clear may drop before it stops and
+# asks. This is a tripwire for "the history got polluted again", not a policy
+# about individual samples: the operator is entitled to clear anything they
+# actually analysed, INCLUDING a corpus sample they re-ran by hand, because the
+# whole point of the clear is to force a cold path on the next upload.
+#
+# What it catches is the bug this endpoint already caused once — a population run
+# writing hundreds of corpus rows into the history, after which "Clear" deleted
+# the knowledge base. 493 rows went that way. A real operator session is tens of
+# uploads, so the gap between normal and catastrophic is wide, and 25 sits in it.
+HISTORY_CLEAR_CORPUS_ALARM = 25
+
+
 @router.delete("/analyses")
-async def clear_analyses():
+async def clear_analyses(force: bool = False):
     """
-    Empties the Analysis History panel and drops the cached verdict for each
+    Empties the Analysis History panel and drops the cached verdict for every
     sample in it, so re-uploading any of them runs the full pipeline again
     instead of replaying a cache hit with every static phase marked skipped.
 
-    Scope is deliberately the analyses this instance ran, NOT the whole graph.
-    The corpus samples that back correlation, related-samples and the threat
-    landscape are left alone — they took hours to populate and clearing a UI list
-    is no reason to destroy them. The ontology is untouched for the same reason.
+    Scope is exactly the history list: every sha in it is dropped from Neo4j,
+    and nothing else is touched. That includes a sample that is ALSO a corpus
+    sample — if the operator analysed it here, clearing must give them a cold
+    path on it, which is the entire purpose of the button. The cost is that such
+    a sample drops out of correlation until it is analysed again.
 
-    One consequence worth knowing: a sample that is BOTH corpus and
-    operator-analysed loses its cached verdict here like any other, so it drops
-    out of correlation until it is analysed again.
+    What keeps that from destroying the knowledge base is upstream, not here:
+    the population scripts pass `record_history=false`, so corpus loads never
+    enter this list in the first place. The check below is a tripwire in case
+    something starts writing them in again — see HISTORY_CLEAR_CORPUS_ALARM.
+    Pass `force=true` to clear anyway.
     """
+    shas = peek_history_shas()
+    corpus_rows = _corpus_provenance_count(shas)
+
+    if corpus_rows > HISTORY_CLEAR_CORPUS_ALARM and not force:
+        # Refused BEFORE clear_history(), so the list the operator needs to
+        # inspect is still there. Emptying it and then declining to delete would
+        # leave them with neither the samples nor the evidence.
+        raise HTTPException(
+            409,
+            f"Refusing to clear: {corpus_rows} of {len(shas)} history rows are "
+            f"corpus samples loaded by the population scripts, not analyses run "
+            f"here. Clearing would drop them from the knowledge base. This means "
+            f"something recorded a bulk load into the history — check that "
+            f"populate_corpus.py is passing record_history=false. Re-send with "
+            f"?force=true to clear anyway.",
+        )
+
     shas = clear_history()
     dropped = 0
     for sha in shas:
@@ -266,8 +349,38 @@ async def clear_analyses():
             # A failure to drop one cached verdict must not abort the clear —
             # the history file is already emptied and the rest still deserve to go.
             logger.warning(f"[history] could not drop cached verdict {sha[:12]}: {e}")
-    logger.info(f"[history] cleared {len(shas)} history row(s), dropped {dropped} cached verdict(s).")
-    return {"cleared": len(shas), "cached_verdicts_dropped": dropped}
+    logger.info(
+        f"[history] cleared {len(shas)} history row(s), dropped {dropped} cached "
+        f"verdict(s) — those samples will run the full cold path on their next upload."
+    )
+    return {
+        "cleared": len(shas),
+        "cached_verdicts_dropped": dropped,
+        # Reported, not enforced. A non-zero value is legitimate (the operator
+        # re-analysed a corpus sample) but worth seeing, because a LARGE value is
+        # the signature of the pollution bug above.
+        "corpus_samples_dropped": corpus_rows,
+    }
+
+
+def _corpus_provenance_count(shas: list[str]) -> int:
+    """How many of these sha256s the graph records as corpus-loaded.
+
+    Best-effort: a graph that cannot be queried must not block the operator from
+    clearing a local file, so an error reads as zero and the clear proceeds.
+    """
+    if not shas:
+        return 0
+    try:
+        rows = neo4j_client.run(
+            "MATCH (s:Sample) WHERE s.sha256 IN $shas AND s.source = $src "
+            "RETURN count(s) AS n",
+            shas=shas, src=SAMPLE_SOURCE_CORPUS,
+        )
+        return int(rows[0]["n"]) if rows else 0
+    except Exception as e:
+        logger.warning(f"[history] corpus-provenance check unavailable ({e}).")
+        return 0
 
 
 @router.get("/analyses/{sha256}", response_model=AnalysisReport)
@@ -306,6 +419,7 @@ async def get_analysis(sha256: str):
         impersonation_floor_applied=rc.get("impersonation_floor_applied", False),
         dynamic_confirmation_floor_applied=rc.get("dynamic_confirmation_floor_applied", False),
         opaque_reputation_floor_applied=rc.get("opaque_reputation_floor_applied", False),
+        container_tamper_floor_applied=rc.get("container_tamper_floor_applied", False),
         weighted_score=rc.get("weighted_score"),
     )
 
@@ -365,6 +479,7 @@ async def get_analysis(sha256: str):
     return AnalysisReport(
         manifest=manifest,
         risk_score=risk_score,
+        coverage=compute_coverage(manifest),
         narrative_report=narrative,
         limitations=limitations,
         # store_signature persists the grounding result inside the record, so for
@@ -412,7 +527,8 @@ def _analyze_with_fallback(
 
 
 @router.post("/analyze", response_model=AnalysisReport)
-async def analyze(file: UploadFile = File(...), skip_report: bool = False, enable_dynamic: bool = False):
+async def analyze(file: UploadFile = File(...), skip_report: bool = False,
+                  enable_dynamic: bool = False, record_history: bool = True):
     """
     skip_report=true bypasses Phase 7's Ollama call (see generate_report's
     docstring) — the "needed" case app/api/routes.py's original synchronous-
@@ -420,6 +536,14 @@ async def analyze(file: UploadFile = File(...), skip_report: bool = False, enabl
     risk_score write; only the narrative prose is skipped. Default False keeps
     every existing caller (the web UI, curl, /analyze_sample) unaffected —
     this is opt-in for bulk population runs (see populate.py).
+
+    record_history=false keeps the upload out of the Analysis History panel and
+    stamps the Sample node `source='corpus'`, which also makes it undeletable by
+    the history "Clear" button. This is what the population scripts must pass, and
+    it is the fix for the bug where clearing history destroyed the knowledge base:
+    a corpus run of 493 samples went through this endpoint, every one of them was
+    recorded as an operator analysis, and "Clear" then deleted all of them from
+    Neo4j — while the UI's own confirm dialog promised the corpus was safe.
 
     enable_dynamic=true opts into Phase 8 (see dynamic_verification.py) — also
     gated on settings.dynamic_analysis_enabled, so a deployment with no AVD
@@ -446,13 +570,15 @@ async def analyze(file: UploadFile = File(...), skip_report: bool = False, enabl
             # above already claimed this happened; the code just never
             # actually did it.
             result = await run_in_threadpool(
-                _run_analysis, tmp_path, skip_report=skip_report, enable_dynamic=enable_dynamic
+                _run_analysis, tmp_path, skip_report=skip_report,
+                enable_dynamic=enable_dynamic, record_history=record_history,
             )
         except HTTPException:
             raise
         except Exception as exc:
             logger.error(f"Unparseable APK fallback triggered: {exc}")
-            result = _unparseable_report(tmp_path, exc, skip_report=skip_report)
+            result = _unparseable_report(tmp_path, exc, skip_report=skip_report,
+                                         record_history=record_history)
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -601,7 +727,8 @@ async def analyze_stream(job_id: str):
     )
 
 
-def _unparseable_report(filepath: str, exc: BaseException, skip_report: bool = False) -> AnalysisReport:
+def _unparseable_report(filepath: str, exc: BaseException, skip_report: bool = False,
+                       record_history: bool = True) -> AnalysisReport:
     """
     Builds the verdict returned when static analysis cannot complete.
 
@@ -687,10 +814,14 @@ def _unparseable_report(filepath: str, exc: BaseException, skip_report: bool = F
     # An upload that could not be parsed is still an analysis that was run and
     # still returns a verdict, so it belongs in the history. No package name or
     # family is recoverable — the parse is what would have produced them.
-    record_analysis(manifest.sha256, None, None, risk_score.total_score)
+    if record_history:
+        record_analysis(manifest.sha256, None, None, risk_score.total_score)
     return AnalysisReport(
         manifest=manifest,
         risk_score=risk_score,
+        # Not derived from the manifest: there is no manifest to derive from, and
+        # every stage here is a known negative rather than an unknown.
+        coverage=unparseable_coverage(label),
         narrative_report=narrative,
         limitations=limitations,
         grounding=grounding,
@@ -709,6 +840,7 @@ def _run_analysis(
     skip_report: bool = False,
     job_id: str | None = None,
     enable_dynamic: bool = False,
+    record_history: bool = True,
 ) -> AnalysisReport:
     # --- Hot path: hash, then look up, THEN parse ---
     # Order matters. The cache is keyed on the SHA-256 of the raw bytes, which
@@ -974,6 +1106,7 @@ def _run_analysis(
             # (store_signature MERGEs on sha256, so this doesn't duplicate the
             # Sample node) purely to attach the fresh dynamic_verification.
             store_signature(
+                source=(SAMPLE_SOURCE_OPERATOR if record_history else SAMPLE_SOURCE_CORPUS),
                 sha256=ingestion.sha256,
                 family=cached.get("family") or "",
                 risk_score=risk_score.total_score,
@@ -1012,13 +1145,15 @@ def _run_analysis(
         # A cache hit is still an analysis this operator ran — it belongs in the
         # history for the same reason a cold run does. Recording it moves the row
         # back to the top rather than duplicating it.
-        record_analysis(
-            ingestion.sha256, ingestion.package_name,
-            cached.get("family") or None, risk_score.total_score,
-        )
+        if record_history:
+            record_analysis(
+                ingestion.sha256, ingestion.package_name,
+                cached.get("family") or None, risk_score.total_score,
+            )
         return AnalysisReport(
             manifest=manifest,
             risk_score=risk_score,
+            coverage=compute_coverage(manifest),
             narrative_report=narrative,
             limitations=limitations,
             grounding=grounding,
@@ -1207,6 +1342,7 @@ def _run_analysis(
     # handles it.
     if not cache_hit:
         store_signature(
+            source=(SAMPLE_SOURCE_OPERATOR if record_history else SAMPLE_SOURCE_CORPUS),
             sha256=ingestion.sha256,
             family=predicted_family or "",
             risk_score=risk_score.total_score,
@@ -1228,13 +1364,19 @@ def _run_analysis(
             dynamic_verification=dynamic_result if dynamic_enabled else None,
         )
 
-    record_analysis(
-        ingestion.sha256, ingestion.package_name,
-        predicted_family or None, risk_score.total_score,
-    )
+    if record_history:
+        record_analysis(
+            ingestion.sha256, ingestion.package_name,
+            predicted_family or None, risk_score.total_score,
+        )
     return AnalysisReport(
         manifest=manifest,
         risk_score=risk_score,
+        coverage=compute_coverage(
+            manifest,
+            dynamic_requested=dynamic_enabled,
+            manifest_recovery_source=ingestion.manifest_recovery_source,
+        ),
         narrative_report=narrative,
         limitations=limitations,
         grounding=grounding,

@@ -169,7 +169,7 @@ def observed_endpoints(dynamic_verification: dict | None, c2_indicators: list[st
     return list(rows.values())
 
 
-def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None, *, signature_yara_data: dict | None = None, permissions: list[str] | None = None, risk_components: dict | None = None, obfuscation_data: dict | None = None, package_name: str | None = None, c2_indicators: list[str] | None = None, cert_thumbprint: str | None = None, resolved_crypto_configs: list[str] | None = None, resolved_dcl_targets: list[str] | None = None, resolved_webview_bridges: list[str] | None = None, resolved_native_bridges: list[str] | None = None, grounding: dict | None = None, dynamic_verification: dict | None = None):
+def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None, *, source: str = "operator", signature_yara_data: dict | None = None, permissions: list[str] | None = None, risk_components: dict | None = None, obfuscation_data: dict | None = None, package_name: str | None = None, c2_indicators: list[str] | None = None, cert_thumbprint: str | None = None, resolved_crypto_configs: list[str] | None = None, resolved_dcl_targets: list[str] | None = None, resolved_webview_bridges: list[str] | None = None, resolved_native_bridges: list[str] | None = None, grounding: dict | None = None, dynamic_verification: dict | None = None):
     """
     Call this after a cold-path analysis completes, so future uploads of
     the same sample (or re-uploads during a campaign) hit the fast path.
@@ -236,7 +236,18 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
         // "most recently touched", not "first ever seen". Neo4j's own
         // timestamp() (epoch millis) rather than an app-side clock, so ordering
         // stays correct regardless of which machine wrote the record.
-        s.analyzed_at = timestamp()
+        s.analyzed_at = timestamp(),
+        // How this sample got here. 'operator' (an upload through the UI/API)
+        // or 'corpus' (a bulk load by the population scripts) — see
+        // SAMPLE_SOURCE_* below and delete_sample, which will not drop a
+        // corpus node.
+        //
+        // coalesce, so provenance is written once and never downgraded: a
+        // corpus sample an operator later re-analyses stays 'corpus', because
+        // the question this property answers is "may the history clear delete
+        // this", and the answer for anything the knowledge base depends on is
+        // no, regardless of who touched it last.
+        s.source = coalesce(s.source, $source)
     // Only attach a family when one is actually known. This MERGE used to run
     // unconditionally, so an unknown family created a MalwareFamily node named
     // "" that every unattributed sample then hung off — a node asserting a
@@ -320,6 +331,7 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
             narrative=narrative,
             limitations=limitations,
             app_name=app_name,
+            source=source,
             package_name=package_name,
             record_json=_encode_record(_MEMORY_CACHE[sha256]),
         )
@@ -409,6 +421,21 @@ def list_feedback_samples() -> list[dict]:
     except Exception as e:
         logger.warning(f"[cache] list_feedback_samples failed: {e}")
         return []
+
+
+# How a Sample node got into the graph. Recorded so the Analysis History clear
+# can tell an operator upload from a bulk corpus load — see
+# routes.HISTORY_CLEAR_CORPUS_ALARM, which uses it as a tripwire for the
+# pollution bug that once let "Clear" delete the knowledge base.
+#
+# Deliberately NOT a per-sample delete guard. The operator is entitled to clear
+# anything they actually analysed, corpus sample included, because a cleared
+# sample is one that will run the cold path on its next upload — which is the
+# whole point of the button. Scale is what distinguishes an operator clearing
+# their work from a polluted history wiping the corpus, and scale is a decision
+# the endpoint can make and a single delete_sample call cannot.
+SAMPLE_SOURCE_OPERATOR = "operator"   # uploaded through the UI or the API
+SAMPLE_SOURCE_CORPUS = "corpus"       # bulk-loaded by scripts/populate_corpus.py
 
 
 def delete_sample(sha256: str) -> bool:
@@ -596,42 +623,312 @@ def find_related_samples(
     return results[:limit]
 
 
-def get_threat_landscape(limit: int = 30) -> dict:
+
+
+# ---------------------------------------------------------------------------
+# Threat Landscape filtering
+# ---------------------------------------------------------------------------
+#
+# The landscape view answers "what has this instance seen", but at corpus scale
+# that is hundreds of samples and every family/technique/C2 node they touch — one
+# hairball in which no individual question is answerable. The filters below exist
+# so an analyst can ask the pivots the graph was built for: which packages belong
+# to Cerberus, which packages talk to this C2 host, which share a signing key.
+#
+# All filtering happens in Cypher BEFORE the LIMIT. Filtering the already-limited
+# top-30 client-side would mean "Cerberus" silently showed only the Cerberus
+# samples that happen to be among the 30 highest-risk overall, which is a
+# different and much more misleading answer than the one the analyst asked for.
+
+
+def _landscape_bands() -> dict[str, tuple[float, float]]:
+    """Verdict band edges, imported from the scoring module rather than restated.
+
+    A sample whose report reads `high` must land in this filter's `high` bucket,
+    and a second local copy of the numbers is how the two drift apart. Ranges are
+    (exclusive lower, inclusive upper] to match _band_for's `<=` tests; the lowest
+    band opens below zero so a 0.0 score falls inside it. Imported lazily to keep
+    the graph layer free of a module-import dependency on the reports layer.
+    """
+    from app.reports.scoring import (
+        BAND_LOW_CEILING, BAND_MEDIUM_CEILING,
+        BAND_SUSPICIOUS_CEILING, BAND_HIGH_CEILING,
+    )
+    return {
+        "low": (-1.0, BAND_LOW_CEILING),
+        "medium": (BAND_LOW_CEILING, BAND_MEDIUM_CEILING),
+        "suspicious": (BAND_MEDIUM_CEILING, BAND_SUSPICIOUS_CEILING),
+        "high": (BAND_SUSPICIOUS_CEILING, BAND_HIGH_CEILING),
+        "malicious": (BAND_HIGH_CEILING, 1000.0),
+    }
+
+
+# Shared by the element query and the count query so the two can never disagree
+# about what "matched" means. Each clause is a no-op when its parameter is null,
+# which is how "no filter selected" is expressed — filter groups AND with each
+# other, while multiple values inside one group OR together (pick Cerberus and
+# Anubis and you get both families, not their empty intersection).
+#
+# Pattern comprehensions rather than EXISTS{} subqueries: same result, and they
+# keep working on the 4.x servers some deployments still point at.
+_LANDSCAPE_FILTER = """
+    ($families IS NULL OR size([(s)-[:CLASSIFIED_AS_FAMILY]->(f:MalwareFamily)
+                                WHERE f.name IN $families | f]) > 0)
+AND ($techniques IS NULL OR size([(s)-[:MAPS_TO_TECHNIQUE]->(t:Technique)
+                                  WHERE t.technique_id IN $techniques | t]) > 0)
+AND ($c2 IS NULL OR size([(s)-[:CONTACTS]->(ci:C2Indicator)
+                          WHERE ci.value IN $c2 | ci]) > 0)
+AND ($certificates IS NULL OR size([(s)-[:SIGNED_WITH]->(cr:Certificate)
+                                    WHERE cr.thumbprint IN $certificates | cr]) > 0)
+AND ($bands IS NULL OR any(b IN $bands
+        WHERE coalesce(s.risk_score, 0.0) > b.lo AND coalesce(s.risk_score, 0.0) <= b.hi))
+AND ($search IS NULL
+     OR toLower(coalesce(s.package_name, '')) CONTAINS $search
+     OR toLower(coalesce(s.app_name, '')) CONTAINS $search
+     OR toLower(coalesce(s.sha256, '')) CONTAINS $search)
+"""
+
+
+def _landscape_params(
+    families: list[str] | None,
+    techniques: list[str] | None,
+    c2: list[str] | None,
+    certificates: list[str] | None,
+    bands: list[str] | None,
+    search: str | None,
+) -> dict:
+    """Normalises the public filter arguments into _LANDSCAPE_FILTER's parameters.
+
+    An empty list means the same as no list — "the analyst cleared this filter",
+    not "match nothing" — so both collapse to None and the clause switches off.
+    An unrecognised band name is dropped rather than failing the request: the
+    band vocabulary belongs to the scoring module and a stale bookmark naming a
+    band that no longer exists should degrade to "no band filter", not a 500.
+    """
+    band_ranges = _landscape_bands()
+    selected_bands = [
+        {"lo": band_ranges[b][0], "hi": band_ranges[b][1]}
+        for b in (bands or []) if b in band_ranges
+    ]
+    term = (search or "").strip().lower()
+    return {
+        "families": list(families) if families else None,
+        "techniques": list(techniques) if techniques else None,
+        "c2": list(c2) if c2 else None,
+        "certificates": list(certificates) if certificates else None,
+        "bands": selected_bands or None,
+        "search": term or None,
+    }
+
+
+def get_landscape_facets() -> dict:
+    """
+    The filter options for the Threat Landscape view, each with the number of
+    cached samples behind it — read off the graph itself rather than hardcoded,
+    so a family or C2 host this instance has never seen never appears as a
+    choice that returns nothing.
+
+    Returns empty option lists (not an error) when Neo4j is unreachable, matching
+    how every other reader in this module degrades.
+    """
+    empty = {
+        "families": [], "techniques": [], "c2": [], "certificates": [],
+        "bands": [], "total_samples": 0,
+    }
+
+    try:
+        total = neo4j_client.run("MATCH (s:Sample) RETURN count(s) AS total")[0]["total"]
+
+        family_rows = neo4j_client.run("""
+            MATCH (s:Sample)-[:CLASSIFIED_AS_FAMILY]->(f:MalwareFamily)
+            RETURN f.name AS value, count(DISTINCT s) AS count
+            ORDER BY count DESC, value ASC
+        """)
+        technique_rows = neo4j_client.run("""
+            MATCH (s:Sample)-[:MAPS_TO_TECHNIQUE]->(t:Technique)
+            RETURN t.technique_id AS value, t.name AS name, count(DISTINCT s) AS count
+            ORDER BY count DESC, value ASC
+        """)
+        c2_rows = neo4j_client.run("""
+            MATCH (s:Sample)-[r:CONTACTS]->(ci:C2Indicator)
+            RETURN ci.value AS value, count(DISTINCT s) AS count,
+                   // A host some dynamic run actually observed traffic to is
+                   // worth pivoting on ahead of one that was only a string in
+                   // the DEX, so the distinction rides along to the UI.
+                   sum(CASE WHEN r.dynamically_confirmed THEN 1 ELSE 0 END) > 0 AS confirmed
+            ORDER BY count DESC, value ASC
+        """)
+        cert_rows = neo4j_client.run("""
+            MATCH (s:Sample)-[:SIGNED_WITH]->(c:Certificate)
+            RETURN c.thumbprint AS value, count(DISTINCT s) AS count
+            ORDER BY count DESC, value ASC
+        """)
+        score_rows = neo4j_client.run(
+            "MATCH (s:Sample) RETURN coalesce(s.risk_score, 0.0) AS score"
+        )
+    except Exception:
+        return empty
+
+    band_ranges = _landscape_bands()
+    band_counts = {name: 0 for name in band_ranges}
+    for row in score_rows:
+        score = row.get("score") or 0.0
+        for name, (lo, hi) in band_ranges.items():
+            if lo < score <= hi:
+                band_counts[name] += 1
+                break
+
+    return {
+        "families": [
+            {"value": r["value"], "label": r["value"], "count": r["count"]}
+            for r in family_rows if r.get("value")
+        ],
+        "techniques": [
+            # Technique nodes MERGEd by store_signature carry only an id until
+            # the ontology loader has run, so the id is the label of last resort.
+            {"value": r["value"], "label": r.get("name") or r["value"],
+             "detail": r["value"], "count": r["count"]}
+            for r in technique_rows if r.get("value")
+        ],
+        "c2": [
+            # The stored value is the typed indicator ("firebase:evil.web.app");
+            # the bare host is what an analyst recognises, so that becomes the
+            # label and the full indicator stays as the detail line.
+            {"value": r["value"], "label": c2_host(r["value"]) or r["value"],
+             "detail": r["value"], "count": r["count"],
+             "confirmed": bool(r.get("confirmed"))}
+            for r in c2_rows if r.get("value")
+        ],
+        "certificates": [
+            {"value": r["value"], "label": r["value"][:16] + "…",
+             "detail": r["value"], "count": r["count"],
+             # Past this many samples a shared key is a build-tool artefact, not
+             # an actor fingerprint (see MAX_SHARED_CERT_FOR_CORRELATION). The
+             # option stays selectable — it is still a real answer to "who else
+             # signed with this" — but the UI can label it so nobody reads the
+             # AOSP test key as a campaign.
+             "builder_default": r["count"] > MAX_SHARED_CERT_FOR_CORRELATION}
+            for r in cert_rows if r.get("value")
+        ],
+        "bands": [
+            {"value": name, "label": name.capitalize(), "count": band_counts[name]}
+            for name in band_ranges
+        ],
+        "total_samples": total,
+    }
+
+
+def get_threat_landscape(
+    limit: int = 30,
+    families: list[str] | None = None,
+    techniques: list[str] | None = None,
+    c2: list[str] | None = None,
+    certificates: list[str] | None = None,
+    bands: list[str] | None = None,
+    search: str | None = None,
+    scope: str = "matches",
+) -> dict:
     """
     Cytoscape-ready snapshot of the correlation graph for the "Threat
     Landscape" UI view — the whole-graph picture find_related_samples()
     only shows per-pair. Pulls the `limit` highest-risk cached Sample nodes
-    and their family/technique/C2/certificate neighborhood.
+    matching the active filters.
 
-    Returns {"nodes": [...], "edges": [...]} in Cytoscape's
-    {data: {...}} element shape, or empty lists if Neo4j is unreachable.
+    The filter arguments select SAMPLES: filtering on family "Cerberus" returns
+    the Cerberus samples, i.e. the packages that make up the family.
+
+    `scope` decides what is drawn ALONGSIDE those samples:
+
+      "matches"      (default) — only the family/technique/C2/certificate nodes
+                     the caller explicitly filtered on. Ask for Cerberus and you
+                     get the Cerberus node and its packages, not the union of
+                     every technique and endpoint those packages happen to
+                     touch. With no such filter selected there is nothing to
+                     narrow to, so the full neighborhood is drawn.
+      "neighborhood" — every node the matched samples touch, unrestricted. This
+                     is the pivot view: what does this family reach.
+
+    The distinction matters because these are different questions. "Which
+    packages are Cerberus" is answered by a star; "what infrastructure does
+    Cerberus share" is answered by the hairball. Drawing the hairball for the
+    first question buries the answer in nodes nobody asked about.
+
+    Returns {"nodes": [...], "edges": [...], "matched_samples": n,
+    "total_samples": n, "truncated": bool}, or the same shape with empty lists
+    if Neo4j is unreachable.
     """
+    params = _landscape_params(families, techniques, c2, certificates, bands, search)
+    empty = {
+        "nodes": [], "edges": [], "matched_samples": 0,
+        "total_samples": 0, "truncated": False,
+    }
+
+    # Which neighbour nodes survive, keyed by node type. A type the caller did
+    # not filter on maps to an empty set and is dropped entirely — that is the
+    # point: under "matches", the only non-Sample nodes on screen are the ones
+    # named in the filter.
+    #
+    # Band and search filters have no node of their own, so selecting only those
+    # leaves every allow-set empty and `restrict` false. Rendering 30 unconnected
+    # dots would be technically faithful and practically useless, so that case
+    # keeps the neighborhood.
+    pivot_allow = {
+        "MalwareFamily": set(params["families"] or []),
+        "Technique": set(params["techniques"] or []),
+        "C2Indicator": set(params["c2"] or []),
+        "Certificate": set(params["certificates"] or []),
+    }
+    restrict = scope == "matches" and any(pivot_allow.values())
+
+    def _keep(node_type: str, value: str) -> bool:
+        return not restrict or value in pivot_allow[node_type]
+
     try:
+        counts = neo4j_client.run(
+            f"""
+            MATCH (every:Sample)
+            WITH count(every) AS total
+            // OPTIONAL, so a filter matching nothing still returns the row
+            // carrying `total` instead of collapsing to no rows at all — the UI
+            // needs "0 of 300" to tell an over-narrow filter from an empty
+            // database, and those are different problems with different fixes.
+            OPTIONAL MATCH (s:Sample)
+            WHERE {_LANDSCAPE_FILTER}
+            RETURN total, count(s) AS matched
+            """,
+            **params,
+        )
         rows = neo4j_client.run(
-            """
+            f"""
             MATCH (s:Sample)
+            WHERE {_LANDSCAPE_FILTER}
             WITH s ORDER BY coalesce(s.risk_score, 0) DESC LIMIT $limit
             OPTIONAL MATCH (s)-[:CLASSIFIED_AS_FAMILY]->(f:MalwareFamily)
             OPTIONAL MATCH (s)-[:MAPS_TO_TECHNIQUE]->(t:Technique)
-            OPTIONAL MATCH (s)-[:CONTACTS]->(c2:C2Indicator)
+            OPTIONAL MATCH (s)-[:CONTACTS]->(c2n:C2Indicator)
             OPTIONAL MATCH (s)-[:SIGNED_WITH]->(cert:Certificate)
             RETURN s.sha256 AS sha256, s.app_name AS app_name,
+                   s.package_name AS package_name,
                    s.risk_score AS risk_score, f.name AS family,
-                   collect(DISTINCT {id: t.technique_id, name: t.name}) AS techniques,
-                   collect(DISTINCT c2.value) AS c2,
+                   collect(DISTINCT {{id: t.technique_id, name: t.name}}) AS techniques,
+                   collect(DISTINCT c2n.value) AS c2,
                    cert.thumbprint AS cert
             """,
             limit=limit,
+            **params,
         )
     except Exception:
-        return {"nodes": [], "edges": []}
+        return empty
+
+    total_samples = counts[0]["total"] if counts else 0
+    matched_samples = counts[0]["matched"] if counts else 0
 
     nodes: dict[str, dict] = {}
     edges: list[dict] = []
 
-    def _add_node(node_id: str, label: str, node_type: str) -> None:
+    def _add_node(node_id: str, label: str, node_type: str, **extra) -> None:
         if node_id not in nodes:
-            nodes[node_id] = {"data": {"id": node_id, "label": label, "type": node_type}}
+            nodes[node_id] = {"data": {"id": node_id, "label": label, "type": node_type, **extra}}
 
     def _add_edge(source: str, target: str, label: str) -> None:
         edges.append({"data": {"id": f"{source}->{target}:{label}", "source": source, "target": target, "label": label}})
@@ -639,9 +936,19 @@ def get_threat_landscape(limit: int = 30) -> dict:
     for row in rows:
         sha = row["sha256"]
         sample_id = f"sample:{sha}"
-        _add_node(sample_id, row.get("app_name") or sha[:12], "Sample")
+        _add_node(
+            sample_id,
+            row.get("app_name") or row.get("package_name") or sha[:12],
+            "Sample",
+            # Carried on the node so clicking a filtered sample answers "which
+            # package is this" without a second round trip — reading off the
+            # packages behind a family is the point of filtering by one.
+            package_name=row.get("package_name") or "",
+            risk_score=row.get("risk_score"),
+            sha256=sha,
+        )
 
-        if row.get("family"):
+        if row.get("family") and _keep("MalwareFamily", row["family"]):
             family_id = f"family:{row['family']}"
             _add_node(family_id, row["family"], "MalwareFamily")
             _add_edge(sample_id, family_id, "CLASSIFIED_AS_FAMILY")
@@ -649,21 +956,34 @@ def get_threat_landscape(limit: int = 30) -> dict:
         for tech in row.get("techniques") or []:
             if not tech or not tech.get("id"):
                 continue
+            if not _keep("Technique", tech["id"]):
+                continue
             tech_id = f"technique:{tech['id']}"
             _add_node(tech_id, tech.get("name") or tech["id"], "Technique")
             _add_edge(sample_id, tech_id, "MAPS_TO_TECHNIQUE")
 
-        for c2 in row.get("c2") or []:
-            if not c2:
+        for c2_value in row.get("c2") or []:
+            if not c2_value or not _keep("C2Indicator", c2_value):
                 continue
-            c2_id = f"c2:{c2}"
-            _add_node(c2_id, c2, "C2Indicator")
+            c2_id = f"c2:{c2_value}"
+            _add_node(c2_id, c2_value, "C2Indicator")
             _add_edge(sample_id, c2_id, "CONTACTS")
 
-        if row.get("cert"):
+        if row.get("cert") and _keep("Certificate", row["cert"]):
             cert_id = f"cert:{row['cert']}"
             _add_node(cert_id, row["cert"][:16] + "...", "Certificate")
             _add_edge(sample_id, cert_id, "SIGNED_WITH")
 
-    return {"nodes": list(nodes.values()), "edges": edges}
-
+    return {
+        "nodes": list(nodes.values()),
+        "edges": edges,
+        "matched_samples": matched_samples,
+        "total_samples": total_samples,
+        # The graph shows the highest-risk `limit` of the matches; saying so is
+        # what stops "12 sample nodes" being misread as "12 samples exist".
+        "truncated": matched_samples > limit,
+        # What was actually drawn, which is not always what was asked for — a
+        # band-only filter requests "matches" and gets a neighborhood, and the
+        # UI has to say which view is on screen rather than guess.
+        "scope": "matches" if restrict else "neighborhood",
+    }

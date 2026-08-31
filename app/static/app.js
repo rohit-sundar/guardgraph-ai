@@ -663,6 +663,8 @@ function renderResults(data) {
   const strokeOffset = 264 - (264 * (score / 100));
   gaugeFill.style.strokeDashoffset = strokeOffset;
 
+  renderCoverage(data.coverage);
+
   // Badges — explicitly reset both first. Without this, a badge shown for
   // one sample stayed visible on the next report even when that sample's
   // own zero_day_indicator/is_known_malware was false, since .remove('hidden')
@@ -1008,6 +1010,105 @@ function _riskComponents(risk) {
     { key: 'ttp_severity', name: 'TTP Severity', score: risk.ttp_severity_component, max: 15 },
     { key: 'classifier_confidence', name: 'Classifier Confidence', score: risk.classifier_confidence_component, max: 25 },
   ];
+}
+
+/**
+ * Analysis coverage — how much of the APK the backend actually read.
+ *
+ * The gauge is one colour across 0-100 on purpose (see .gauge-coverage): a low
+ * coverage is not a milder finding, it means less of the app was seen, and the
+ * verdict gauge beside it is correspondingly less supported.
+ *
+ * A missing `coverage` object is rendered as "not reported", never as 0/100 —
+ * a cached record predating this field has unknown coverage, not none.
+ */
+function renderCoverage(coverage) {
+  const tag = document.getElementById('coverageTag');
+  const num = document.getElementById('coverageNum');
+  const fill = document.getElementById('coverageGaugeFill');
+  const stages = document.getElementById('coverageStages');
+  const gapsEl = document.getElementById('coverageGaps');
+  const warning = document.getElementById('coverageWarning');
+  if (!tag || !num || !fill || !stages || !gapsEl || !warning) return;
+
+  stages.innerHTML = '';
+  gapsEl.innerHTML = '';
+  gapsEl.classList.add('hidden');
+  warning.classList.add('hidden');
+  tag.classList.remove('coverage-none');
+
+  if (!coverage) {
+    tag.textContent = 'NOT REPORTED';
+    num.textContent = '—';
+    fill.style.strokeDashoffset = 264;
+    return;
+  }
+
+  const pct = Math.round((coverage.completeness || 0) * 100);
+  tag.textContent = String(coverage.level || 'unknown').toUpperCase();
+  if (coverage.level === 'none') tag.classList.add('coverage-none');
+  num.textContent = pct.toFixed(1);
+  fill.style.strokeDashoffset = 264 - (264 * (pct / 100));
+
+  if (coverage.verdict_supported === false) {
+    warning.classList.remove('hidden');
+  }
+
+  // null is rendered as a dash, never a cross: "not run on this path" is not
+  // the same claim as "ran and failed", and the backend is careful to
+  // distinguish them (see AnalysisCoverage in app/core/schemas.py).
+  const mark = (v) => {
+    if (v === true) return ['✓', 'coverage-yes'];
+    if (v === false) return ['✗', 'coverage-no'];
+    return ['–', 'coverage-na'];
+  };
+
+  const rows = [
+    ['Container opened', coverage.container_opened],
+    ['Manifest parsed', coverage.manifest_parsed],
+    ['Code recovered', coverage.code_recovered],
+    ['Control-flow graph', coverage.cfg_built],
+    ['Signature / YARA', coverage.reputation_checked],
+    ['Identity checks', coverage.identity_checked],
+    ['Dynamic run', coverage.dynamic_ran],
+  ];
+
+  if (coverage.method_coverage !== null && coverage.method_coverage !== undefined) {
+    const analysed = coverage.analyzed_method_count;
+    const total = coverage.dex_method_count;
+    rows.push([
+      `Methods analysed${total ? ` (${analysed}/${total})` : ''}`,
+      `${(coverage.method_coverage * 100).toFixed(1)}%`,
+    ]);
+  }
+
+  rows.forEach(([label, value]) => {
+    const row = document.createElement('div');
+    row.className = 'coverage-stage';
+    const l = document.createElement('span');
+    l.className = 'coverage-stage-label';
+    l.textContent = label;
+    const m = document.createElement('span');
+    if (typeof value === 'string') {
+      m.className = 'coverage-stage-mark coverage-yes';
+      m.textContent = value;
+    } else {
+      const [glyph, cls] = mark(value);
+      m.className = `coverage-stage-mark ${cls}`;
+      m.textContent = glyph;
+    }
+    row.appendChild(l);
+    row.appendChild(m);
+    stages.appendChild(row);
+  });
+
+  (coverage.gaps || []).forEach((g) => {
+    const d = document.createElement('div');
+    d.className = 'coverage-gap';
+    d.textContent = g;   // textContent, not innerHTML — gap text is backend-built
+    gapsEl.appendChild(d);
+  });
+  if ((coverage.gaps || []).length) gapsEl.classList.remove('hidden');
 }
 
 function renderWhyScore(risk) {
@@ -1729,7 +1830,21 @@ function formatNodeDetails(node) {
   } else if (type === 'Sample' && rawValue !== 'current' && rawValue !== label) {
     idHtml = `<span class="node-detail-id">${esc(rawValue.length > 24 ? rawValue.slice(0, 20) + '…' : rawValue)}</span>`;
   }
-  return `<span class="node-detail-name">${esc(type)}: ${esc(label)}</span>${idHtml}`;
+
+  // Filtering to a family is a question about packages, so the package name has
+  // to be readable the moment a sample node is clicked — the visible label is an
+  // app name, which is the attacker-chosen display string, not the identity.
+  const extras = [];
+  const pkg = node.data('package_name');
+  if (type === 'Sample' && pkg) {
+    extras.push(`<span class="node-detail-pkg">${esc(pkg)}</span>`);
+  }
+  const risk = node.data('risk_score');
+  if (type === 'Sample' && risk !== undefined && risk !== null) {
+    extras.push(`<span class="node-detail-risk">risk ${Number(risk).toFixed(1)}</span>`);
+  }
+
+  return `<span class="node-detail-name">${esc(type)}: ${esc(label)}</span>${idHtml}${extras.join('')}`;
 }
 
 function showNodeDetails(targetElId, node) {
@@ -1742,6 +1857,466 @@ function clearNodeDetails(targetElId) {
   if (el) el.innerHTML = '';
 }
 
+// ---------------------------------------------------------------------------
+// Threat Landscape filters
+// ---------------------------------------------------------------------------
+//
+// Five pivots over the live correlation graph, plus a free-text search. Each one
+// selects SAMPLES and the server then draws their whole neighborhood, so
+// filtering to Cerberus answers "which packages are Cerberus, and what do they
+// reach" — the neighborhood is the answer, not collateral to be filtered out
+// alongside everything else.
+//
+// Selections inside one filter OR together; different filters AND. That is the
+// combination an analyst actually wants ("Cerberus or Anubis, but only the ones
+// talking to this host") and it matches the Cypher in get_threat_landscape.
+//
+// The filtering itself is deliberately server-side. Doing it here would mean
+// filtering the 30 nodes the server already picked as highest-risk overall, so
+// "Cerberus" would quietly mean "Cerberus among the global top 30" — a different
+// question, silently answered.
+const LANDSCAPE_FILTERS = [
+  {
+    key: 'family', param: 'family', facet: 'families',
+    label: 'Malware Family',
+    hint: 'Samples classified into a family — pick one to read off its packages.',
+    searchable: true,
+  },
+  {
+    key: 'c2', param: 'c2', facet: 'c2',
+    label: 'C2 Server',
+    hint: 'Samples that reference a given command-and-control endpoint.',
+    searchable: true,
+  },
+  {
+    key: 'technique', param: 'technique', facet: 'techniques',
+    label: 'MITRE Technique',
+    hint: 'Samples the classifier mapped to an ATT&CK technique.',
+    searchable: true,
+  },
+  {
+    key: 'cert', param: 'cert', facet: 'certificates',
+    label: 'Signing Certificate',
+    hint: 'Samples signed with the same key — shared-key clusters are campaign evidence.',
+    searchable: true,
+  },
+  {
+    key: 'band', param: 'band', facet: 'bands',
+    label: 'Risk Level',
+    hint: 'The verdict band each sample scored, using the report’s own thresholds.',
+    searchable: false,
+  },
+];
+
+// key -> Set of selected values. Rebuilt, never reassigned, so the dropdown
+// closures keep pointing at live state.
+const landscapeSelection = {};
+LANDSCAPE_FILTERS.forEach(f => { landscapeSelection[f.key] = new Set(); });
+
+// Facet options as last fetched, keyed by filter key. Kept so a chip can render
+// a human label ("SMS Control") for a value that is stored as an id ("T1582").
+let landscapeFacets = null;
+let landscapeSearchTerm = '';
+let landscapeSearchTimer = null;
+
+// 'matches'      — draw the matched packages and only the node the filter named.
+// 'neighborhood' — also draw everything those packages touch.
+//
+// Defaults to 'matches' because that is the question the filter asked: pick
+// Cerberus and the answer is its packages, not the union of every technique and
+// endpoint they happen to share. The pivot view stays one click away, since
+// "what infrastructure does this family reach" is a real question too — just a
+// different one, and it should be asked for rather than assumed.
+let landscapeScope = 'matches';
+
+function landscapeOptionsFor(key) {
+  const filter = LANDSCAPE_FILTERS.find(f => f.key === key);
+  if (!filter || !landscapeFacets) return [];
+  return landscapeFacets[filter.facet] || [];
+}
+
+function landscapeLabelFor(key, value) {
+  const opt = landscapeOptionsFor(key).find(o => o.value === value);
+  return opt ? opt.label : value;
+}
+
+function landscapeActiveCount() {
+  return LANDSCAPE_FILTERS.reduce((n, f) => n + landscapeSelection[f.key].size, 0)
+    + (landscapeSearchTerm ? 1 : 0);
+}
+
+// Builds the query string for /graph/landscape. Repeated params rather than a
+// comma-joined list: values here include C2 indicators and certificate
+// thumbprints, and a comma inside one of those would silently split it in two.
+function landscapeQuery() {
+  const params = new URLSearchParams();
+  params.set('limit', '30');
+  LANDSCAPE_FILTERS.forEach(f => {
+    landscapeSelection[f.key].forEach(v => params.append(f.param, v));
+  });
+  if (landscapeSearchTerm) params.set('search', landscapeSearchTerm);
+  params.set('scope', landscapeScope);
+  return params.toString();
+}
+
+async function initLandscapeFilters() {
+  const host = document.getElementById('landscapeFilterControls');
+  if (!host) return;
+  try {
+    const resp = await fetch('/graph/landscape/facets');
+    landscapeFacets = await resp.json();
+  } catch (e) {
+    // The graph itself reports the same outage in its own placeholder, so this
+    // stays a quiet note rather than a second alarm for one failure.
+    host.innerHTML = '<span class="lf-loading">Filters unavailable — Neo4j unreachable.</span>';
+    return;
+  }
+  renderLandscapeFilterControls();
+}
+
+function renderLandscapeFilterControls() {
+  const host = document.getElementById('landscapeFilterControls');
+  if (!host) return;
+  host.innerHTML = '';
+
+  LANDSCAPE_FILTERS.forEach(filter => {
+    const options = landscapeOptionsFor(filter.key);
+    const wrap = document.createElement('div');
+    wrap.className = 'lf-dropdown';
+    wrap.dataset.key = filter.key;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'lf-trigger';
+    btn.title = filter.hint;
+    btn.setAttribute('aria-expanded', 'false');
+    // An empty facet is disabled rather than hidden: "no C2 indicators in this
+    // graph yet" is information, and a filter row whose controls appear and
+    // disappear between refreshes is harder to trust than one that stays put.
+    btn.disabled = options.length === 0;
+    wrap.appendChild(btn);
+
+    const panel = document.createElement('div');
+    panel.className = 'lf-panel hidden';
+
+    if (filter.searchable && options.length > 8) {
+      const optSearch = document.createElement('input');
+      optSearch.type = 'search';
+      optSearch.className = 'lf-panel-search';
+      optSearch.placeholder = 'Filter ' + filter.label.toLowerCase() + '…';
+      optSearch.addEventListener('input', () => {
+        const term = optSearch.value.trim().toLowerCase();
+        panel.querySelectorAll('.lf-option').forEach(row => {
+          const hay = (row.dataset.haystack || '');
+          row.classList.toggle('hidden', term !== '' && !hay.includes(term));
+        });
+      });
+      // Typing in the option filter must not reach the dropdown's outside-click
+      // handler, which would close the panel on the first keystroke.
+      optSearch.addEventListener('click', e => e.stopPropagation());
+      panel.appendChild(optSearch);
+    }
+
+    const list = document.createElement('div');
+    list.className = 'lf-option-list';
+    options.forEach(opt => {
+      list.appendChild(buildLandscapeOption(filter, opt));
+    });
+    panel.appendChild(list);
+
+    if (options.length) {
+      const clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'lf-panel-clear';
+      clear.textContent = 'Clear ' + filter.label.toLowerCase();
+      clear.addEventListener('click', () => {
+        landscapeSelection[filter.key].clear();
+        onLandscapeFilterChange();
+      });
+      panel.appendChild(clear);
+    }
+
+    wrap.appendChild(panel);
+    btn.addEventListener('click', () => toggleLandscapeDropdown(wrap));
+    host.appendChild(wrap);
+  });
+
+  const scopeBtn = document.createElement('button');
+  scopeBtn.type = 'button';
+  scopeBtn.id = 'landscapeScopeToggle';
+  scopeBtn.className = 'lf-scope-toggle';
+  scopeBtn.addEventListener('click', () => {
+    landscapeScope = landscapeScope === 'matches' ? 'neighborhood' : 'matches';
+    onLandscapeFilterChange();
+  });
+  host.appendChild(scopeBtn);
+
+  updateLandscapeFilterChrome();
+}
+
+// The toggle is only meaningful once a family/technique/C2/certificate is
+// selected — those are the nodes it adds or removes. A risk-level or search
+// filter names no node, so there is nothing to narrow to and the server draws
+// the neighborhood either way; saying so beats offering a control that appears
+// to do nothing.
+function landscapePivotSelected() {
+  return ['family', 'technique', 'c2', 'cert']
+    .some(key => landscapeSelection[key].size > 0);
+}
+
+function updateLandscapeScopeToggle() {
+  const btn = document.getElementById('landscapeScopeToggle');
+  if (!btn) return;
+  const usable = landscapePivotSelected();
+  const showingMatches = landscapeScope === 'matches' && usable;
+  btn.disabled = !usable;
+  btn.textContent = showingMatches ? 'Matches only' : 'With connections';
+  btn.classList.toggle('lf-scope-on', showingMatches);
+  btn.title = usable
+    ? (showingMatches
+        ? 'Showing the matched packages and the node you filtered on. Click to add everything they connect to.'
+        : 'Showing everything the matched packages connect to. Click to narrow back to the matches.')
+    : 'Select a family, technique, C2 server or certificate to narrow the graph to just those nodes.';
+}
+
+function buildLandscapeOption(filter, opt) {
+  const row = document.createElement('label');
+  row.className = 'lf-option';
+  row.dataset.value = opt.value;
+  // Both label and detail go in the haystack so the technique list answers to
+  // "T1582" as readily as to "SMS".
+  row.dataset.haystack = `${opt.label} ${opt.detail || ''} ${opt.value}`.toLowerCase();
+
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.checked = landscapeSelection[filter.key].has(opt.value);
+  box.addEventListener('change', () => {
+    if (box.checked) landscapeSelection[filter.key].add(opt.value);
+    else landscapeSelection[filter.key].delete(opt.value);
+    onLandscapeFilterChange();
+  });
+  row.appendChild(box);
+
+  const text = document.createElement('span');
+  text.className = 'lf-option-text';
+
+  const name = document.createElement('span');
+  name.className = 'lf-option-label';
+  if (filter.key === 'band') name.classList.add('lf-band-' + opt.value);
+  name.textContent = opt.label;
+  text.appendChild(name);
+
+  // The detail line is what makes an abbreviated option identifiable — a
+  // certificate label is 16 characters of thumbprint, and a C2 label drops the
+  // indicator's type prefix. Neither is unambiguous on its own.
+  if (opt.detail && opt.detail !== opt.label) {
+    const detail = document.createElement('span');
+    detail.className = 'lf-option-detail';
+    detail.textContent = opt.detail;
+    text.appendChild(detail);
+  }
+
+  const notes = [];
+  if (opt.confirmed) notes.push('observed live');
+  // Surfaced, not hidden: a key on this many samples is a build-tool default and
+  // filtering by it groups a toolchain, not an actor. See
+  // MAX_SHARED_CERT_FOR_CORRELATION in app/graph/cache.py.
+  if (opt.builder_default) notes.push('builder default key');
+  if (notes.length) {
+    const note = document.createElement('span');
+    note.className = 'lf-option-note';
+    note.textContent = notes.join(' · ');
+    text.appendChild(note);
+  }
+
+  row.appendChild(text);
+
+  const count = document.createElement('span');
+  count.className = 'lf-option-count';
+  count.textContent = opt.count;
+  count.title = opt.count + ' sample' + (opt.count === 1 ? '' : 's');
+  row.appendChild(count);
+
+  return row;
+}
+
+function toggleLandscapeDropdown(wrap) {
+  const panel = wrap.querySelector('.lf-panel');
+  const btn = wrap.querySelector('.lf-trigger');
+  const opening = panel.classList.contains('hidden');
+  closeLandscapeDropdowns();
+  panel.classList.toggle('hidden', !opening);
+  btn.setAttribute('aria-expanded', String(opening));
+}
+
+function closeLandscapeDropdowns() {
+  document.querySelectorAll('#landscapeFilterControls .lf-panel').forEach(p => p.classList.add('hidden'));
+  document.querySelectorAll('#landscapeFilterControls .lf-trigger').forEach(b => b.setAttribute('aria-expanded', 'false'));
+}
+
+document.addEventListener('click', (e) => {
+  const host = document.getElementById('landscapeFilterControls');
+  if (!host || !host.contains(e.target)) closeLandscapeDropdowns();
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeLandscapeDropdowns();
+});
+
+// Re-renders every part of the filter bar that reflects state — trigger labels,
+// checkbox states and chips — without rebuilding the panels, so a dropdown left
+// open keeps its scroll position while its selection changes.
+function updateLandscapeFilterChrome() {
+  LANDSCAPE_FILTERS.forEach(filter => {
+    const wrap = document.querySelector(`#landscapeFilterControls .lf-dropdown[data-key="${filter.key}"]`);
+    if (!wrap) return;
+    const selected = landscapeSelection[filter.key];
+    const btn = wrap.querySelector('.lf-trigger');
+    const total = landscapeOptionsFor(filter.key).length;
+
+    btn.classList.toggle('lf-trigger-active', selected.size > 0);
+    btn.innerHTML = '';
+    const label = document.createElement('span');
+    label.textContent = filter.label;
+    btn.appendChild(label);
+
+    const badge = document.createElement('span');
+    badge.className = 'lf-trigger-badge';
+    // The unselected state shows how many options exist, so an empty graph is
+    // legible ("Malware Family 0") before anyone opens the dropdown.
+    badge.textContent = selected.size > 0 ? selected.size : total;
+    btn.appendChild(badge);
+
+    const caret = document.createElement('span');
+    caret.className = 'lf-caret';
+    caret.textContent = '▾';
+    btn.appendChild(caret);
+
+    wrap.querySelectorAll('.lf-option').forEach(row => {
+      const box = row.querySelector('input[type="checkbox"]');
+      if (box) box.checked = selected.has(row.dataset.value);
+    });
+  });
+
+  updateLandscapeScopeToggle();
+  renderLandscapeChips();
+}
+
+function renderLandscapeChips() {
+  const host = document.getElementById('landscapeActiveFilters');
+  if (!host) return;
+  host.innerHTML = '';
+  if (landscapeActiveCount() === 0) {
+    host.classList.add('hidden');
+    return;
+  }
+  host.classList.remove('hidden');
+
+  LANDSCAPE_FILTERS.forEach(filter => {
+    landscapeSelection[filter.key].forEach(value => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = 'lf-chip';
+      chip.title = `Remove ${filter.label}: ${value}`;
+      chip.innerHTML = `<span class="lf-chip-kind">${esc(filter.label)}</span>`
+        + `<span class="lf-chip-value">${esc(landscapeLabelFor(filter.key, value))}</span>`
+        + `<span class="lf-chip-x">×</span>`;
+      chip.addEventListener('click', () => {
+        landscapeSelection[filter.key].delete(value);
+        onLandscapeFilterChange();
+      });
+      host.appendChild(chip);
+    });
+  });
+
+  if (landscapeSearchTerm) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'lf-chip';
+    chip.innerHTML = `<span class="lf-chip-kind">Search</span>`
+      + `<span class="lf-chip-value">${esc(landscapeSearchTerm)}</span>`
+      + `<span class="lf-chip-x">×</span>`;
+    chip.addEventListener('click', () => {
+      landscapeSearchTerm = '';
+      const box = document.getElementById('landscapeSearch');
+      if (box) box.value = '';
+      onLandscapeFilterChange();
+    });
+    host.appendChild(chip);
+  }
+
+  const clearAll = document.createElement('button');
+  clearAll.type = 'button';
+  clearAll.className = 'lf-clear-all';
+  clearAll.textContent = 'Clear all filters';
+  clearAll.addEventListener('click', clearLandscapeFilters);
+  host.appendChild(clearAll);
+}
+
+function clearLandscapeFilters() {
+  LANDSCAPE_FILTERS.forEach(f => landscapeSelection[f.key].clear());
+  landscapeSearchTerm = '';
+  landscapeScope = 'matches';
+  const box = document.getElementById('landscapeSearch');
+  if (box) box.value = '';
+  onLandscapeFilterChange();
+}
+
+function onLandscapeFilterChange() {
+  updateLandscapeFilterChrome();
+  loadThreatLandscape();
+}
+
+function initLandscapeSearchBox() {
+  const box = document.getElementById('landscapeSearch');
+  if (!box || box.dataset.wired) return;
+  box.dataset.wired = '1';
+  // Debounced: every keystroke would otherwise be a Cypher query plus a full
+  // cose relayout, and the layout is the expensive half.
+  box.addEventListener('input', () => {
+    clearTimeout(landscapeSearchTimer);
+    landscapeSearchTimer = setTimeout(() => {
+      const next = box.value.trim();
+      if (next === landscapeSearchTerm) return;
+      landscapeSearchTerm = next;
+      onLandscapeFilterChange();
+    }, 300);
+  });
+}
+
+function renderLandscapeSummary(data) {
+  const el = document.getElementById('landscapeFilterSummary');
+  if (!el) return;
+  const matched = data.matched_samples ?? 0;
+  const total = data.total_samples ?? 0;
+  const shown = (data.nodes || []).filter(n => n.data && n.data.type === 'Sample').length;
+  const filtered = landscapeActiveCount() > 0;
+
+  // The server reports the scope it actually applied, which is not always the
+  // one requested — a risk-level filter names no node to narrow to.
+  const suffix = data.scope === 'matches'
+    ? ' Matched packages only.'
+    : (filtered ? ' Plus everything they connect to.' : '');
+
+  let text;
+  if (total === 0) {
+    text = 'No samples cached in Neo4j yet.';
+  } else if (matched === 0) {
+    text = `No samples match these filters — ${total} cached in total.`;
+  } else if (data.truncated) {
+    // Saying which N is the point: an analyst who filters to 90 Cerberus samples
+    // and sees 30 nodes needs to know the 30 were chosen by risk, not at random.
+    text = filtered
+      ? `Showing the ${shown} highest-risk of ${matched} matching sample${matched === 1 ? '' : 's'} (${total} cached in total).`
+      : `Showing the ${shown} highest-risk of ${total} cached sample${total === 1 ? '' : 's'}.`;
+  } else {
+    text = filtered
+      ? `Showing all ${matched} matching sample${matched === 1 ? '' : 's'} of ${total} cached.`
+      : `Showing all ${matched} cached sample${matched === 1 ? '' : 's'}.`;
+  }
+  el.textContent = matched > 0 ? text + suffix : text;
+}
+
 const LANDSCAPE_COLORS = {
   Sample: '#eab308',
   MalwareFamily: '#84cc16',
@@ -1750,6 +2325,18 @@ const LANDSCAPE_COLORS = {
   Certificate: '#a855f7',
 };
 
+// Full reload: re-reads the filter vocabulary as well as the graph. Bound to the
+// Refresh button and the first open of the tab, because newly analyzed samples
+// can introduce families and C2 hosts that were not options when the bar was
+// last built. A change of selection calls loadThreatLandscape() alone — the
+// options cannot have changed, and rebuilding the panels would close the
+// dropdown the analyst is still clicking in.
+async function refreshThreatLandscape() {
+  initLandscapeSearchBox();
+  await initLandscapeFilters();
+  await loadThreatLandscape();
+}
+
 async function loadThreatLandscape() {
   const container = document.getElementById('landscapeGraphContainer');
   if (!container || typeof cytoscape === 'undefined') return;
@@ -1757,17 +2344,30 @@ async function loadThreatLandscape() {
   clearNodeDetails('landscapeNodeDetails');
 
   let elements;
+  let data;
   try {
-    const resp = await fetch('/graph/landscape?limit=30');
-    const data = await resp.json();
+    const resp = await fetch('/graph/landscape?' + landscapeQuery());
+    data = await resp.json();
     elements = [...(data.nodes || []), ...(data.edges || [])];
   } catch (e) {
     container.innerHTML = '<div class="graph-placeholder-text">Failed to load graph — is the server reachable?</div>';
     return;
   }
 
+  renderLandscapeSummary(data);
+
   if (elements.length === 0) {
-    container.innerHTML = '<div class="graph-placeholder-text">No cached samples in Neo4j yet — analyze a few APKs first.</div>';
+    // An empty result under active filters is a filter that is too narrow, not
+    // an empty database — and the fix for each is the opposite of the other, so
+    // the two must never share a message.
+    const narrowed = landscapeActiveCount() > 0 && (data.total_samples || 0) > 0;
+    container.innerHTML = narrowed
+      ? '<div class="graph-placeholder-text">No samples match these filters — try removing one.</div>'
+      : '<div class="graph-placeholder-text">No cached samples in Neo4j yet — analyze a few APKs first.</div>';
+    if (cyLandscapeInstance) {
+      cyLandscapeInstance.destroy();
+      cyLandscapeInstance = null;
+    }
     return;
   }
 
@@ -2056,8 +2656,8 @@ function switchTab(tabId, btnEl) {
 
   // Threat Landscape is a global graph view, not tied to the current report —
   // lazy-load it the first time the tab is opened rather than on every result.
-  if (tabId === 'threatLandscape' && !cyLandscapeInstance) {
-    loadThreatLandscape();
+  if (tabId === 'threatLandscape' && !cyLandscapeInstance && !landscapeFacets) {
+    refreshThreatLandscape();
   }
 }
 

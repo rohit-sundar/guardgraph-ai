@@ -49,6 +49,7 @@ def _local_header_entry(name: bytes, payload: bytes) -> bytes:
 
 def _stub_report():
     """Minimal well-formed AnalysisReport — the endpoint validates its response."""
+    from app.core.coverage import unparseable_coverage
     from app.core.schemas import (
         AnalysisManifest,
         AnalysisReport,
@@ -74,6 +75,7 @@ def _stub_report():
             family_confidence=None,
         ),
         risk_score=RiskScoreBreakdown(total_score=0.0, verdict_band="low"),
+        coverage=unparseable_coverage("stub report — nothing was analysed"),
         narrative_report="",
         limitations=[],
     )

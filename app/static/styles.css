@@ -42,6 +42,11 @@
   --band-high: #ef4444;
   --band-malicious: #8b5cf6;
   --band-unknown: #94a3b8;
+  /* Analysis coverage. Deliberately outside the band palette: coverage is a
+     measurement of how much was read, not a severity, and must not be mistaken
+     for one of the verdict colours. */
+  --coverage: #3b82f6;
+  --coverage-dim: rgba(59, 130, 246, 0.18);
   --font-sans: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
   --radius-sm: 8px;
@@ -603,8 +608,20 @@ body {
 
 .results-overview-grid {
   display: grid;
-  grid-template-columns: 340px 1fr;
+  /* Risk gauge, coverage gauge, then the metadata card takes what is left. */
+  grid-template-columns: 340px 340px 1fr;
   gap: 1.25rem;
+}
+
+/* Below this the three-across layout squeezes the metadata card's two-column
+   specs grid into unreadable slivers, so the gauges drop to a shared row. */
+@media (max-width: 1380px) {
+  .results-overview-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+  .specs-card {
+    grid-column: 1 / -1;
+  }
 }
 
 .card-header {
@@ -673,6 +690,11 @@ body {
 .gauge-malicious   { stroke: var(--band-malicious); }
 .gauge-unknown     { stroke: var(--band-unknown); }
 
+/* One colour across the whole 0-100 range, unlike the risk gauge above. A
+   coverage of 20 is not "safer" than 90, it means we read less of the app —
+   shading it by value would imply a severity this number does not carry. */
+.gauge-coverage    { stroke: var(--coverage); }
+
 .gauge-text {
   position: absolute;
   inset: 0;
@@ -724,6 +746,99 @@ body {
 .risk-card {
   display: flex;
   flex-direction: column;
+}
+
+/* ── Analysis coverage card ─────────────────────────────────────────────── */
+
+.coverage-card {
+  display: flex;
+  flex-direction: column;
+}
+
+.coverage-tag {
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  padding: 0.35rem 0.8rem;
+  border-radius: var(--radius-pill);
+  background: var(--coverage-dim);
+  color: var(--coverage);
+  border: 1px solid rgba(59, 130, 246, 0.4);
+}
+
+/* The one exception to the single-colour rule: `none` means the analyser read
+   nothing, which invalidates the verdict beside it, so it must not look like a
+   normal reading. */
+.coverage-tag.coverage-none {
+  background: rgba(239, 68, 68, 0.18);
+  color: var(--band-high);
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+.coverage-warning {
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: var(--band-high);
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: var(--radius-sm, 8px);
+  padding: 0.55rem 0.7rem;
+  margin-bottom: 0.75rem;
+}
+
+.coverage-stages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.coverage-stage {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  font-size: 0.78rem;
+  padding: 0.22rem 0;
+}
+
+.coverage-stage-label {
+  color: var(--text-muted);
+}
+
+.coverage-stage-mark {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 0.8rem;
+}
+
+.coverage-yes { color: var(--coverage); }
+.coverage-no  { color: var(--band-high); }
+/* Not run / not applicable. Muted on purpose: it is neither a pass nor a
+   failure, and colouring it either way would assert a result. */
+.coverage-na  { color: var(--band-unknown); }
+
+.coverage-gaps {
+  margin-top: auto;
+  padding-top: 0.8rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.coverage-gap {
+  font-size: 0.74rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+  padding-left: 0.85rem;
+  position: relative;
+}
+
+.coverage-gap::before {
+  content: "\2022";
+  position: absolute;
+  left: 0;
+  color: var(--coverage);
 }
 
 .feedback-row {
@@ -1730,6 +1845,352 @@ body {
   height: 720px;
 }
 
+/* --- Threat Landscape filter bar ---------------------------------------- */
+
+.landscape-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-top: 1rem;
+  padding: 0.85rem 0.9rem;
+  background: var(--bg-card-alt);
+  border: 1px solid var(--border-card-soft);
+  border-radius: var(--radius-md);
+}
+
+.lf-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.lf-loading {
+  font-size: 0.78rem;
+  color: var(--text-faint);
+}
+
+/* Anchors the absolutely-positioned panel to its own trigger, so five
+   dropdowns in one row each open under themselves. */
+.lf-dropdown {
+  position: relative;
+}
+
+.lf-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-card);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 0.78rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.lf-trigger:hover:not(:disabled),
+.lf-trigger[aria-expanded="true"] {
+  background: rgba(16, 185, 129, 0.1);
+  border-color: var(--primary);
+  color: var(--primary-bright);
+}
+
+.lf-trigger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* An active filter has to be obvious from across a room during a demo — a graph
+   showing 12 of 300 samples with no visible reason why is a bug report. */
+.lf-trigger-active {
+  background: rgba(16, 185, 129, 0.16);
+  border-color: var(--primary);
+  color: var(--primary-bright);
+}
+
+.lf-trigger-badge {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  line-height: 1;
+  padding: 0.18rem 0.36rem;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-muted);
+}
+
+.lf-trigger-active .lf-trigger-badge {
+  background: var(--primary);
+  color: #05231a;
+  font-weight: 700;
+}
+
+.lf-caret {
+  font-size: 0.6rem;
+  opacity: 0.7;
+}
+
+/* Sits at the end of the dropdown row, deliberately styled apart from them: it
+   does not pick WHICH samples are shown, only how much context is drawn around
+   the ones already chosen. */
+.lf-scope-toggle {
+  margin-left: auto;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px dashed var(--border-card);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 0.74rem;
+  padding: 0.4rem 0.7rem;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.lf-scope-toggle:hover:not(:disabled) {
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+.lf-scope-toggle:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.lf-scope-toggle.lf-scope-on {
+  border-style: solid;
+  border-color: rgba(34, 211, 238, 0.45);
+  background: rgba(34, 211, 238, 0.1);
+  color: var(--accent-cyan);
+}
+
+.lf-panel {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 0.35rem);
+  left: 0;
+  min-width: 270px;
+  max-width: 380px;
+  padding: 0.5rem;
+  background: #0d1220;
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.lf-panel.hidden {
+  display: none;
+}
+
+.lf-panel-search,
+.lf-search {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-card);
+  border-radius: var(--radius-sm);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 0.78rem;
+  padding: 0.4rem 0.6rem;
+}
+
+.lf-panel-search:focus,
+.lf-search:focus {
+  outline: none;
+  border-color: var(--primary);
+}
+
+.lf-search::placeholder,
+.lf-panel-search::placeholder {
+  color: var(--text-faint);
+}
+
+.lf-search-wrap {
+  max-width: 420px;
+}
+
+/* Capped so a 60-technique or 300-C2 list scrolls inside the panel instead of
+   running off the bottom of the viewport. */
+.lf-option-list {
+  max-height: 280px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.lf-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.35rem 0.4rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.lf-option:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.lf-option.hidden {
+  display: none;
+}
+
+.lf-option input[type="checkbox"] {
+  margin-top: 0.18rem;
+  accent-color: var(--primary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.lf-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+  flex: 1;
+}
+
+.lf-option-label {
+  color: var(--text-main);
+  word-break: break-word;
+}
+
+.lf-option-detail {
+  font-family: var(--font-mono);
+  font-size: 0.66rem;
+  color: var(--text-faint);
+  word-break: break-all;
+}
+
+.lf-option-note {
+  font-size: 0.65rem;
+  color: var(--warning);
+}
+
+.lf-option-count {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.lf-panel-clear {
+  background: none;
+  border: none;
+  border-top: 1px solid var(--border-card-soft);
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 0.72rem;
+  padding: 0.4rem 0.2rem 0.15rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lf-panel-clear:hover {
+  color: var(--primary-bright);
+}
+
+/* Risk-level options carry the same colours the verdict badge uses, so the
+   filter and the report cannot disagree about what `high` looks like. */
+.lf-band-low { color: var(--band-low); }
+.lf-band-medium { color: var(--band-medium); }
+.lf-band-suspicious { color: var(--band-suspicious); }
+.lf-band-high { color: var(--band-high); }
+.lf-band-malicious { color: var(--band-malicious); }
+
+.lf-active {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.lf-active.hidden {
+  display: none;
+}
+
+.lf-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  border-radius: var(--radius-pill);
+  color: var(--text-main);
+  font-family: inherit;
+  font-size: 0.72rem;
+  padding: 0.22rem 0.6rem;
+  cursor: pointer;
+  max-width: 100%;
+}
+
+.lf-chip:hover {
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
+.lf-chip-kind {
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 0.6rem;
+  flex-shrink: 0;
+}
+
+.lf-chip-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 18ch;
+}
+
+.lf-chip-x {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.lf-clear-all {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-family: inherit;
+  font-size: 0.72rem;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 0.2rem;
+}
+
+.lf-clear-all:hover {
+  color: var(--danger-bright);
+}
+
+.lf-summary {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+.graph-node-details .node-detail-pkg {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--accent-cyan);
+  word-break: break-all;
+}
+
+.graph-node-details .node-detail-risk {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
 .graph-placeholder-text {
   position: absolute;
   inset: 0;
@@ -2079,6 +2540,10 @@ body {
   .tabs-header,
   .export-menu,
   .btn-control, .graph-controls,
+  /* The filter bar's controls are interactive chrome, but the chips and the
+     "showing N of M" line are the printed graph's caption — without them a
+     filtered export looks like a claim about the whole corpus. */
+  .lf-controls, .lf-search-wrap, .lf-clear-all, .lf-chip-x,
   .history-card {
     display: none !important;
   }

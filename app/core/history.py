@@ -103,6 +103,17 @@ def list_history(limit: int = 30) -> list[dict]:
         return _read()[:max(0, limit)]
 
 
+def peek_history_shas() -> list[str]:
+    """The sha256s currently in the history, WITHOUT clearing it.
+
+    Exists so the clear endpoint can decide whether the clear is sane before it
+    commits to one: `clear_history` empties the file as it reads, so a caller
+    that wants to refuse has already destroyed the list it was refusing over.
+    """
+    with _LOCK:
+        return [e.get("sha256") for e in _read() if e.get("sha256")]
+
+
 def clear_history() -> list[str]:
     """Empties the file and returns the sha256s that were in it, so the caller can
     drop the matching cached verdicts — clearing the list while leaving the cache

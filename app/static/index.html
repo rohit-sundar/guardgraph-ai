@@ -243,6 +243,39 @@
           </div>
         </div>
 
+        <!-- Analysis Coverage Card — how much of the APK the analyser actually
+             read. Deliberately a separate gauge from the risk score, and one
+             fixed colour across 0-100: coverage is not a severity, and shading
+             it by value would invite reading a low number as "safer" when it
+             means the opposite (we saw less). See app/core/coverage.py. -->
+        <div class="glass-card coverage-card">
+          <div class="card-header">
+            <h4>ANALYSIS COVERAGE</h4>
+            <span class="coverage-tag" id="coverageTag">—</span>
+          </div>
+          <div class="risk-meter-wrapper">
+            <div class="radial-gauge" id="coverageGauge">
+              <svg viewBox="0 0 100 100">
+                <circle class="gauge-bg" cx="50" cy="50" r="42"/>
+                <circle class="gauge-fill gauge-coverage" id="coverageGaugeFill" cx="50" cy="50" r="42" stroke-dasharray="264" stroke-dashoffset="264"/>
+              </svg>
+              <div class="gauge-text">
+                <span class="score-num" id="coverageNum">0.0</span>
+                <span class="score-max">/ 100</span>
+              </div>
+            </div>
+          </div>
+          <!-- Shown only when coverage.verdict_supported is false: the band is
+               then an artefact of the analysis failing, not a finding about the
+               app, and the risk gauge beside this one must not be read as one. -->
+          <div class="coverage-warning hidden" id="coverageWarning">
+            Verdict not supported — the score beside this reflects a failed
+            analysis, not an assessment of the app.
+          </div>
+          <div class="coverage-stages" id="coverageStages"></div>
+          <div class="coverage-gaps hidden" id="coverageGaps"></div>
+        </div>
+
         <!-- Target Package Specs Card -->
         <div class="glass-card specs-card">
           <div class="card-header">
@@ -727,10 +760,29 @@
                   certificate this instance has ever seen — not just the current report.</p>
               </div>
               <div class="graph-controls">
-                <button class="btn btn-sm btn-control" onclick="loadThreatLandscape()">Refresh</button>
+                <button class="btn btn-sm btn-control" onclick="refreshThreatLandscape()">Refresh</button>
                 <button class="btn btn-sm btn-control" onclick="relayoutLandscape('cose')">Re-cluster</button>
               </div>
             </div>
+
+            <!-- Filter bar. The controls themselves are built in app.js from
+                 /graph/landscape/facets rather than hardcoded here: the options
+                 are whatever families / C2 hosts / certificates this instance's
+                 graph actually contains, so an option can never be offered that
+                 returns an empty graph. -->
+            <div class="landscape-filters" id="landscapeFilters">
+              <div class="lf-controls" id="landscapeFilterControls">
+                <span class="lf-loading">Loading filters&hellip;</span>
+              </div>
+              <div class="lf-search-wrap">
+                <input type="search" class="lf-search" id="landscapeSearch"
+                       placeholder="Search package, app name or SHA-256&hellip;"
+                       autocomplete="off" spellcheck="false">
+              </div>
+              <div class="lf-active" id="landscapeActiveFilters"></div>
+              <div class="lf-summary" id="landscapeFilterSummary"></div>
+            </div>
+
             <div class="graph-canvas-container" id="landscapeGraphContainer" style="margin-top:1rem;">
               <div class="graph-placeholder-text">Click Refresh to load the live graph from Neo4j</div>
             </div>

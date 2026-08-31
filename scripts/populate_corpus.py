@@ -124,7 +124,11 @@ def main() -> int:
             failed += 1
             continue
 
-        params = {"skip_report": "true"}
+        # record_history=false marks these as corpus rather than operator
+        # analyses — see the /analyze docstring. It keeps them out of the
+        # Analysis History panel AND stamps the Sample node so the panel's
+        # "Clear" cannot delete the knowledge base this script just built.
+        params = {"skip_report": "true", "record_history": "false"}
         if not args.no_dynamic:
             params["enable_dynamic"] = "true"
 
