@@ -333,13 +333,37 @@ class Brand:
     category: str
     packages: list[str]
     labels: list[str]
-    icon_phash: Optional[int]
+    # Every launcher icon this brand is known to ship, not one.
+    #
+    # A brand is not one app. Bank of India publishes `com.boi.mpay`,
+    # `com.boi.ua.android` and `com.boi.erupee.prod`, each with its own icon, and
+    # a single stored hash silently means "clones of the other two are invisible".
+    # Measured on the 2026-08-27 evaluation set, where the stored hash belonged to
+    # a sibling app: the genuine BOI Mobile icon was Hamming 26 from its own
+    # brand's reference — three times the match threshold — so the real app failed
+    # its own check while three clones carrying BOI artwork (34, 40 and 42 away)
+    # were never going to match either.
+    icon_phashes: list[int]
     cert_sha256: list[str]
     verified: bool
 
     @property
     def normalized_packages(self) -> list[str]:
         return [normalize_confusables(p) for p in self.packages]
+
+    @property
+    def icon_phash(self) -> Optional[int]:
+        """First known icon, for callers that predate the multi-icon table."""
+        return self.icon_phashes[0] if self.icon_phashes else None
+
+    def closest_icon(self, phash: int) -> Optional[tuple[int, int]]:
+        """`(distance, matched_reference_hash)` for the nearest known icon."""
+        if not self.icon_phashes:
+            return None
+        return min(
+            ((hamming_distance(phash, ref), ref) for ref in self.icon_phashes),
+            key=lambda pair: pair[0],
+        )
 
 
 def load_reference(path: str = REFERENCE_PATH) -> list[Brand]:
@@ -362,13 +386,30 @@ def load_reference(path: str = REFERENCE_PATH) -> list[Brand]:
 
     brands: list[Brand] = []
     for entry in raw.get("brands", []):
-        phash = entry.get("icon_phash")
+        # `icon_phashes` (list) is the current shape; `icon_phash` (scalar) is the
+        # original one and still loads, so an un-migrated table keeps working.
+        raw_hashes = entry.get("icon_phashes")
+        if raw_hashes is None:
+            raw_hashes = [entry.get("icon_phash")]
+        hashes: list[int] = []
+        for value in raw_hashes:
+            if isinstance(value, str):
+                try:
+                    hashes.append(int(value, 16))
+                except ValueError:
+                    logger.warning(
+                        f"[impersonation] {entry.get('brand')}: icon hash "
+                        f"{value!r} is not hex — skipped."
+                    )
+            elif isinstance(value, int):
+                hashes.append(value)
+
         brands.append(Brand(
             name=entry.get("brand", "?"),
             category=entry.get("category", "unknown"),
             packages=[p for p in entry.get("packages", []) if p],
             labels=[l for l in entry.get("labels", []) if l],
-            icon_phash=int(phash, 16) if isinstance(phash, str) else phash,
+            icon_phashes=hashes,
             cert_sha256=[c.lower() for c in entry.get("cert_sha256", []) if c],
             verified=bool(entry.get("verified", False)),
         ))
@@ -410,11 +451,14 @@ def _check_certificate(brand: Brand, package: str, cert_sha256: Optional[str]
 
 def _check_icon(brand: Brand, package: str, icon_phash: Optional[int]
                 ) -> Optional[ImpersonationFinding]:
-    if brand.icon_phash is None or icon_phash is None:
+    if not brand.icon_phashes or icon_phash is None:
         return None
     if package in brand.packages:
         return None  # the real app is allowed to use its own icon
-    distance = hamming_distance(icon_phash, brand.icon_phash)
+    nearest = brand.closest_icon(icon_phash)
+    if nearest is None:
+        return None
+    distance, matched = nearest
     if distance > ICON_MATCH_MAX_DISTANCE:
         return None
     return ImpersonationFinding(
@@ -428,7 +472,7 @@ def _check_icon(brand: Brand, package: str, icon_phash: Optional[int]
             f"the real app."
         ),
         observed=f"{icon_phash:016x} ({package})",
-        expected=f"{brand.icon_phash:016x} ({', '.join(brand.packages) or 'n/a'})",
+        expected=f"{matched:016x} ({', '.join(brand.packages) or 'n/a'})",
     )
 
 
@@ -681,7 +725,7 @@ def detect_impersonation(
             )
 
         with_cert = sum(1 for b in reference if b.cert_sha256)
-        with_icon = sum(1 for b in reference if b.icon_phash is not None)
+        with_icon = sum(1 for b in reference if b.icon_phashes)
         if with_cert < len(reference):
             result.coverage.append(
                 f"{len(reference) - with_cert} of {len(reference)} reference brands "
@@ -766,6 +810,68 @@ def detect_impersonation(
 
     result.findings.sort(key=lambda f: -f.severity)
     return result
+
+
+# Entry names that hold a launcher icon in a normally-built APK. Used only by the
+# container fallback below, where androguard's resource resolution is unavailable.
+_LAUNCHER_ICON_HINTS = ("ic_launcher", "mipmap", "app_icon", "ic_app")
+_RASTER_SUFFIXES = (".png", ".webp", ".jpg", ".jpeg")
+
+
+def extract_icon_phash_from_container(container) -> Optional[int]:
+    """
+    Recover a launcher-icon hash straight from the archive when resource
+    resolution cannot run.
+
+    Needed because the resolution path depends on a parsed manifest and a
+    readable `resources.arsc`, and an APK that poisons its entry names has
+    neither — sample 4 of the Bank of India set keeps its 432x432 launcher icon
+    at `res/values/colors.xml///.webp`, which no resource lookup will ever
+    return, so the icon check was skipped on the one sample in the set that
+    ships 22 image assets byte-identical to the genuine bank app's.
+
+    Picks the largest raster entry whose path still looks like a launcher icon,
+    because the highest-density copy is the one closest to the artwork a brand
+    reference was built from. Returns None when nothing qualifies — a coverage
+    gap, reported as one, never a match.
+    """
+    if container is None:
+        return None
+
+    candidates = []
+    for entry in container.entries():
+        lower = entry.name.lower().replace("\\", "/")
+        if not lower.endswith(_RASTER_SUFFIXES):
+            continue
+        if not any(hint in lower for hint in _LAUNCHER_ICON_HINTS):
+            continue
+        candidates.append(entry)
+
+    if not candidates:
+        # Nothing named like an icon survived the renaming. Fall back to the
+        # largest raster in res/ — on a poisoned archive that is where the
+        # adaptive-icon foreground ends up, and a wrong guess costs nothing: it
+        # either matches a protected brand's artwork or it does not.
+        candidates = [
+            e for e in container.entries()
+            if e.name.lower().endswith(_RASTER_SUFFIXES)
+            and e.name.lower().replace("\\", "/").startswith("res/")
+        ]
+    if not candidates:
+        return None
+
+    for entry in sorted(candidates, key=lambda e: -e.file_size)[:5]:
+        data = container.read_entry(entry, max_bytes=8 * 1024 * 1024)
+        if not data:
+            continue
+        phash = perceptual_hash(data)
+        if phash is not None:
+            logger.debug(
+                f"[impersonation] launcher icon recovered from container entry "
+                f"{entry.name!r} ({entry.file_size} bytes)."
+            )
+            return phash
+    return None
 
 
 def extract_icon_phash(apk_obj) -> Optional[int]:

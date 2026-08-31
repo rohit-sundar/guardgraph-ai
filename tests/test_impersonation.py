@@ -53,6 +53,12 @@ def brand(**overrides) -> Brand:
         verified=True,
     )
     base.update(overrides)
+    # The reference table moved from one icon hash per brand to a set of them (a
+    # brand ships more than one app, each with its own icon). This helper still
+    # speaks the singular form so every call site below stays as it was; the
+    # translation lives here rather than in 30-odd tests.
+    phash = base.pop("icon_phash", None)
+    base.setdefault("icon_phashes", [] if phash is None else [phash])
     return Brand(**base)
 
 

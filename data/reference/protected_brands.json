@@ -440,7 +440,8 @@
       "category": "bank",
       "packages": [
         "com.boi.ua.android",
-        "com.boi.erupee.prod"
+        "com.boi.erupee.prod",
+        "com.boi.mpay"
       ],
       "labels": [
         "BOI Mobile",
@@ -448,12 +449,16 @@
         "BOI Omni Neo",
         "Bank of India Digital Rupee"
       ],
-      "icon_phash": "999c66f1c91322cf",
       "cert_sha256": [
         "018672474e1b89cfcef70ffd3f96ef40c2502ec7564213a072b62d7aabb962f9",
-        "cccc85792ea739ae3ce0a47014edaae12b9a1b59e45aaec3c2e75ab775d8db94"
+        "cccc85792ea739ae3ce0a47014edaae12b9a1b59e45aaec3c2e75ab775d8db94",
+        "f51066a3d28174b0743ce3e0facc42c92afb0fcb83763a44da20734d96273c30"
       ],
-      "verified": true
+      "verified": true,
+      "icon_phashes": [
+        "999c66f1c91322cf",
+        "9e399ee3991ae105"
+      ]
     },
     {
       "brand": "Central Bank of India",
