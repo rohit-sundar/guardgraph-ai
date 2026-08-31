@@ -535,6 +535,8 @@ class AnalysisPipeline:
                 + len(ingestion.receivers)
             ),
             manifest_parse_failed=ingestion.manifest_parse_failed,
+            manifest_recovery_source=ingestion.manifest_recovery_source,
+            container_anomalies=ingestion.container_anomalies,
         )
 
         # Legacy family (35) vector — unchanged: first-subgraph invariants.
@@ -763,12 +765,14 @@ class AnalysisPipeline:
         cert_anoms = 0
         secondary_dex = 0
         dropper_sigs = 0
+        container_anomalies: List[str] = []
         if ingestion is not None:
             matrix_flags = list(ingestion.permission_matrix_flags or [])
             extracted_c2 = len(ingestion.c2_indicators or [])
             cert_anoms = len(ingestion.cert_anomalies or [])
             secondary_dex = int(ingestion.secondary_dex_count or 0)
             dropper_sigs = len(ingestion.dropper_signals or [])
+            container_anomalies = list(ingestion.container_anomalies or [])
 
         risk_score = compute_risk_score(
             predicted_ttps=predicted_ttps,
@@ -788,6 +792,7 @@ class AnalysisPipeline:
             cert_anomaly_count=cert_anoms,
             secondary_dex_count=secondary_dex,
             dropper_signal_count=dropper_sigs,
+            container_anomalies=container_anomalies,
             classifier_evidence_present=classifier_evidence_present,
             ttp_thresholds=ttp_thresholds,
             impersonation_findings=(impersonation or {}).get("findings"),

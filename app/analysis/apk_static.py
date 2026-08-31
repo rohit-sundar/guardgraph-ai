@@ -16,15 +16,25 @@ All extractors are pure / best-effort: malformed APKs never crash the pipeline.
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import ipaddress
+import math
 import re
 import zipfile
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Optional
 from xml.etree import ElementTree as ET
 
 from loguru import logger
+
+from app.analysis.apk_container import (
+    MAX_ENTRY_BYTES,
+    ApkContainer,
+    open_and_scan,
+    scan_container,
+)
 
 try:
     from asn1crypto import x509 as asn1_x509
@@ -43,6 +53,50 @@ ELF_MAGIC = b"\x7fELF"
 # Cap how much of each asset we scan for strings / magic (DoS guard).
 MAX_ASSET_SCAN_BYTES = 2 * 1024 * 1024  # 2 MiB per entry
 MAX_YARA_PAYLOADS = 32  # max extra uncompressed streams for YARA
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+JPEG_MAGIC = b"\xff\xd8\xff"
+GIF_MAGIC = b"GIF8"
+RIFF_MAGIC = b"RIFF"
+
+# Shannon entropy, bits per byte, above which a blob carries no recoverable
+# structure. Compressed media sits here too (a JPEG measures ~7.99), which is why
+# entropy on its own is never a signal in this module — it is only ever read
+# alongside a *validity* check, so "high entropy" becomes evidence exactly when
+# the bytes also fail to be the format their own header claims.
+OPAQUE_ENTROPY_BITS = 7.90
+
+# A primary classes.dex at or under this size is not an application. Sample 1 of
+# the Bank of India set ships a 1,408-byte classes.dex over a 1.5 MB packed asset
+# DEX; samples 2 and 3 ship 18-20 KB loaders over 2-3 MB of encrypted assets.
+# 64 KiB clears all three while staying far below any real app.
+STUB_DEX_MAX_BYTES = 64 * 1024
+
+# Share of the archive's uncompressed bytes that must sit in opaque assets before
+# the staged-loader shape is called. Read together with STUB_DEX_MAX_BYTES, never
+# alone: an app can legitimately be mostly media, but not while its only code is
+# a stub.
+#
+# Measured at these thresholds (scripts, corpus of 533 clean / 499 malware):
+#
+#     staged_payload_shape     1 / 533 clean      8 / 499 malware
+#     spoofed_media_header     0 / 533 clean     20 / 499 malware
+#     spoofed_dex/zip/elf      0 / 533 clean      0 / 499 malware   (eval set only)
+#
+# The one clean hit is `org.fcitx.fcitx5.android.plugin.chewing` — an input-method
+# plugin that is genuinely a stub DEX wrapping a large opaque dictionary blob, and
+# a fair reading of the shape rather than a bug. It costs that app a fraction of a
+# point: these codes land in `dropper_signals`, which the scorer treats as
+# circumstantial and caps jointly at IOC_CIRCUMSTANTIAL_CAP. They are deliberately
+# NOT routed to the container-tamper floor, which requires the 0/533 evidence that
+# only the archive-integrity codes have.
+STAGED_PAYLOAD_MIN_RATIO = 0.50
+
+# Bytes sampled per blob when measuring entropy, and the ceiling on any single
+# entry handed to the container reader.
+ENTROPY_SAMPLE_BYTES = 256 * 1024
+MAX_ENTRY_READ_BYTES = MAX_ENTRY_BYTES
+
 
 
 # ── C2 / IoC regex patterns ──────────────────────────────────────────────
@@ -694,9 +748,124 @@ def _looks_like_elf(data: bytes) -> bool:
     return len(data) >= 4 and data[:4] == ELF_MAGIC
 
 
-def inspect_apk_payloads(filepath: str) -> dict[str, Any]:
+def shannon_entropy(data: bytes) -> float:
     """
-    Walk the APK ZIP and flag secondary DEX files + suspicious assets.
+    Bits of entropy per byte, 0.0 for empty input.
+
+    Sampled rather than exhaustive on large blobs: entropy is a distribution
+    statistic, and 256 KiB is far more than enough to separate "compressed or
+    encrypted" from "structured". Full-file counting on a 40 MB APK's assets
+    costs seconds per sample for a number that does not change.
+    """
+    if not data:
+        return 0.0
+    sample = data if len(data) <= ENTROPY_SAMPLE_BYTES else data[:ENTROPY_SAMPLE_BYTES]
+    counts = Counter(sample)
+    total = len(sample)
+    return -sum(
+        (c / total) * math.log2(c / total) for c in counts.values()
+    )
+
+
+def _valid_dex(data: bytes) -> bool:
+    """
+    A DEX whose own SHA-1 signature covers its own body.
+
+    The header stores SHA-1 over everything from byte 32 on, so this verifies
+    the file against itself with no external reference — which is precisely what
+    a blob wearing DEX magic to look like a payload cannot do.
+    """
+    if len(data) < 112 or data[:4] != DEX_MAGIC:
+        return False
+    return hashlib.sha1(data[32:]).digest() == data[12:32]
+
+
+def _valid_zip(data: bytes) -> bool:
+    """End-of-central-directory record present — a ZIP without one is not one."""
+    if len(data) < 22 or data[:4] != ZIP_MAGIC:
+        return False
+    return b"PK\x05\x06" in data[-66000:]
+
+
+def _valid_elf(data: bytes) -> bool:
+    """e_ident sane and e_type one of the four defined object types."""
+    if len(data) < 20 or data[:4] != ELF_MAGIC:
+        return False
+    if data[4] not in (1, 2) or data[5] not in (1, 2):  # class, endianness
+        return False
+    e_type = int.from_bytes(data[16:18], "little" if data[5] == 1 else "big")
+    return e_type in (1, 2, 3, 4)
+
+
+def _valid_media(data: bytes) -> Optional[bool]:
+    """
+    Structural validity of a media container, or None when the bytes are not
+    claiming to be one.
+
+    Deliberately header/trailer checks rather than a decode: this runs over every
+    asset in every APK, and the question is only whether the file is the format
+    its magic advertises — not whether it renders.
+    """
+    if data.startswith(PNG_MAGIC):
+        return data[12:16] == b"IHDR" and b"IEND" in data[-32:]
+    if data.startswith(JPEG_MAGIC):
+        return b"\xff\xda" in data[:65536] and data.rstrip(b"\x00")[-2:] == b"\xff\xd9"
+    if data.startswith(GIF_MAGIC):
+        return data[-1:] == b";"
+    if data.startswith(RIFF_MAGIC):
+        return len(data) > 12 and data[8:12] in (b"WEBP", b"WAVE", b"AVI ")
+    return None
+
+
+def classify_asset_payload(name: str, data: bytes) -> tuple[Optional[str], float]:
+    """
+    Decide what an asset actually is, versus what its header claims.
+
+    Returns `(signal, entropy)` where `signal` is a `dropper_signals` code or
+    None. The spoofed-header codes are the ones that matter: samples 2 and 3 of
+    the Bank of India set carry their encrypted payloads under `.dex`, `.zip`,
+    `.so`, `.jpg` and `.png` headers, none of which survive a validity check —
+    `assets/raw/ddb0e2.dex` has DEX magic and a SHA-1 that does not cover its own
+    body, `raw/5901e0ca.zip` has no central directory, and
+    `tmp/ac8461c0ebcd.so` carries an ELF magic with a nonsense `e_type`.
+
+    An asset that is genuinely what it claims produces no signal here; the
+    existing hidden-payload codes in `inspect_apk_payloads` cover those.
+    """
+    entropy = shannon_entropy(data)
+
+    if data[:4] == DEX_MAGIC and not _valid_dex(data):
+        return f"spoofed_dex_header:{name}", entropy
+    if data[:4] == ZIP_MAGIC and not _valid_zip(data):
+        return f"spoofed_zip_header:{name}", entropy
+    if data[:4] == ELF_MAGIC and not _valid_elf(data):
+        return f"spoofed_elf_header:{name}", entropy
+
+    media_ok = _valid_media(data)
+    if media_ok is False and entropy >= OPAQUE_ENTROPY_BITS:
+        # A file with image magic, no image structure, and no recoverable
+        # structure of any other kind. Encrypted bytes in a costume.
+        return f"spoofed_media_header:{name}", entropy
+
+    return None, entropy
+
+
+def inspect_apk_payloads(
+    filepath: str, container: "ApkContainer | None" = None
+) -> dict[str, Any]:
+    """
+    Walk the APK and flag secondary DEX files, disguised payloads and the
+    staged-loader shape.
+
+    Reads through `apk_container.ApkContainer` rather than `zipfile`. That is not
+    a refactor for its own sake — it is the whole reason this function returns
+    anything at all on three of the five Bank of India samples. Those APKs set
+    the ZIP encryption flag on 85 of 89, 85 of 89 and 372 of 372 entries
+    respectively; `zf.read()` raises `RuntimeError: File ... is encrypted` on
+    every one, the old `except Exception: continue` swallowed it, and all three
+    came back with an empty payload inventory, no inner-stream YARA targets and
+    no asset strings for C2 extraction. Android ignores that flag and loads the
+    app; so does the container reader.
 
     Returns:
       {
@@ -705,6 +874,8 @@ def inspect_apk_payloads(filepath: str) -> dict[str, Any]:
         "dropper_signals": list[str],        # high-level dropper flags
         "yara_targets": list[tuple[str, bytes]],  # (label, uncompressed bytes)
         "asset_strings": list[str],          # strings harvested for C2 regex
+        "container": dict,                   # archive-integrity scan (see below)
+        "opaque_asset_ratio": float,         # share of bytes in opaque assets
       }
     """
     secondary_dex = 0
@@ -713,106 +884,144 @@ def inspect_apk_payloads(filepath: str) -> dict[str, Any]:
     yara_targets: list[tuple[str, bytes]] = []
     asset_strings: list[str] = []
 
-    try:
-        with zipfile.ZipFile(filepath, "r") as zf:
-            names = zf.namelist()
+    if container is None:
+        container, scan = open_and_scan(filepath)
+    else:
+        scan = scan_container(container)
 
-            for name in names:
-                lower = name.lower().replace("\\", "/")
-                base = lower.rsplit("/", 1)[-1]
-
-                # Multi-DEX at archive root (classes2.dex, classes3.dex, ...)
-                if re.fullmatch(r"classes\d+\.dex", base) and base != "classes.dex":
-                    secondary_dex += 1
-                    payload_assets.append(f"{name}|secondary_dex")
-                    try:
-                        data = zf.read(name)
-                        yara_targets.append((f"dex:{name}", data))
-                    except Exception:
-                        pass
-                    continue
-
-                # Primary classes.dex always a YARA target (uncompressed)
-                if base == "classes.dex":
-                    try:
-                        data = zf.read(name)
-                        yara_targets.append((f"dex:{name}", data))
-                    except Exception:
-                        pass
-                    continue
-
-                # Focus on assets/ and res/raw/
-                in_assets = lower.startswith("assets/") or "/assets/" in lower
-                in_raw = "res/raw/" in lower or lower.startswith("res/raw/")
-                if not (in_assets or in_raw):
-                    # Still check accessibility configs under res/xml/
-                    continue
-
-                # Size guard
-                try:
-                    info = zf.getinfo(name)
-                    if info.file_size > MAX_ASSET_SCAN_BYTES:
-                        # Still note oversized encrypted-looking blobs
-                        if any(lower.endswith(ext) for ext in (".dex", ".jar", ".apk", ".bin", ".dat", ".enc", ".so")):
-                            payload_assets.append(f"{name}|oversized_blob:{info.file_size}")
-                            dropper_signals.append(f"oversized_asset:{name}")
-                        continue
-                    data = zf.read(name)
-                except Exception:
-                    continue
-
-                if not data:
-                    continue
-
-                # Magic-byte detection (hidden DEX / ZIP / ELF regardless of extension)
-                if _looks_like_dex(data):
-                    secondary_dex += 1
-                    payload_assets.append(f"{name}|hidden_dex_magic")
-                    dropper_signals.append(f"hidden_dex_in_assets:{name}")
-                    yara_targets.append((f"asset_dex:{name}", data))
-                elif _looks_like_zip(data) and not lower.endswith((".apk", ".jar", ".zip")):
-                    payload_assets.append(f"{name}|hidden_zip_magic")
-                    dropper_signals.append(f"disguised_zip_payload:{name}")
-                    yara_targets.append((f"asset_zip:{name}", data[:MAX_ASSET_SCAN_BYTES]))
-                elif _looks_like_elf(data) and not lower.endswith(".so"):
-                    payload_assets.append(f"{name}|disguised_elf")
-                    dropper_signals.append(f"disguised_native_lib:{name}")
-                elif any(lower.endswith(ext) for ext in (".dex", ".jar", ".apk")):
-                    payload_assets.append(f"{name}|packed_code_asset")
-                    dropper_signals.append(f"code_asset:{name}")
-                    yara_targets.append((f"asset:{name}", data))
-
-                # Banking overlay HTML templates
-                if lower.endswith((".html", ".htm")) and _BANKING_OVERLAY_HINTS.search(base + name):
-                    payload_assets.append(f"{name}|banking_overlay_html")
-                    dropper_signals.append(f"overlay_template:{name}")
-                    # Pull printable strings from HTML for C2 / form action URLs
-                    try:
-                        text = data.decode("utf-8", errors="ignore")
-                        asset_strings.extend(_harvest_printable_strings(text))
-                    except Exception:
-                        pass
-
-                # Harvest strings from small text-like assets for C2 extraction
-                if lower.endswith((".json", ".js", ".txt", ".xml", ".cfg", ".conf", ".properties")):
-                    try:
-                        text = data.decode("utf-8", errors="ignore")
-                        asset_strings.extend(_harvest_printable_strings(text))
-                    except Exception:
-                        pass
-
-                # Encrypted-looking high-entropy small blobs with suspicious names
-                if any(lower.endswith(ext) for ext in (".dat", ".bin", ".enc", ".db")):
-                    if not _looks_like_dex(data) and not _looks_like_zip(data):
-                        payload_assets.append(f"{name}|opaque_blob")
-
-    except zipfile.BadZipFile:
-        logger.warning(f"APK is not a valid ZIP: {filepath}")
+    if container is None:
         dropper_signals.append("invalid_apk_zip")
-    except Exception as e:
-        logger.warning(f"Payload inspection failed for {filepath}: {e}")
+        return {
+            "secondary_dex_count": 0,
+            "payload_assets": [],
+            "dropper_signals": dropper_signals,
+            "yara_targets": [],
+            "asset_strings": [],
+            "container": scan.to_dict(),
+            "opaque_asset_ratio": 0.0,
+        }
 
-    # Cap YARA targets to avoid scanning huge multi-asset packs
+    total_bytes = 0
+    opaque_bytes = 0
+    primary_dex_size = 0
+
+    for entry in container.entries():
+        name = entry.name
+        lower = name.lower().replace("\\", "/")
+        base = lower.rsplit("/", 1)[-1]
+        total_bytes += max(0, entry.file_size)
+
+        # Multi-DEX at archive root (classes2.dex, classes3.dex, ...)
+        if re.fullmatch(r"classes\d+\.dex", base) and base != "classes.dex":
+            secondary_dex += 1
+            payload_assets.append(f"{name}|secondary_dex")
+            data = container.read_entry(entry, max_bytes=MAX_ENTRY_READ_BYTES)
+            if data:
+                yara_targets.append((f"dex:{name}", data))
+            continue
+
+        if base == "classes.dex":
+            primary_dex_size = max(primary_dex_size, entry.file_size)
+            data = container.read_entry(entry, max_bytes=MAX_ENTRY_READ_BYTES)
+            if data:
+                yara_targets.append((f"dex:{name}", data))
+            continue
+
+        in_assets = lower.startswith("assets/") or "/assets/" in lower
+        in_raw = "res/raw/" in lower or lower.startswith("res/raw/")
+        if not (in_assets or in_raw):
+            continue
+
+        if entry.file_size > MAX_ASSET_SCAN_BYTES:
+            # Too large to hash and classify per-entry, but its size and name are
+            # still evidence. Counted toward the opaque total on the strength of
+            # its extension, which is what made it worth flagging before.
+            if any(lower.endswith(ext) for ext in (".dex", ".jar", ".apk", ".bin", ".dat", ".enc", ".so")):
+                payload_assets.append(f"{name}|oversized_blob:{entry.file_size}")
+                dropper_signals.append(f"oversized_asset:{name}")
+                opaque_bytes += entry.file_size
+            else:
+                head = container.read_entry(entry, max_bytes=ENTROPY_SAMPLE_BYTES)
+                if head and shannon_entropy(head) >= OPAQUE_ENTROPY_BITS:
+                    opaque_bytes += entry.file_size
+            continue
+
+        data = container.read_entry(entry, max_bytes=MAX_ASSET_SCAN_BYTES)
+        if not data:
+            continue
+
+        spoof, entropy = classify_asset_payload(name, data)
+        if entropy >= OPAQUE_ENTROPY_BITS:
+            opaque_bytes += len(data)
+
+        if spoof:
+            payload_assets.append(f"{name}|{spoof.split(':', 1)[0]}")
+            dropper_signals.append(spoof)
+            if spoof.startswith("spoofed_dex_header"):
+                # Still a hidden code payload, and still counted as one. A blob
+                # whose DEX header does not cover its own body is an encrypted
+                # stage-two rather than a loadable DEX — which is if anything the
+                # more deliberate of the two, so demoting it out of
+                # `secondary_dex_count` would have quietly *lowered* the score of
+                # the samples that bothered to encrypt. It goes to YARA too: the
+                # rules match on content, not on whether a header validates.
+                secondary_dex += 1
+                yara_targets.append((f"asset_dex:{name}", data))
+        elif _looks_like_dex(data):
+            secondary_dex += 1
+            payload_assets.append(f"{name}|hidden_dex_magic")
+            dropper_signals.append(f"hidden_dex_in_assets:{name}")
+            yara_targets.append((f"asset_dex:{name}", data))
+        elif _looks_like_zip(data) and not lower.endswith((".apk", ".jar", ".zip")):
+            payload_assets.append(f"{name}|hidden_zip_magic")
+            dropper_signals.append(f"disguised_zip_payload:{name}")
+            yara_targets.append((f"asset_zip:{name}", data[:MAX_ASSET_SCAN_BYTES]))
+        elif _looks_like_elf(data) and not lower.endswith(".so"):
+            payload_assets.append(f"{name}|disguised_elf")
+            dropper_signals.append(f"disguised_native_lib:{name}")
+        elif any(lower.endswith(ext) for ext in (".dex", ".jar", ".apk")):
+            payload_assets.append(f"{name}|packed_code_asset")
+            dropper_signals.append(f"code_asset:{name}")
+            yara_targets.append((f"asset:{name}", data))
+
+        # Banking overlay HTML templates
+        if lower.endswith((".html", ".htm")) and _BANKING_OVERLAY_HINTS.search(base + name):
+            payload_assets.append(f"{name}|banking_overlay_html")
+            dropper_signals.append(f"overlay_template:{name}")
+            try:
+                asset_strings.extend(
+                    _harvest_printable_strings(data.decode("utf-8", errors="ignore"))
+                )
+            except Exception:
+                pass
+
+        # Harvest strings from small text-like assets for C2 extraction
+        if lower.endswith((".json", ".js", ".txt", ".xml", ".cfg", ".conf", ".properties")):
+            try:
+                asset_strings.extend(
+                    _harvest_printable_strings(data.decode("utf-8", errors="ignore"))
+                )
+            except Exception:
+                pass
+
+        # Encrypted-looking blobs with suspicious names
+        if any(lower.endswith(ext) for ext in (".dat", ".bin", ".enc", ".db")):
+            if not _looks_like_dex(data) and not _looks_like_zip(data):
+                payload_assets.append(f"{name}|opaque_blob")
+
+    opaque_ratio = (opaque_bytes / total_bytes) if total_bytes else 0.0
+
+    # The staged-loader shape: no application to speak of, and most of the
+    # archive is bytes nothing can read yet. Requires both halves — an app may
+    # legitimately be mostly media, but not while its only code is a stub.
+    if (
+        0 < primary_dex_size <= STUB_DEX_MAX_BYTES
+        and opaque_ratio >= STAGED_PAYLOAD_MIN_RATIO
+    ):
+        dropper_signals.append(
+            f"staged_payload_shape:dex_{primary_dex_size}B_opaque_{opaque_ratio:.0%}"
+        )
+
     if len(yara_targets) > MAX_YARA_PAYLOADS:
         yara_targets = yara_targets[:MAX_YARA_PAYLOADS]
 
@@ -822,6 +1031,8 @@ def inspect_apk_payloads(filepath: str) -> dict[str, Any]:
         "dropper_signals": sorted(set(dropper_signals))[:50],
         "yara_targets": yara_targets,
         "asset_strings": asset_strings[:500],
+        "container": scan.to_dict(),
+        "opaque_asset_ratio": round(opaque_ratio, 4),
     }
 
 

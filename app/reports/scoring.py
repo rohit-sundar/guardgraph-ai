@@ -263,6 +263,22 @@ IOC_CERT_ANOMALY_WEIGHT = 0.10
 IOC_DROPPER_WEIGHT = 0.10
 IOC_FORENSIC_C2_WEIGHT = 0.10
 IOC_CIRCUMSTANTIAL_CAP = 0.35       # joint ceiling on the four weak terms above
+# Archive-integrity anomalies (apk_container.scan_container): a ZIP encryption
+# flag on entries the platform loads anyway, a compression method Android cannot
+# inflate, duplicate or path-poisoned entry names. Attributable rather than
+# circumstantial, because each one names a structural fact about *this* file that
+# no build tool produces — and because it measures that way:
+#
+#     clean      0 / 533 samples   (data/benign_apks + data/benign_holdout)
+#     malware  122 / 499 samples   (data/ttp_apks)
+#
+# 100% precision at 24.4% recall on 1,032 samples — see
+# scripts/measure_container_anomalies.py, which is the check to re-run before
+# either of these numbers is changed. The cap keeps a sample that trips all five
+# codes from carrying the component on packaging alone; the floor below is where
+# tampering actually asserts itself.
+IOC_CONTAINER_ANOMALY_WEIGHT = 0.25
+IOC_CONTAINER_ANOMALY_CAP = 0.50
 
 # ── Verdict band boundaries ───────────────────────────────────────────────────
 # Each boundary answers a different question, so each is set by its own criterion
@@ -453,6 +469,45 @@ DYNAMIC_CONFIRMATION_SCORE_FLOOR = {
     # documents as a known limitation, closed by direct observation.
     "dcl_payload_executed": BAND_SUSPICIOUS_CEILING + _JUST_ABOVE,   # -> `high`
 }
+
+
+# ── Container tampering (F2) ─────────────────────────────────────────────────
+# An archive deliberately malformed to defeat inspection, applied as a floor for
+# the same reason brand impersonation is: the evidence is categorical, not
+# incremental. A file whose ZIP headers lie about encryption, compression method
+# or entry names has been built to stop an analyst reading it, and that is worth
+# an analyst's time no matter how quiet its weighted components are — which is
+# exactly the case, since the tampering's whole purpose is to make those
+# components read empty.
+#
+# `suspicious` and no higher, deliberately. The floor asserts "look at this by
+# hand", not a verdict: packaging tampering says something about intent to evade,
+# but nothing about capability, and the tool's stronger bands are reserved for
+# evidence about what the app does. A tampered archive that is also obviously
+# malicious keeps the higher arithmetic verdict, as with every other floor.
+CONTAINER_TAMPER_SCORE_FLOOR = {
+    "archive_built_to_defeat_inspection": BAND_MEDIUM_CEILING + _JUST_ABOVE,
+}
+
+
+def container_tamper_floor(container_anomalies: list[str] | None) -> float:
+    """
+    Floor for "the container itself is a lie".
+
+    Any anomaly qualifies. There is no severity ordering among them because the
+    corpus does not support one — all five codes measured 0/533 on clean apps,
+    so no code is more or less discriminating than another here, and inventing a
+    ranking would be fitting to malware samples with no clean side to check it
+    against.
+
+    `zip_central_directory_unreadable` is included even though it can in
+    principle come from a truncated download, because a truncated APK does not
+    install either: on a file the pipeline was handed as an app, an unreadable
+    central directory is damage aimed at the reader.
+    """
+    if not container_anomalies:
+        return 0.0
+    return CONTAINER_TAMPER_SCORE_FLOOR["archive_built_to_defeat_inspection"]
 
 
 def dynamic_confirmation_floor(dynamic_verification: dict | None) -> float:
@@ -895,6 +950,7 @@ def ioc_component(
     cert_anomaly_count: int = 0,
     secondary_dex_count: int = 0,
     dropper_signal_count: int = 0,
+    container_anomaly_count: int = 0,
 ) -> float:
     """
     IOC score — signature detection, YARA results, extracted C2 indicators,
@@ -935,6 +991,10 @@ def ioc_component(
     )
     attributable += min(
         IOC_SECONDARY_DEX_CAP, secondary_dex_count * IOC_SECONDARY_DEX_WEIGHT
+    )
+    attributable += min(
+        IOC_CONTAINER_ANOMALY_CAP,
+        container_anomaly_count * IOC_CONTAINER_ANOMALY_WEIGHT,
     )
 
     circumstantial = 0.0
@@ -985,6 +1045,10 @@ def compute_risk_score(
     cert_anomaly_count: int = 0,
     secondary_dex_count: int = 0,
     dropper_signal_count: int = 0,
+    # Archive-integrity anomalies from Phase 1 (apk_container.scan_container).
+    # Feeds the IOC component's attributable half and raises
+    # CONTAINER_TAMPER_SCORE_FLOOR.
+    container_anomalies: list[str] | None = None,
     # See classifier_confidence_component.
     classifier_evidence_present: bool = True,
     ttp_thresholds: dict[str, float] | None = None,
@@ -1024,6 +1088,7 @@ def compute_risk_score(
         cert_anomaly_count=cert_anomaly_count,
         secondary_dex_count=secondary_dex_count,
         dropper_signal_count=dropper_signal_count,
+        container_anomaly_count=len(container_anomalies or []),
     )
 
     # Revised weights (§9.3): 0.25 + 0.20 + 0.15 + 0.15 + 0.15 + 0.05 + 0.05 = 1.00
@@ -1046,8 +1111,11 @@ def compute_risk_score(
 
     dynamic_floor = dynamic_confirmation_floor(dynamic_verification)
     opaque_floor = opaque_reputation_floor(is_known_malware, obfuscation)
+    tamper_floor = container_tamper_floor(container_anomalies)
 
-    total = max(total, impersonation_floor, dynamic_floor, opaque_floor)
+    total = max(
+        total, impersonation_floor, dynamic_floor, opaque_floor, tamper_floor
+    )
 
     band = _band_for(total)
 
@@ -1077,5 +1145,6 @@ def compute_risk_score(
         impersonation_floor_applied=impersonation_floor > weighted_total,
         dynamic_confirmation_floor_applied=dynamic_floor > weighted_total,
         opaque_reputation_floor_applied=opaque_floor > weighted_total,
+        container_tamper_floor_applied=tamper_floor > weighted_total,
         weighted_score=round(weighted_total, 2),
     )

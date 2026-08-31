@@ -104,6 +104,8 @@ def build_obfuscation_signal(
     dex_method_count: int | None = None,
     declared_component_count: int | None = None,
     manifest_parse_failed: bool = False,
+    manifest_recovery_source: str | None = None,
+    container_anomalies: list[str] | None = None,
 ) -> ObfuscationSignal:
     entropy_score = compute_string_pool_entropy(all_strings)
 
@@ -169,10 +171,39 @@ def build_obfuscation_signal(
     # obfuscation_component's docstring in scoring.py for why that measurement
     # comes first here.
     if manifest_parse_failed:
+        if manifest_recovery_source == "tree":
+            note = (
+                "AndroidManifest.xml failed the standard parse (corrupted/"
+                "anti-analysis) and was recovered by the tolerant AXML fallback — "
+                "permissions and components below are the manifest's own, the "
+                "signing certificate is still unavailable"
+            )
+        elif manifest_recovery_source == "string_pool":
+            note = (
+                "AndroidManifest.xml failed to parse (corrupted/anti-analysis); "
+                "only its string pool was recoverable — permissions and intent "
+                "actions below are real declarations, but component names could "
+                "not be attributed to activity/service/receiver, and the signing "
+                "certificate is unavailable"
+            )
+        else:
+            note = (
+                "AndroidManifest.xml failed to parse (corrupted/anti-analysis) — "
+                "permissions, components, and certificate data are unavailable; "
+                "DEX/CFG-level analysis still ran"
+            )
+        coverage_notes.insert(0, note)
+
+    # Archive tampering is reported here because it is the reason several of the
+    # other notes exist: an entry the standard reader refuses is a gap in *this*
+    # analysis, and an analyst reading a thin result deserves to know the file was
+    # built to produce one. Scored separately — see CONTAINER_TAMPER_SCORE_FLOOR.
+    if container_anomalies:
         coverage_notes.insert(
-            0, "AndroidManifest.xml failed to parse (corrupted/anti-analysis) — "
-               "permissions, components, and certificate data are unavailable; "
-               "DEX/CFG-level analysis still ran"
+            0,
+            "the ZIP container is malformed in ways no build tool produces ("
+            + "; ".join(container_anomalies[:4])
+            + ") — entries were read through the Android-tolerant container reader",
         )
 
     # N7: the code that was recovered cannot account for the app the manifest

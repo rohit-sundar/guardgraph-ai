@@ -22,7 +22,12 @@ from androguard.misc import AnalyzeAPK
 from loguru import logger
 
 from app.core.schemas import IngestionResult
-from app.analysis.impersonation import extract_icon_phash
+from app.analysis.apk_container import ApkContainer, open_and_scan
+from app.analysis.axml_recovery import RecoveredManifest, recover_manifest
+from app.analysis.impersonation import (
+    extract_icon_phash,
+    extract_icon_phash_from_container,
+)
 from app.analysis.apk_static import (
     accessibility_matrix_flags,
     declares_accessibility_service,
@@ -166,13 +171,19 @@ def _fallback_dex_analysis(filepath: str) -> tuple[list, Any] | tuple[None, None
     """
     dex_bytes_by_name: dict[str, bytes] = {}
     try:
-        with zipfile.ZipFile(filepath) as z:
-            dex_names = sorted(
-                n for n in z.namelist() if n.startswith("classes") and n.endswith(".dex")
-            )
-            dex_bytes_by_name = {name: z.read(name) for name in dex_names}
+        # ApkContainer rather than zipfile: three of the five Bank of India
+        # evaluation samples set the ZIP encryption flag on most or all entries,
+        # which makes zipfile refuse `classes.dex` itself with a RuntimeError
+        # while Android loads it without noticing. See apk_container's docstring.
+        container = ApkContainer(filepath)
+        for entry in container.entries():
+            name = entry.name
+            if name.startswith("classes") and name.endswith(".dex"):
+                data = container.read_entry(entry)
+                if data:
+                    dex_bytes_by_name[name] = data
     except Exception as e:
-        logger.warning(f"zipfile could not open the APK ({e}); trying a raw local-header scan.")
+        logger.warning(f"Container read failed ({e}); trying a raw local-header scan.")
         try:
             with open(filepath, "rb") as f:
                 raw_file_bytes = f.read()
@@ -334,7 +345,13 @@ def ingest_apk(
 
     # 1. Inspect payloads (secondary DEX and assets) — reads the raw ZIP directly,
     #    independent of apk_obj, so this still runs even without a parsed manifest.
-    payload_info = inspect_apk_payloads(filepath)
+    # Opened once and shared: the payload walk, the manifest recovery below and
+    # the archive-integrity scan all read the same entries, and on a 2,482-entry
+    # APK re-reading the central directory three times is pure cost.
+    container, container_scan = open_and_scan(filepath)
+    container_anomalies = list(container_scan.anomalies)
+
+    payload_info = inspect_apk_payloads(filepath, container=container)
     secondary_dex_count = payload_info.get("secondary_dex_count", 0)
     yara_targets = payload_info.get("yara_targets", [])
     asset_strings = payload_info.get("asset_strings", [])
@@ -359,6 +376,7 @@ def ingest_apk(
     receivers: list[str] = []
     app_label = None
     icon_phash = None
+    recovered_components: list[str] = []
 
     if apk_obj is not None:
         der_certs = extract_der_certificates(apk_obj)
@@ -402,6 +420,76 @@ def ingest_apk(
         services = list(apk_obj.get_services())
         receivers = list(apk_obj.get_receivers())
 
+    # 4c. Manifest recovery, and the honest definition of a failed parse.
+    #
+    # `manifest_parse_failed` used to mean exactly "APK() raised". That is a
+    # property of androguard's error handling, not of the sample: sample 4 of the
+    # Bank of India evaluation set sets the ZIP encryption flag on all 372 of its
+    # entries, and androguard responds by returning an APK object with an empty
+    # package name and no permissions rather than by raising. The flag therefore
+    # stayed False, an empty permission list was scored as though a VPN-installing
+    # dropper genuinely requested nothing, and the opaque-reputation floor — which
+    # exists for precisely this situation — never fired. Sample 1, whose manifest
+    # *did* raise, was floored correctly on identical evidence.
+    #
+    # So the test is now the outcome, not the exception: a manifest that yielded
+    # neither a package name nor a single permission did not parse, whoever
+    # swallowed the error.
+    #
+    # Measured before it was changed: the predicate fires on 0 of 533 clean apps
+    # and 0 of 499 corpus malware — every real app declares a package — so it
+    # costs no benign sample a point and moves only the samples the old rule was
+    # silently passing. The 19 corpus malware whose manifests genuinely raise were
+    # already being flagged by the old rule and are unaffected.
+    manifest_empty = not package_name and not permissions
+    if manifest_empty:
+        manifest_parse_failed = True
+
+    manifest_recovery_source = None
+    if manifest_parse_failed and container is not None:
+        recovered = recover_manifest(container)
+        if recovered is not None:
+            manifest_recovery_source = recovered.source
+            package_name = package_name or recovered.package
+            app_label = app_label or recovered.app_label
+            if not permissions:
+                permissions = list(recovered.permissions)
+            if not intent_actions:
+                intent_actions = list(recovered.intent_actions)
+            if recovered.source == "tree":
+                activities = activities or list(recovered.activities)
+                services = services or list(recovered.services)
+                receivers = receivers or list(recovered.receivers)
+            else:
+                # The string pool records that a class name is present, never
+                # which element referenced it. Filling activities/services/
+                # receivers from it would be inventing an attribution the file
+                # does not contain, so the names go to `recovered_components`
+                # and the classified lists stay honestly empty.
+                recovered_components = list(recovered.components)
+
+            # Permissions recovered this way are real declarations and belong in
+            # the matrix, which is what turns them back into scoreable evidence.
+            if permissions and not permission_matrix_flags:
+                permission_matrix_flags = detect_permission_matrix(
+                    permissions, intent_actions
+                )
+
+    # The launcher icon is the other casualty of a poisoned archive: resource
+    # resolution needs a parsed manifest and a readable resources.arsc, so an APK
+    # that renames its entries loses the impersonation check on the very artwork
+    # it stole. Recovered straight from the container instead — see
+    # impersonation.extract_icon_phash_from_container.
+    if icon_phash is None and container is not None:
+        recovered_phash = extract_icon_phash_from_container(container)
+        if recovered_phash is not None:
+            icon_phash = f"{recovered_phash:016x}"
+            logger.info(
+                f"Manifest recovery ({recovered.source}) filled "
+                f"package={package_name}, {len(permissions)} permissions, "
+                f"{recovered.component_count} components."
+            )
+
     # 5. How much code Androguard actually recovered. Counted here rather than in
     #    cfg.py because it is a property of the sample, not of the CFG pass, and
     #    because the scorer needs it to read a zero analysed-method count correctly
@@ -439,6 +527,10 @@ def ingest_apk(
         payload_assets=payload_assets,
         dropper_signals=dropper_signals,
         manifest_parse_failed=manifest_parse_failed,
+        manifest_recovery_source=manifest_recovery_source,
+        recovered_components=recovered_components,
+        container_anomalies=container_anomalies,
+        opaque_asset_ratio=float(payload_info.get("opaque_asset_ratio") or 0.0),
     )
 
     logger.info(
@@ -450,7 +542,9 @@ def ingest_apk(
         f"a11y={len(result.accessibility_flags)}, "
         f"dropper_signals={len(result.dropper_signals)}, "
         f"yara_targets={len(yara_targets)}, "
-        f"manifest_parse_failed={manifest_parse_failed}"
+        f"manifest_parse_failed={manifest_parse_failed}, "
+        f"manifest_recovery={manifest_recovery_source}, "
+        f"container_anomalies={container_anomalies}"
     )
 
     return result, apk_obj, dvm, analysis, yara_targets

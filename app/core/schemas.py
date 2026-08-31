@@ -42,6 +42,26 @@ class IngestionResult(BaseModel):
     # receivers, cert_thumbprint, accessibility_flags, permission_matrix_flags,
     # intent_actions) are empty in this state, not "observed absent".
     manifest_parse_failed: bool = False
+    # Which fallback filled the manifest-derived fields above, when one did:
+    # "tree" (tolerant AXML parse) or "string_pool" (pool harvest, components
+    # unattributed). None means no recovery was attempted or none succeeded.
+    # See app/analysis/axml_recovery.py.
+    manifest_recovery_source: Optional[str] = None
+    # Component class names recovered from the AXML string pool, which records
+    # that a name is present but not which element declared it. Kept apart from
+    # activities/services/receivers so the classified lists never carry a guess.
+    recovered_components: list[str] = []
+    # Ways the ZIP container itself departs from what a build tool produces —
+    # fake encryption flags, compression methods Android cannot inflate,
+    # duplicate and path-poisoned entry names. Measured 0/533 on the clean
+    # corpus against 122/499 malware (scripts/measure_container_anomalies.py),
+    # which is why these reach the scorer as attributable evidence rather than
+    # as one more circumstantial heuristic. See app/analysis/apk_container.py.
+    container_anomalies: list[str] = []
+    # Share of the archive's uncompressed bytes sitting in high-entropy assets
+    # that failed the validity check for the format their header claims. Read
+    # with dex_method_count: opaque bulk matters when there is no code to match.
+    opaque_asset_ratio: float = 0.0
     # App identity, for brand-impersonation detection (app/analysis/impersonation.py).
     # `app_label` is what the victim reads on the home screen; `icon_phash` is the
     # 64-bit perceptual hash of the launcher icon as a hex string, or None when the
@@ -405,6 +425,12 @@ class RiskScoreBreakdown(BaseModel):
     # scoring in the teens, and without this flag the report would read as though the
     # behaviour earned the verdict.
     impersonation_floor_applied: bool = False
+    # True when archive-integrity tampering raised the verdict above the weighted
+    # components (scoring.CONTAINER_TAMPER_SCORE_FLOOR). Same distinction as
+    # impersonation_floor_applied: the report must not read as though quiet
+    # components earned this score when what earned it was a ZIP built to make
+    # those components read quiet.
+    container_tamper_floor_applied: bool = False
     # Same distinction as impersonation_floor_applied, for the Phase 8 dynamic-
     # confirmation floor (see DYNAMIC_CONFIRMATION_SCORE_FLOOR) — true when a
     # confirmed C2 contact or executed DCL payload raised the verdict above what
@@ -421,9 +447,58 @@ class RiskScoreBreakdown(BaseModel):
     weighted_score: Optional[float] = None
 
 
+class AnalysisCoverage(BaseModel):
+    """
+    How much of the APK the analyser actually read. Every field is observed, not
+    estimated — see app/core/coverage.py for why this is deliberately not a
+    probabilistic confidence score, and why it does not feed the risk score.
+
+    The distinction it draws is the one the score cannot: an unparseable APK and
+    a genuinely ambiguous app both land on 50.0 / `suspicious`, and only coverage
+    says which is which.
+    """
+    # Stage outcomes. Optional ones use None for "not run on this path" — the
+    # same convention as RiskScoreBreakdown's components, never 0/False, which
+    # would assert a negative result the pipeline never established.
+    container_opened: bool
+    manifest_parsed: bool
+    code_recovered: bool
+    # Optional because the hot path cannot know it: total_nodes_parsed is not
+    # persisted in the cached record, so a cache hit reports None rather than
+    # False, which would deny a CFG the original analysis did build.
+    cfg_built: Optional[bool] = None
+    reputation_checked: Optional[bool] = None
+    identity_checked: Optional[bool] = None
+    # None = Phase 8 was not requested (the default). False = it was requested
+    # and did not complete, which is a real gap. Mirrors
+    # DynamicVerificationResult.ran, which must never read as "nothing found".
+    dynamic_ran: Optional[bool] = None
+    # Quantitative code coverage. `method_coverage` is analysed/present, and is
+    # None when either count is unmeasured rather than 0.0, which would claim a
+    # measured absence.
+    dex_method_count: Optional[int] = None
+    analyzed_method_count: Optional[int] = None
+    method_coverage: Optional[float] = None
+    method_parse_failure_rate: float = 0.0
+    # Share of applicable stages that succeeded. A ratio of observed outcomes,
+    # NOT a probability that the verdict is correct.
+    completeness: float
+    # none | partial | full | cached
+    level: str
+    gaps: list[str] = []
+    # False when the verdict band is an artefact of the analysis failing rather
+    # than a finding about the app. A caller that renders a band without checking
+    # this will present "suspicious" for a file it never opened.
+    verdict_supported: bool
+
+
 class AnalysisReport(BaseModel):
     manifest: AnalysisManifest
     risk_score: RiskScoreBreakdown
+    # Required, with no default, on purpose: there are four AnalysisReport
+    # construction sites and a defaulted field would let a fifth silently ship
+    # without coverage. Pydantic raises here instead.
+    coverage: AnalysisCoverage
     narrative_report: str
     limitations: list[str]
     # Which post-generation fabrication checks ran over the narrative, and whether

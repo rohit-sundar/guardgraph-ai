@@ -50,6 +50,8 @@ from app.reports.scoring import (
     BAND_MEDIUM_CEILING,
     BAND_SUSPICIOUS_CEILING,
     CODE_NOT_RECOVERED_WEIGHT,
+    CONTAINER_TAMPER_SCORE_FLOOR,
+    IOC_CONTAINER_ANOMALY_CAP,
     MATRIX_FLAG_SEVERITY,
     OPAQUE_REPUTATION_SCORE_FLOOR,
     OPAQUE_DEX_MAX_METHODS,
@@ -57,6 +59,7 @@ from app.reports.scoring import (
     _band_for,
     classifier_confidence_component,
     compute_risk_score,
+    container_tamper_floor,
     ioc_component,
     obfuscation_component,
     opaque_reputation_floor,
@@ -469,8 +472,6 @@ class TestVerdictBands(unittest.TestCase):
         self.assertLess(confidence * 25, BAND_SUSPICIOUS_CEILING)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 # ─── Total static-parse failure: opacity is evidence, not absence of it ───────
@@ -685,3 +686,110 @@ class TestOpaqueReputationFloor(unittest.TestCase):
         stub = _obfuscation(dex_method_count=57, declared_component_count=630,
                             unresolved_reflection_targets=12, analyzed_method_count=5)
         self.assertEqual(obfuscation_component(stub), CODE_NOT_RECOVERED_WEIGHT)
+
+
+# ─── CONTAINER_TAMPER_SCORE_FLOOR ────────────────────────────────────────────
+
+class TestContainerTamperFloor(unittest.TestCase):
+    """
+    The archive-integrity floor (app/analysis/apk_container.py).
+
+    Measured before it was wired in — 0 of 533 clean apps trip any anomaly code
+    against 122 of 499 malware (scripts/measure_container_anomalies.py). That
+    100%-precision figure is the whole licence for a floor here, so the first
+    test below pins the band and the rest pin the shape of the claim.
+    """
+
+    def test_floor_lands_in_its_intended_band(self):
+        """`suspicious`, deliberately not higher. Packaging tampering evidences
+        intent to evade, not capability, and the stronger bands are reserved for
+        evidence about what the app does."""
+        floor = CONTAINER_TAMPER_SCORE_FLOOR["archive_built_to_defeat_inspection"]
+        self.assertEqual(_band_for(floor), "suspicious")
+
+    def test_no_anomalies_means_no_floor(self):
+        self.assertEqual(container_tamper_floor([]), 0.0)
+        self.assertEqual(container_tamper_floor(None), 0.0)
+
+    def test_any_single_anomaly_fires_it(self):
+        """No severity ordering among the codes, because the corpus does not
+        support one — every code measured 0/533 on clean apps, so ranking them
+        would be fitting to malware with no clean side to check against."""
+        expected = CONTAINER_TAMPER_SCORE_FLOOR["archive_built_to_defeat_inspection"]
+        for code in (
+            "zip_fake_encryption:372/372",
+            "zip_unsupported_compression:55217",
+            "zip_duplicate_entries:25",
+            "zip_core_name_shadowing:84",
+            "zip_absolute_entry_paths:42",
+            "zip_central_directory_unreadable",
+        ):
+            with self.subTest(code=code):
+                self.assertEqual(container_tamper_floor([code]), expected)
+
+    def test_floor_never_lowers_a_score_that_earned_more_on_its_own(self):
+        """Same contract as every other floor: it raises, it never caps."""
+        loud = compute_risk_score(
+            predicted_ttps={"T1636.004": 0.99, "T1517": 0.98, "T1582": 0.97},
+            permissions=[
+                "android.permission.RECEIVE_SMS", "android.permission.READ_SMS",
+                "android.permission.SEND_SMS", "android.permission.READ_CONTACTS",
+                "android.permission.SYSTEM_ALERT_WINDOW",
+            ],
+            obfuscation=_obfuscation(),
+            entropy_threshold=7.2,
+            matched_anchor_behaviors={"SMS_INTERCEPTION", "C2_BEHAVIOR", "OVERLAY"},
+            signature_match_count=1,
+            is_known_malware=True,
+            container_anomalies=["zip_fake_encryption:372/372"],
+        )
+        floor = CONTAINER_TAMPER_SCORE_FLOOR["archive_built_to_defeat_inspection"]
+        self.assertGreater(loud.total_score, floor)
+        self.assertFalse(loud.container_tamper_floor_applied)
+
+    def test_a_quiet_tampered_sample_is_raised_and_says_why(self):
+        """
+        The sample-4 case: an APK whose every component reads empty *because* the
+        archive was built to make them read empty.
+        """
+        quiet = compute_risk_score(
+            predicted_ttps={},
+            permissions=[],
+            obfuscation=_obfuscation(),
+            entropy_threshold=7.2,
+            container_anomalies=["zip_fake_encryption:372/372",
+                                 "zip_duplicate_entries:25"],
+        )
+        floor = CONTAINER_TAMPER_SCORE_FLOOR["archive_built_to_defeat_inspection"]
+        self.assertEqual(quiet.total_score, floor)
+        self.assertEqual(quiet.verdict_band, "suspicious")
+        self.assertTrue(quiet.container_tamper_floor_applied)
+
+    def test_anomalies_are_attributable_ioc_evidence_and_are_capped(self):
+        """
+        They name a structural fact about *this* file, so they sit in the
+        attributable half — but a sample that trips every code must not carry
+        the component on packaging alone.
+        """
+        none_ = ioc_component(0)
+        some = ioc_component(0, container_anomaly_count=1)
+        many = ioc_component(0, container_anomaly_count=99)
+        self.assertGreater(some, none_)
+        self.assertLessEqual(many - none_, IOC_CONTAINER_ANOMALY_CAP + 1e-9)
+
+    def test_a_clean_archive_scores_exactly_as_before(self):
+        """Regression guard for the 533 clean apps: no anomalies, no change."""
+        kwargs = dict(
+            predicted_ttps={"T1418": 0.4},
+            permissions=["android.permission.INTERNET"],
+            obfuscation=_obfuscation(),
+            entropy_threshold=7.2,
+        )
+        self.assertEqual(
+            compute_risk_score(**kwargs).total_score,
+            compute_risk_score(**kwargs, container_anomalies=[]).total_score,
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

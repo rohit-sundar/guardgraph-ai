@@ -22,26 +22,58 @@ def test_bad_zip_file_is_recognized():
     assert "packer" in explanation.lower()
 
 
-def test_axml_module_failure_is_recognized():
+def test_axml_empty_attribute_name_no_longer_crashes_the_parser():
     """
-    Reproduces the exact real-world crash this project hit: AXMLPrinter's
-    _fix_name() indexes name[0] with no empty-string guard. A fully-garbage
-    buffer doesn't reach this path (AXMLPrinter logs and bails earlier), so
-    this calls the vulnerable method directly with the degenerate input that
-    triggers it — same as the live IndexError traced back to axml/__init__.py.
+    Regression guard for app/analysis/axml_recovery.install_axml_tolerance.
+
+    AXMLPrinter._fix_name() indexes name[0] with no empty-string guard, and a
+    manifest carrying an attribute whose name resolves to "" walked straight
+    into an IndexError — a crash rather than a parse failure, losing the whole
+    APK object over one malformed attribute. Sample 1 of the 2026-08-27 Bank of
+    India evaluation set does exactly that.
+
+    The patch must fix that one case and change nothing else, so this asserts
+    both halves.
     """
     from unittest.mock import MagicMock
     from androguard.core.axml import AXMLPrinter
 
+    from app.analysis.axml_recovery import (
+        EMPTY_NAME_PLACEHOLDER,
+        install_axml_tolerance,
+    )
+
+    install_axml_tolerance()
     fake_self = MagicMock()
+
+    prefix, name = AXMLPrinter._fix_name(fake_self, "some_uri", "")
+    assert name == EMPTY_NAME_PLACEHOLDER
+
+    # A well-formed name still takes androguard's own code path untouched.
+    assert AXMLPrinter._fix_name(fake_self, "some_uri", "package")[1] == "package"
+
+
+def test_axml_module_failure_is_recognized():
+    """
+    probable_cause must still classify an AXML-layer IndexError, which remains
+    reachable from the many other ways a corrupted manifest desyncs the parser —
+    the empty-attribute-name case above is one route into it, not the only one.
+
+    Raised from a frame that names the module rather than by re-breaking
+    androguard, so this tests the classifier instead of depending on a bug the
+    project now deliberately prevents.
+    """
+    def androguard_core_axml_fix_name():
+        raise IndexError("string index out of range")
+
     try:
-        AXMLPrinter._fix_name(fake_self, "some_uri", "")  # (self, prefix, name) — empty name triggers it
+        androguard_core_axml_fix_name()
     except IndexError as e:
         label, explanation = probable_cause(e)
         assert label == "Malformed AndroidManifest.xml (AXML)"
         assert "desync" in explanation.lower()
     else:
-        raise AssertionError("expected _fix_name('') to raise IndexError")
+        raise AssertionError("expected the helper to raise IndexError")
 
 
 def test_memory_error_is_recognized():
