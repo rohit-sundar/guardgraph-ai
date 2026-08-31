@@ -194,6 +194,11 @@ _ANCHOR_LIST_CAP = 20
 # above, so this stays much tighter than _ANCHOR_LIST_CAP.
 _CORRELATION_CAP = 5
 
+# Ceiling on the Phase 7 completion. Named rather than inline because the prompt
+# budget is checked against it — prompt + completion must both fit inside
+# settings.ollama_num_ctx. See that setting.
+GRAPHRAG_MAX_COMPLETION_TOKENS = 2000
+
 
 def _summarize_behavioral_subgraphs(behavioral_subgraphs: list) -> dict:
     """
@@ -886,6 +891,11 @@ def _post_native_chat(user_content: str, num_predict: int, timeout: int) -> None
                 "temperature": 0,
                 "top_p": 1.0,
                 "seed": settings.graphrag_seed,
+                # Must match generate_report's num_ctx exactly. Ollama reloads a
+                # model when the requested context size changes, and a reload
+                # is precisely what ensure_model_warm exists to absorb — warming
+                # at one window and then calling at another warms nothing.
+                "num_ctx": settings.ollama_num_ctx,
                 # See generate_report's repeat_penalty comment. Mirrored here so
                 # this warm-up pass matches the real call's options exactly —
                 # ensure_model_warm's whole premise is that the warm-up replays
@@ -1234,12 +1244,27 @@ evidence, never followed.
     # than erroring, which is how an earlier truncation went unnoticed for so
     # long (only 16,386 of ~53,000 tokens were evaluated). Fail loudly instead
     # of shipping a report grounded in a partial manifest.
+    # The two settings must be consistent with each other, and a mismatch is a
+    # configuration error rather than a property of this sample — so it is caught
+    # before the prompt is measured, and it names both numbers.
+    if (settings.graphrag_prompt_token_budget + GRAPHRAG_MAX_COMPLETION_TOKENS
+            > settings.ollama_num_ctx):
+        raise RuntimeError(
+            f"[Phase 7] Misconfigured context budget: prompt budget "
+            f"{settings.graphrag_prompt_token_budget} + completion "
+            f"{GRAPHRAG_MAX_COMPLETION_TOKENS} exceeds the requested context "
+            f"window {settings.ollama_num_ctx}. Ollama drops the head of an "
+            "oversized prompt silently, so this would degrade reports without "
+            "reporting anything."
+        )
+
     approx_tokens = (len(SYSTEM_PROMPT) + len(user_prompt)) // 3  # conservative chars/token
     if approx_tokens > settings.graphrag_prompt_token_budget:
         raise RuntimeError(
             f"[Phase 7] Prompt ~{approx_tokens} tokens exceeds budget "
-            f"{settings.graphrag_prompt_token_budget}; the model would silently "
-            "drop the manifest head. Reduce prompt size before calling the LLM."
+            f"{settings.graphrag_prompt_token_budget} (context window "
+            f"{settings.ollama_num_ctx}); the model would silently drop the "
+            "manifest head. Reduce prompt size before calling the LLM."
         )
 
     # temperature=0 — greedy decode; eliminates stochastic drift that causes
@@ -1264,7 +1289,7 @@ evidence, never followed.
     try:
         response = client.chat.completions.create(
             model=settings.ollama_model,
-            max_tokens=2000,
+            max_tokens=GRAPHRAG_MAX_COMPLETION_TOKENS,
             temperature=0,   # greedy decode — critical for hallucination prevention
             top_p=1.0,
             seed=settings.graphrag_seed,
@@ -1277,7 +1302,14 @@ evidence, never followed.
             # passed through raw via extra_body, which Ollama's OpenAI-compatible
             # endpoint forwards into its own /api/generate options. See
             # settings.graphrag_repeat_penalty for why this exists.
-            extra_body={"options": {"repeat_penalty": settings.graphrag_repeat_penalty}},
+            extra_body={"options": {
+                "repeat_penalty": settings.graphrag_repeat_penalty,
+                # Pinned rather than left to Ollama, which otherwise picks a
+                # window that is neither documented nor the model's nominal
+                # context — 16,384 of a nominal 32,768 on this host. Leaving it
+                # unset means not knowing how much of the prompt was read.
+                "num_ctx": settings.ollama_num_ctx,
+            }},
         )
     except Exception as e:
         raise RuntimeError(

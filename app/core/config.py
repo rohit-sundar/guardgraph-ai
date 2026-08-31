@@ -225,11 +225,41 @@ class Settings(BaseSettings):
     dynamic_resign_keystore_path: str = "data/dynamic/debug_resign.jks"
     java_keytool_path: str = _default_keytool_path()
 
+    # Context window requested from Ollama for the Phase 7 call, in tokens.
+    #
+    # This is set EXPLICITLY because the alternative is not knowing. Ollama picks
+    # a window itself when the request omits `num_ctx`, and what it picks is
+    # neither the model's nominal context nor a documented constant: measured on
+    # this box 2026-08-28, qwen2.5:7b-instruct-q4_K_M loaded at **16,384** tokens
+    # by default against a nominal 32,768. The previous budget comment recorded
+    # that same observation and responded by capping the prompt at 15,000 — which
+    # treated a configurable window as a fact of nature, and left the real ceiling
+    # invisible to every caller.
+    #
+    # Requesting 32,768 loads and runs: 3.91 GiB resident of 6.35 GiB total, i.e.
+    # partially offloaded to system RAM and correspondingly slower, which was
+    # already true at 16,384. Lower this if the host is VRAM-constrained; the
+    # budget below is checked against it, so both move together.
+    ollama_num_ctx: int = 32768
+
     # Hard ceiling on the Phase 7 (GraphRAG) prompt, in approximate tokens.
-    # Set against the OBSERVED 16,386 tokens Ollama actually evaluated for
-    # qwen2.5:7b-instruct before truncating — not the nominal 32,768 context,
-    # which is never what the model receives in practice.
-    graphrag_prompt_token_budget: int = 15000
+    #
+    # Must leave room for the completion inside `ollama_num_ctx` — Ollama silently
+    # drops the head of an oversized prompt rather than erroring, so overflow does
+    # not announce itself, it just quietly removes the manifest the report is
+    # supposed to be grounded in. generate_report asserts
+    # `budget + GRAPHRAG_MAX_COMPLETION_TOKENS <= ollama_num_ctx` at call time so
+    # these two settings cannot drift apart unnoticed.
+    #
+    # 28,000 + 2,000 completion leaves 2,768 tokens of headroom against 32,768,
+    # which covers the chat template's own overhead and the error in the
+    # chars/3 estimator the check uses.
+    #
+    # For scale: the richest sample in the local corpus (9dfb5b4a…, GodFather,
+    # 15 predicted techniques and their full ontology context) builds a ~19,700
+    # token prompt. That sample produced NO narrative at all under the old
+    # 15,000 budget — the guard fired, correctly, and Phase 7 returned empty.
+    graphrag_prompt_token_budget: int = 28000
 
     # Fixed decode seed for the GraphRAG LLM call. temperature=0 alone does not
     # guarantee reproducible output — batch scheduling and KV-cache reuse can
