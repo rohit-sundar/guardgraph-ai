@@ -475,6 +475,21 @@ def ingest_apk(
                     permissions, intent_actions
                 )
 
+            # Logged HERE, inside the block that binds `recovered`. This line used
+            # to sit in the icon-recovery block below, where `recovered` is only
+            # bound if the manifest happened to fail — so on an app whose manifest
+            # parsed fine but whose launcher icon is an adaptive (XML) drawable,
+            # it raised UnboundLocalError and took the whole ingest down with it.
+            # ingest_apk raising means _analyze_with_fallback falls through to
+            # _unparseable_report, i.e. a perfectly readable app was scored
+            # UNPARSEABLE_RISK_SCORE (50.0, "suspicious"). Measured on a 30-sample
+            # corpus draw: it fired on 11 of 15 benign apps and 2 of 15 malware.
+            logger.info(
+                f"Manifest recovery ({recovered.source}) filled "
+                f"package={package_name}, {len(permissions)} permissions, "
+                f"{recovered.component_count} components."
+            )
+
     # The launcher icon is the other casualty of a poisoned archive: resource
     # resolution needs a parsed manifest and a readable resources.arsc, so an APK
     # that renames its entries loses the impersonation check on the very artwork
@@ -484,10 +499,14 @@ def ingest_apk(
         recovered_phash = extract_icon_phash_from_container(container)
         if recovered_phash is not None:
             icon_phash = f"{recovered_phash:016x}"
+            # This block runs for ANY app with no resolvable launcher icon, not
+            # just one with a broken manifest — an adaptive (XML) drawable is the
+            # ordinary modern case. So it may only report what IT recovered; the
+            # manifest-recovery report belongs to the block above, which is the
+            # one that knows whether a recovery happened at all.
             logger.info(
-                f"Manifest recovery ({recovered.source}) filled "
-                f"package={package_name}, {len(permissions)} permissions, "
-                f"{recovered.component_count} components."
+                f"Launcher icon recovered from the container for "
+                f"package={package_name}; brand-impersonation checks can run."
             )
 
     # 5. How much code Androguard actually recovered. Counted here rather than in
