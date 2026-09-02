@@ -416,7 +416,7 @@ function handleFileSelected(file) {
 // Real pipeline phase count — must match app.core.progress.PHASES on the backend.
 // Only used as a fallback when an event omits total_phases; every event from a
 // current server carries its own, so this rarely matters in practice.
-const PIPELINE_PHASE_COUNT = 11;
+const PIPELINE_PHASE_COUNT = 12;
 
 // Rotating "about the app" callouts shown on the progress screen — pure
 // wait-filler, not tied to the real pipeline phase. Each one describes
@@ -872,6 +872,9 @@ function renderResults(data) {
 
   // Reverse Engineering Findings (crypto / DCL / WebView / native)
   renderReFindings(manifest);
+
+  // Decompiled code and the ATT&CK techniques mapped from it (Phase 5.6)
+  renderDecompiledCode(manifest);
 
   // Dynamic verification (Phase 8, opt-in) — tab stays hidden unless it ran
   renderDynamicVerification(manifest);
@@ -1702,6 +1705,138 @@ function emptyNote(text) {
   return span;
 }
 
+
+// ── Decompiled Code -> ATT&CK (Phase 5.6) ───────────────────────────────────
+//
+// Everything rendered here originates in the sample: class names, method names
+// and — above all — the decompiled source itself are attacker-authored. Every
+// value goes through esc() before it reaches innerHTML, including the code,
+// which is why the highlighter below rebuilds the line from escaped fragments
+// rather than doing a replace() on raw text.
+
+// Wraps the evidence line inside the decompiled source so a reader can see what
+// the mapping was drawn from without hunting for it. Whitespace-insensitive to
+// match code_mapping._normalize: the model reproduces a line's tokens reliably
+// and its indentation unreliably, and the backend validated the quote on the
+// same relaxed basis, so matching strictly here would leave a validated quote
+// unhighlighted.
+function highlightEvidence(source, evidences) {
+  const norm = s => (s || '').replace(/\s+/g, ' ').trim();
+  const wanted = (evidences || []).map(norm).filter(Boolean);
+  return (source || '').split('\n').map(line => {
+    const n = norm(line);
+    const hit = n && wanted.some(w => n.includes(w) || w.includes(n));
+    return hit
+      ? `<mark class="code-evidence-line">${esc(line)}</mark>`
+      : esc(line);
+  }).join('\n');
+}
+
+function renderDecompiledCode(manifest) {
+  const container = document.getElementById('codeMappingList');
+  if (!container) return;
+  container.innerHTML = '';
+
+  const methods = manifest.decompiled_methods || [];
+  const mappings = manifest.code_technique_mappings || [];
+  const countEl = document.getElementById('codeMappingCount');
+  if (countEl) countEl.textContent = mappings.length;
+
+  const noteEl = document.getElementById('codeMappingNote');
+  if (noteEl) noteEl.textContent = manifest.code_mapping_note || '';
+
+  // The validation results, rendered the same way as the narrative's grounding
+  // checks. `null` means no validation ran (phase skipped, or the model was
+  // unreachable) — that must never render as a passed check.
+  const checksEl = document.getElementById('codeMappingChecks');
+  if (checksEl) {
+    const checks = manifest.code_mapping_checks;
+    if (!checks || !Array.isArray(checks.checks)) {
+      checksEl.innerHTML = '';
+    } else {
+      checksEl.innerHTML = `
+        <div class="code-mapping-checks-header ${checks.passed ? 'ok' : 'warn'}">
+          Mapping validation: ${checks.passed_count}/${checks.total_count} checks passed
+        </div>
+        ${checks.checks.map(c => `
+          <div class="code-mapping-check ${c.passed ? 'ok' : 'warn'}">
+            <span class="code-mapping-check-name">${c.passed ? '✓' : '✗'} ${esc(c.name)}</span>
+            <span class="code-mapping-check-detail">${esc(c.detail || '')}</span>
+          </div>`).join('')}
+      `;
+    }
+  }
+
+  if (methods.length === 0) {
+    // "Nothing was decompiled" and "code was read but nothing was attributable"
+    // are different findings, and the note distinguishes them.
+    container.innerHTML = `<span class="re-empty">${
+      esc(manifest.code_mapping_note || 'No code was decompiled for this sample')
+    }</span>`;
+    return;
+  }
+
+  const byMethod = new Map();
+  mappings.forEach(m => {
+    if (!byMethod.has(m.method_index)) byMethod.set(m.method_index, []);
+    byMethod.get(m.method_index).push(m);
+  });
+
+  // Methods that produced a mapping first — an analyst opening this tab wants
+  // the attributed code, not the first method that happened to be selected.
+  const order = methods.map((_, i) => i)
+    .sort((a, b) => (byMethod.get(b)?.length || 0) - (byMethod.get(a)?.length || 0) || a - b);
+
+  order.forEach(i => {
+    const method = methods[i];
+    const mapped = byMethod.get(i) || [];
+    const item = document.createElement('details');
+    item.className = 'code-method';
+    if (mapped.length) item.open = true;
+
+    const techRows = mapped.map(m => {
+      const pct = ((m.confidence || 0) * 100).toFixed(0);
+      const barColor = m.confidence > 0.66 ? '#ff4444' : m.confidence > 0.33 ? '#ff8800' : '#22c55e';
+      return `
+        <div class="mitre-item code-mapping-item">
+          <div class="mitre-item-header">
+            <span class="mitre-id">${esc(m.technique_id)}</span>
+            <span class="mitre-name">${esc(m.technique_name || 'Unknown Technique')}</span>
+            <span class="mitre-tactic">${esc(m.tactic || 'Unknown Tactic')}</span>
+            ${m.is_subtechnique ? '<span class="subtechnique-badge">sub-technique</span>' : ''}
+          </div>
+          <div class="progress-bar-container mitre-bar-container" style="height:6px; margin:0.4rem 0;">
+            <div class="progress-bar-fill" style="width:${pct}%; background:${barColor};"></div>
+          </div>
+          <div class="mitre-item-footer">
+            <span class="spec-value code">${pct}% model confidence</span>
+          </div>
+          ${m.rationale ? `<p class="code-mapping-rationale">${esc(m.rationale)}</p>` : ''}
+          <p class="code-mapping-evidence"><span class="code-mapping-evidence-label">evidence</span>
+            <code>${esc(m.evidence || '')}</code></p>
+          ${m.description ? `
+          <details class="mitre-desc-details">
+            <summary class="mitre-desc-summary">Show technique description</summary>
+            <p class="mitre-description">${esc(m.description)}</p>
+          </details>` : ''}
+        </div>`;
+    }).join('');
+
+    item.innerHTML = `
+      <summary class="code-method-summary">
+        <span class="code-method-name">${esc(method.class_name)}.${esc(method.method_name)}()</span>
+        <span class="code-method-meta">${esc(method.selection_reason || '')}</span>
+        <span class="code-method-count">${mapped.length} technique${mapped.length === 1 ? '' : 's'}</span>
+      </summary>
+      ${mapped.length ? techRows : '<p class="re-empty">No technique was attributed to this method.</p>'}
+      <pre class="code-method-source"><code>${
+        highlightEvidence(method.source, mapped.map(m => m.evidence))
+      }</code></pre>
+      ${method.truncated ? '<p class="code-method-truncated">Method body was truncated for analysis — the model read the portion shown above.</p>' : ''}
+    `;
+    container.appendChild(item);
+  });
+}
 
 function renderMitreMapping(manifest) {
   const container = document.getElementById('mitreMappingList');

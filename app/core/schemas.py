@@ -328,6 +328,65 @@ class DynamicVerificationResult(BaseModel):
     coverage_note: str = "dynamic analysis did not run"
 
 
+class DecompiledMethod(BaseModel):
+    """
+    One method's decompiled Java, and why it was selected for decompilation.
+
+    See app/analysis/decompile.py for the three-tier selection. `selection_reason`
+    carries which tier this came from ("anchor:OTP_INTERCEPTION", "re_api:...",
+    "api_density:N") because a technique mapped against an anchor method rests on
+    stronger footing than one mapped against the app's densest remaining method,
+    and the reader needs to be able to tell those apart.
+
+    `source` is DAD output, not the developer's original source: variable names
+    are register-derived (`v3_0`), and a truncated body says so inline.
+    """
+    method_signature: str
+    class_name: str
+    method_name: str
+    source: str
+    truncated: bool = False
+    selection_reason: str = ""
+
+
+class CodeTechniqueMapping(BaseModel):
+    """
+    One MITRE ATT&CK Mobile technique attributed to one decompiled method by the
+    LLM reading its code (Phase 5.6 — app/reports/code_mapping.py).
+
+    A THIRD class of finding, distinct from the two the report already separates:
+    not a deterministic anchor (no dictionary rule fired) and not a classifier
+    prediction (no feature vector involved). It is a model reading code, and it
+    is the only path in this system that can reach a SUB-technique — the TTP
+    classifier's label space is parent techniques only, frozen (app/ml/labels.py).
+
+    Every field except `rationale` and `confidence` is checkable against something
+    other than the model's word: `technique_id` had to be in the ATT&CK Mobile
+    ontology, `technique_name`/`tactic`/`description` are read back from that
+    ontology rather than accepted from the model, `method_*` had to be a method
+    actually sent, and `evidence` had to appear verbatim in the source that was
+    sent. See _validate_mappings.
+    """
+    technique_id: str
+    technique_name: str = ""
+    tactic: str = ""
+    description: str = ""
+    is_subtechnique: bool = False
+    # Index into the manifest's decompiled_methods list, so the UI can show the
+    # mapping next to the code it was drawn from.
+    method_index: int
+    method_signature: str = ""
+    class_name: str = ""
+    method_name: str = ""
+    selection_reason: str = ""
+    # A line copied verbatim out of that method's decompiled source. Validated as
+    # a substring of it — this is what makes the mapping auditable rather than
+    # assertive.
+    evidence: str = ""
+    rationale: str = ""
+    confidence: float = 0.0
+
+
 class AnalysisManifest(BaseModel):
     target_package: Optional[str]
     sha256: str
@@ -394,6 +453,17 @@ class AnalysisManifest(BaseModel):
     # request did not ask for it (the default) — distinct from a populated
     # result with ran=False, which means it was requested but didn't complete.
     dynamic_verification: Optional[DynamicVerificationResult] = None
+    # Phase 5.6 — the methods that were decompiled, and the ATT&CK Mobile
+    # techniques the LLM attributed to them by reading that code. The usual
+    # convention in this file: `[]` means the pass ran and attributed nothing,
+    # which is a finding; it does NOT mean the pass was skipped. That case is
+    # what `code_mapping_note` says, and `code_mapping_checks` is None when no
+    # validation ran at all (skipped, or the model was unreachable) — the UI must
+    # not render an absent result as a passed check, same rule as `grounding`.
+    decompiled_methods: list[DecompiledMethod] = []
+    code_technique_mappings: list[CodeTechniqueMapping] = []
+    code_mapping_checks: Optional[dict] = None
+    code_mapping_note: str = ""
 
 
 class RiskScoreBreakdown(BaseModel):

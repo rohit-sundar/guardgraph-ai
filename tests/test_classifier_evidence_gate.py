@@ -302,6 +302,11 @@ class TestSuppressionReachesTheReport(unittest.TestCase):
                 obf, [0.0] * len(FEATURE_NAMES), [0.0] * N_TTP_FEATURES, 0.0, 0
             )
             mp.run_phase5_ml_classification.return_value = ({}, None, None)
+            # Phase 5.6 is stubbed out: this test is about the evidence gate's
+            # limitation reaching the report, and the mapping phase is an
+            # independent enrichment that would otherwise return an unpackable
+            # MagicMock.
+            mp.run_phase5c_code_mapping.return_value = ([], [], None, "")
             mp.run_phase6_risk_scoring.return_value = risk
             mp.run_phase7_reporting.return_value = ("narrative", [], None)
             # Phase 5.5 returns a plain dict (AnalysisManifest.impersonation is a

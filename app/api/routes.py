@@ -454,6 +454,15 @@ async def get_analysis(sha256: str):
         # record predating this, same honest-gap convention as everything
         # else on this historical-reconstruction path.
         dynamic_verification=cached.get("dynamic_verification"),
+        # Phase 5.6, recoverable here for the same reason dynamic_verification and
+        # grounding are: the decompiled bodies and their mappings were persisted
+        # into the record, so a historical record does carry them. Unlike the
+        # resolved_* findings named in the docstring above, nothing needs
+        # re-parsing the APK to show them.
+        decompiled_methods=cached.get("decompiled_methods") or [],
+        code_technique_mappings=cached.get("code_technique_mappings") or [],
+        code_mapping_checks=cached.get("code_mapping_checks"),
+        code_mapping_note=cached.get("code_mapping_note") or "",
     )
 
     narrative = cached.get("narrative") or "[No narrative stored for this sample.]"
@@ -1041,6 +1050,15 @@ def _run_analysis(
             resolved_dcl_targets=cached.get("resolved_dcl_targets") or [],
             resolved_webview_bridges=cached.get("resolved_webview_bridges") or [],
             resolved_native_bridges=cached.get("resolved_native_bridges") or [],
+            # Phase 5.6 replayed from the record for the same reason as the four
+            # resolved_* lists above: decompilation needs the full CFG and the
+            # mapping needs an LLM call, neither of which the hot path pays.
+            # `or []` on an older record reads as "not recovered", not as "ran and
+            # attributed nothing" — the limitation string below says which.
+            decompiled_methods=cached.get("decompiled_methods") or [],
+            code_technique_mappings=cached.get("code_technique_mappings") or [],
+            code_mapping_checks=cached.get("code_mapping_checks"),
+            code_mapping_note=cached.get("code_mapping_note") or "",
             app_label=ingestion.app_label,
             icon_phash=ingestion.icon_phash,
             impersonation=impersonation,
@@ -1075,6 +1093,12 @@ def _run_analysis(
                 "cache hit predates reverse-engineering persistence — resolved "
                 "crypto/DCL/WebView/native findings are not recoverable for this "
                 "record without a fresh upload"
+            ]
+        if cached_score is not None and "code_technique_mappings" not in cached:
+            limitations = limitations + [
+                "cache hit predates decompiled-code technique mapping — the "
+                "decompiled methods and their MITRE mappings are not recoverable "
+                "for this record without a fresh upload"
             ]
         # Gated on the narrative existing: with no narrative there is nothing for
         # the fabrication checks to have run against, so a missing `grounding` is
@@ -1129,6 +1153,14 @@ def _run_analysis(
                 resolved_native_bridges=cached.get("resolved_native_bridges") or [],
                 grounding=grounding,
                 dynamic_verification=dynamic_result,
+                # Carried through unchanged. store_signature rewrites the whole
+                # record blob, so omitting a field here does not preserve it —
+                # it erases it, and this call exists only to attach the fresh
+                # dynamic result to an otherwise-unchanged record.
+                decompiled_methods=cached.get("decompiled_methods") or [],
+                code_technique_mappings=cached.get("code_technique_mappings") or [],
+                code_mapping_checks=cached.get("code_mapping_checks"),
+                code_mapping_note=cached.get("code_mapping_note") or "",
             )
         if not narrative:
             narrative = "[No narrative was generated for this sample.]"
@@ -1240,6 +1272,26 @@ def _run_analysis(
     if signature_family:
         predicted_family, family_confidence = signature_family, None
 
+    # --- Phase 5.6: Decompiled-Code TTP Mapping ---
+    # Placed after Phase 5 so the classifier's parent-technique predictions reach
+    # the prompt as corroborating context, and before the manifest so its output
+    # reaches Phase 7. Skipped when report generation is skipped: a bulk
+    # population run must not pay a second LLM call per sample, and nothing
+    # Neo4j needs comes from this phase.
+    code_mapping_enabled = settings.code_mapping_enabled and not skip_report
+    progress.emit(job_id, 5.6, "Decompiled-Code TTP Mapping", "start")
+    decompiled_methods, code_mappings, code_mapping_checks, code_mapping_note = (
+        AnalysisPipeline.run_phase5c_code_mapping(
+            analysis_obj, cfgs, behavioral_subgraphs, ingestion, all_matches,
+            predicted_ttps, enabled=code_mapping_enabled,
+        )
+    )
+    progress.emit(
+        job_id, 5.6, "Decompiled-Code TTP Mapping",
+        "done" if code_mapping_enabled else "skipped",
+        code_mapping_note if code_mapping_enabled else "code mapping disabled for this run",
+    )
+
     # --- Phase 8: Dynamic Verification (opt-in — see dynamic_verification.py) ---
     # Placed here, before Phase 6, rather than after it: its inputs
     # (ingestion.c2_indicators, resolved_dcl) are already available, and this
@@ -1293,6 +1345,10 @@ def _run_analysis(
         icon_phash=ingestion.icon_phash,
         impersonation=impersonation,
         dynamic_verification=dynamic_result if dynamic_enabled else None,
+        decompiled_methods=decompiled_methods,
+        code_technique_mappings=code_mappings,
+        code_mapping_checks=code_mapping_checks,
+        code_mapping_note=code_mapping_note,
     )
 
     # --- Phase 6: Risk Scoring (includes static malware anchors) ---
@@ -1362,6 +1418,14 @@ def _run_analysis(
             resolved_native_bridges=resolved_native,
             grounding=grounding,
             dynamic_verification=dynamic_result if dynamic_enabled else None,
+            # Same reasoning as resolved_*/grounding: a cache hit cannot
+            # recompute these. Decompilation needs the full CFG (not rebuilt on
+            # the hot path) and the mapping needs an LLM call, which is precisely
+            # what the cache exists to avoid paying twice.
+            decompiled_methods=[m.model_dump() for m in decompiled_methods],
+            code_technique_mappings=[m.model_dump() for m in code_mappings],
+            code_mapping_checks=code_mapping_checks,
+            code_mapping_note=code_mapping_note,
         )
 
     if record_history:

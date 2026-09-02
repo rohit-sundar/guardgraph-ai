@@ -225,6 +225,26 @@ class Settings(BaseSettings):
     dynamic_resign_keystore_path: str = "data/dynamic/debug_resign.jks"
     java_keytool_path: str = _default_keytool_path()
 
+    # ── Decompiled-code technique mapping (Phase 5.6) ───────────────────────
+    # On by default, unlike dynamic verification: this needs nothing beyond the
+    # Ollama instance Phase 7 already requires, and it is the only path in the
+    # system that reaches a MITRE SUB-technique or names the method responsible.
+    # It costs one extra LLM call per cold-path analysis (a cache hit replays the
+    # stored mappings, and skip_report runs skip it — see routes.py). Turn it off
+    # to get the previous single-call behaviour back.
+    code_mapping_enabled: bool = True
+    # Empty = use `ollama_model`, so this needs no second `ollama pull`. Reading
+    # code and writing an analyst narrative are different tasks, though, so a
+    # code-tuned model (e.g. qwen2.5-coder:7b-instruct) can be pointed at this
+    # phase alone without changing what generates the report.
+    code_mapping_model: str = ""
+    # How many methods get decompiled and sent. Each body is capped at
+    # decompile.MAX_CHARS_PER_METHOD, so this is the main lever on the prompt
+    # size; code_mapping.py drops the lowest-ranked methods if the budget is
+    # still exceeded. Eight covers the distinct behaviours of every corpus sample
+    # examined while leaving the prompt well inside the context window.
+    code_mapping_max_methods: int = 8
+
     # Context window requested from Ollama for the Phase 7 call, in tokens.
     #
     # This is set EXPLICITLY because the alternative is not knowing. Ollama picks

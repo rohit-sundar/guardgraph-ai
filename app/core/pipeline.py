@@ -19,6 +19,7 @@ from loguru import logger
 
 from app.analysis.ingest import ingest_apk
 from app.analysis.cfg import build_all_method_cfgs, method_key, split_method_signature
+from app.analysis.decompile import select_and_decompile
 from app.analysis.forensic import ManifestContext, match_anchors, extract_anchor_subgraph
 from app.analysis.topology import (
     compute_topological_invariants,
@@ -39,6 +40,7 @@ from app.ml.classifier import classifier, ttp_classifier
 from app.ml.features import build_feature_vector, build_ttp_feature_vector
 from app.reports.scoring import compute_risk_score
 from app.reports.graphrag import generate_report
+from app.reports.code_mapping import map_code_to_techniques
 from app.core.config import settings
 
 # Default min technique probability for a TTP to count as "predicted" in the
@@ -54,6 +56,8 @@ from app.core.schemas import (
     BehavioralSubgraph,
     CFGEdge,
     CFGNode,
+    CodeTechniqueMapping,
+    DecompiledMethod,
     RiskScoreBreakdown,
     ObfuscationSignal,
     SignatureMatch,
@@ -801,6 +805,70 @@ class AnalysisPipeline:
         duration = time.time() - start_time
         logger.info(f"[Phase 6] Completed in {duration:.3f}s. Risk Score: {risk_score.total_score} ({risk_score.verdict_band})")
         return risk_score
+
+    @staticmethod
+    def run_phase5c_code_mapping(
+        analysis_obj: Any,
+        cfgs: Dict[str, nx.DiGraph],
+        behavioral_subgraphs: List[BehavioralSubgraph],
+        ingestion: IngestionResult,
+        all_matches: Dict[str, List[str]],
+        predicted_ttps: Dict[str, float],
+        enabled: bool,
+    ) -> Tuple[List[DecompiledMethod], List[CodeTechniqueMapping], Optional[dict], str]:
+        """
+        Phase 5.6: decompile the methods that carry evidence and have the LLM map
+        that code to MITRE ATT&CK Mobile techniques — including sub-techniques,
+        which the Phase 5 classifier structurally cannot reach (its label space is
+        parent techniques only, frozen in app/ml/labels.py).
+
+        Runs AFTER Phase 5 so the classifier's parent-technique predictions can go
+        into the prompt as corroborating context, and BEFORE the manifest is built
+        so its output reaches Phase 7's narrative.
+
+        Deliberately does NOT feed Phase 6. A model reading decompiled Java is the
+        weakest of the three evidence classes this system produces, and the risk
+        score stays the reproducible product of the deterministic components and
+        the fitted classifier. This pass explains and localises a verdict; it does
+        not move it.
+
+        Never raises: this is an enrichment pass, and every consumer is correct
+        without it. Returns empty lists and a note saying why on any failure.
+        """
+        logger.info("[Phase 5.6] Starting Decompiled-Code TTP Mapping...")
+        if not enabled:
+            logger.info("[Phase 5.6] Skipped — code mapping disabled for this request.")
+            return [], [], None, "decompiled-code technique mapping was not run"
+
+        start_time = time.time()
+        try:
+            decompiled, decompile_note = select_and_decompile(
+                analysis_obj, cfgs, behavioral_subgraphs,
+                limit=settings.code_mapping_max_methods,
+            )
+            # `analysed` rather than `decompiled` is what reaches the manifest: the
+            # prompt budget can shed the lowest-ranked methods, and publishing a
+            # method the model never read — captioned "no technique attributed" —
+            # would assert a negative result nothing established.
+            analysed, mappings, checks, map_note = map_code_to_techniques(
+                decompiled,
+                permissions=ingestion.permissions,
+                matched_behaviors=set(all_matches.keys()),
+                predicted_ttps=predicted_ttps,
+            )
+            note = f"{decompile_note}; {map_note}"
+        except Exception as e:
+            logger.error(f"[Phase 5.6] Code mapping failed: {type(e).__name__}: {e}")
+            return [], [], None, f"decompiled-code technique mapping failed ({type(e).__name__})"
+
+        duration = time.time() - start_time
+        subtechniques = sum(1 for m in mappings if m.is_subtechnique)
+        logger.info(
+            f"[Phase 5.6] Completed in {duration:.3f}s. "
+            f"Read {len(analysed)} decompiled method(s), mapped {len(mappings)} technique(s) "
+            f"({subtechniques} sub-technique(s))."
+        )
+        return analysed, mappings, checks, note
 
     @staticmethod
     def run_phase8_dynamic_verification(

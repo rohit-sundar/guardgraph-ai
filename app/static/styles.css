@@ -484,6 +484,15 @@ body {
   gap: 0.65rem 0.4rem;
 }
 
+/* 12 phases (Phase 5.6, decompiled-code TTP mapping, was added between
+   impersonation and dynamic verification). Same 6x2 grid as the 11-step layout,
+   which had a spare cell — so this fills the row rather than reflowing it. */
+.pipeline-steps-12 {
+  grid-template-columns: repeat(6, 1fr);
+  grid-template-rows: repeat(2, auto);
+  gap: 0.65rem 0.4rem;
+}
+
 .step-item {
   display: flex;
   flex-direction: column;
@@ -1598,6 +1607,168 @@ body {
   color: var(--text-muted);
   font-size: 0.85rem;
   font-style: italic;
+}
+
+/* Decompiled Code -> ATT&CK tab (Phase 5.6) */
+.code-mapping-caveat {
+  margin: 0 0 1rem;
+  padding: 0.65rem 0.9rem;
+  border-left: 3px solid #ff8800;
+  background: rgba(255, 136, 0, 0.08);
+  border-radius: 0 6px 6px 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.code-mapping-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.code-mapping-checks {
+  margin-bottom: 0.75rem;
+}
+
+.code-mapping-checks-header {
+  font-size: 0.85rem;
+  font-weight: 700;
+  margin-bottom: 0.35rem;
+}
+
+.code-mapping-checks-header.ok,
+.code-mapping-check.ok .code-mapping-check-name { color: #22c55e; }
+
+.code-mapping-checks-header.warn,
+.code-mapping-check.warn .code-mapping-check-name { color: #ff8800; }
+
+.code-mapping-check {
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+  padding: 0.15rem 0;
+}
+
+.code-mapping-check-name { font-weight: 600; white-space: nowrap; }
+.code-mapping-check-detail { color: var(--text-muted); }
+
+.code-method {
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 8px;
+  border-left: 3px solid var(--accent-purple);
+  padding: 0.6rem 0.9rem;
+}
+
+.code-method-summary {
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  list-style: none;
+}
+
+.code-method-name {
+  font-family: 'SF Mono', Consolas, monospace;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text-main);
+  /* An obfuscated app's class names run to ~180 characters; let them wrap
+     inside the summary rather than pushing the count off the card. */
+  word-break: break-all;
+}
+
+.code-method-meta {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-family: 'SF Mono', Consolas, monospace;
+}
+
+.code-method-count {
+  margin-left: auto;
+  font-size: 0.75rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.code-method-source {
+  margin: 0.6rem 0 0;
+  padding: 0.75rem;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 6px;
+  /* Decompiled Java has long lines and must not stretch the card; scroll it
+     inside its own box, the same rule the topology and dynamic tabs follow. */
+  overflow-x: auto;
+  max-height: 26rem;
+  overflow-y: auto;
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+
+.code-method-source code {
+  font-family: 'SF Mono', Consolas, monospace;
+  white-space: pre;
+  color: var(--text-main);
+}
+
+.code-evidence-line {
+  display: inline-block;
+  width: 100%;
+  background: rgba(255, 136, 0, 0.18);
+  color: var(--text-main);
+  border-left: 2px solid #ff8800;
+  padding-left: 0.3rem;
+}
+
+.code-method-truncated {
+  margin: 0.4rem 0 0;
+  font-size: 0.75rem;
+  font-style: italic;
+  color: var(--text-muted);
+}
+
+.code-mapping-item { margin-top: 0.6rem; }
+
+.code-mapping-rationale {
+  margin: 0.35rem 0 0;
+  font-size: 0.82rem;
+  color: var(--text-muted);
+}
+
+.code-mapping-evidence {
+  margin: 0.35rem 0 0;
+  font-size: 0.78rem;
+}
+
+.code-mapping-evidence-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  margin-right: 0.4rem;
+}
+
+.code-mapping-evidence code {
+  font-family: 'SF Mono', Consolas, monospace;
+  color: #ff8800;
+  word-break: break-all;
+}
+
+.subtechnique-badge {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.2);
+  color: var(--accent-purple);
+  font-weight: 700;
 }
 
 /* MITRE ATT&CK Mapping tab */

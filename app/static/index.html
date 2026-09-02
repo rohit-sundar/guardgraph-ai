@@ -133,7 +133,7 @@
           <div class="progress-bar-fill" id="progressBarFill"></div>
         </div>
         <div class="progress-live-note" id="progressLiveNote">Connecting&hellip;</div>
-        <div class="pipeline-steps pipeline-steps-11">
+        <div class="pipeline-steps pipeline-steps-12">
           <div class="step-item" data-phase="1">
             <div class="step-dot">1</div>
             <span class="step-label">APK Ingestion</span>
@@ -166,16 +166,20 @@
             <div class="step-dot">8</div>
             <span class="step-label">Impersonation</span>
           </div>
-          <div class="step-item" data-phase="5.7">
+          <div class="step-item" data-phase="5.6">
             <div class="step-dot">9</div>
+            <span class="step-label">Code &rarr; ATT&amp;CK</span>
+          </div>
+          <div class="step-item" data-phase="5.7">
+            <div class="step-dot">10</div>
             <span class="step-label">Dynamic Verification</span>
           </div>
           <div class="step-item" data-phase="6">
-            <div class="step-dot">10</div>
+            <div class="step-dot">11</div>
             <span class="step-label">Risk Scoring</span>
           </div>
           <div class="step-item" data-phase="7">
-            <div class="step-dot">11</div>
+            <div class="step-dot">12</div>
             <span class="step-label">GraphRAG AI</span>
           </div>
         </div>
@@ -364,6 +368,9 @@
           </button>
           <button class="tab-btn" onclick="switchTab('reFindings', this)">
             Reverse-Engineering Indicators (<span id="reFindingsCount">0</span>)
+          </button>
+          <button class="tab-btn" onclick="switchTab('decompiledCode', this)">
+            Decompiled Code &rarr; ATT&CK (<span id="codeMappingCount">0</span>)
           </button>
           <button class="tab-btn hidden" id="tabBtnDynamicVerification" onclick="switchTab('dynamicVerification', this)">
             Dynamic Verification
@@ -615,6 +622,36 @@
                 <summary class="re-findings-summary"><span>Show findings</span><span class="re-findings-count" id="reNativeCount"></span></summary>
                 <div class="re-findings-list" id="reNativeList"></div>
               </details>
+            </div>
+          </div>
+
+          <!-- Decompiled Code -> ATT&CK (Phase 5.6). The only view in the app that
+               shows the sample's actual code, and the only place a MITRE
+               SUB-technique can appear — the TTP classifier's label space is
+               parent techniques only. See app/reports/code_mapping.py. -->
+          <div class="tab-content" id="tabDecompiledCode">
+            <p class="graph-subtitle" style="margin-bottom:0.6rem;">
+              Methods carrying evidence, decompiled back to Java and read by the LLM, which
+              attributes each to the MITRE ATT&amp;CK Mobile technique or <strong>sub-technique</strong>
+              it implements. This is a model reading code &mdash; weaker than a deterministic anchor
+              and different in kind from the classifier's prediction &mdash; so it is never taken at
+              its word: it points at a line <em>number</em>, the highlighted evidence below is read
+              straight out of the decompiled source, and any technique outside the ATT&amp;CK Mobile
+              matrix, or belonging to a bundled library rather than to this app, is discarded before
+              it reaches this page.
+            </p>
+            <p class="code-mapping-caveat">
+              <strong>Read this as orientation, not as a verdict.</strong> Measured over a 30-sample
+              corpus draw, <strong>93% of known-benign apps received at least one mapping, against
+              92% of known malware</strong> &mdash; the same APIs carry legitimate and malicious use,
+              and a technique label here does <em>not</em> indicate the app is malicious. Nothing on
+              this page feeds the risk score. Its value is that it points you at the specific methods
+              worth reading and quotes the exact line; judge the code, not the label.
+            </p>
+            <div id="codeMappingChecks" class="code-mapping-checks"></div>
+            <div id="codeMappingNote" class="re-section-desc"></div>
+            <div class="code-mapping-list" id="codeMappingList">
+              <span class="re-empty">Run analysis to see decompiled code and its technique mappings</span>
             </div>
           </div>
 

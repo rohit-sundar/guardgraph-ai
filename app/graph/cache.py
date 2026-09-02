@@ -108,6 +108,14 @@ _RECORD_FIELDS = (
     # — same reasoning as resolved_*/grounding above: no cheap way to
     # recompute it on a plain cache hit, since it needs the AVD.
     "dynamic_verification",
+    # Phase 5.6 — the decompiled method bodies and the ATT&CK mappings drawn from
+    # them. Both of the reasons above apply at once: decompilation needs the full
+    # CFG, which the hot path deliberately does not rebuild, and the mapping needs
+    # an LLM call, which is the cost the cache exists to avoid.
+    "decompiled_methods",
+    "code_technique_mappings",
+    "code_mapping_checks",
+    "code_mapping_note",
 )
 
 
@@ -169,7 +177,7 @@ def observed_endpoints(dynamic_verification: dict | None, c2_indicators: list[st
     return list(rows.values())
 
 
-def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None, *, source: str = "operator", signature_yara_data: dict | None = None, permissions: list[str] | None = None, risk_components: dict | None = None, obfuscation_data: dict | None = None, package_name: str | None = None, c2_indicators: list[str] | None = None, cert_thumbprint: str | None = None, resolved_crypto_configs: list[str] | None = None, resolved_dcl_targets: list[str] | None = None, resolved_webview_bridges: list[str] | None = None, resolved_native_bridges: list[str] | None = None, grounding: dict | None = None, dynamic_verification: dict | None = None):
+def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str, float], narrative: str = "", limitations: list[str] = None, *, source: str = "operator", signature_yara_data: dict | None = None, permissions: list[str] | None = None, risk_components: dict | None = None, obfuscation_data: dict | None = None, package_name: str | None = None, c2_indicators: list[str] | None = None, cert_thumbprint: str | None = None, resolved_crypto_configs: list[str] | None = None, resolved_dcl_targets: list[str] | None = None, resolved_webview_bridges: list[str] | None = None, resolved_native_bridges: list[str] | None = None, grounding: dict | None = None, dynamic_verification: dict | None = None, decompiled_methods: list[dict] | None = None, code_technique_mappings: list[dict] | None = None, code_mapping_checks: dict | None = None, code_mapping_note: str = ""):
     """
     Call this after a cold-path analysis completes, so future uploads of
     the same sample (or re-uploads during a campaign) hit the fast path.
@@ -214,6 +222,12 @@ def store_signature(sha256: str, family: str, risk_score: float, ttps: dict[str,
         # the same record_json blob as everything else here rather than
         # needing its own Cypher property.
         "dynamic_verification": dynamic_verification,
+        # Phase 5.6. Stored as plain dicts (the caller dumps the pydantic models)
+        # so the record blob stays JSON-serialisable like everything else here.
+        "decompiled_methods": decompiled_methods or [],
+        "code_technique_mappings": code_technique_mappings or [],
+        "code_mapping_checks": code_mapping_checks,
+        "code_mapping_note": code_mapping_note,
     }
 
     # Three separate statements rather than one query chaining UNWIND $ttps then

@@ -179,6 +179,10 @@ class TestColdAndHotPathAgreeOnFamily(unittest.TestCase):
             )
             # The classifier's own answer — None whenever it is untrained.
             mp.run_phase5_ml_classification.return_value = ({}, classifier_family, None)
+            # Phase 5.6 (decompiled-code TTP mapping) — stubbed like every other
+            # cold-path phase here. This test is about family attribution, and an
+            # unstubbed phase returns a bare MagicMock the caller cannot unpack.
+            mp.run_phase5c_code_mapping.return_value = ([], [], None, "")
             mp.run_phase5b_impersonation.return_value = {
                 "findings": [], "coverage": [], "brands_checked": 0, "max_severity": 0.0,
             }
@@ -282,6 +286,7 @@ class TestSkippedReportDoesNotPoisonTheCache(unittest.TestCase):
                 obfuscation, [], [], 0.0, 0
             )
             mp.run_phase5_ml_classification.return_value = ({}, None, None)
+            mp.run_phase5c_code_mapping.return_value = ([], [], None, "")
             mp.run_phase5b_impersonation.return_value = {
                 "findings": [], "coverage": [], "brands_checked": 0, "max_severity": 0.0,
             }

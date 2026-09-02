@@ -112,6 +112,9 @@ class TestStoreSigAlwaysCalledAfterColdPath(unittest.TestCase):
             mp.run_phase4_feature_engineering.return_value = (mock_obf, [0.0]*len(FEATURE_NAMES), [0.0]*len(TTP_FEATURE_NAMES), 0.0, 0)
             # predicted_family is None (classifier untrained / FileNotFoundError path)
             mp.run_phase5_ml_classification.return_value = ({}, None, None)
+            # Phase 5.6 stub — this test asserts store_signature is called after a
+            # cold path, not anything about code mapping.
+            mp.run_phase5c_code_mapping.return_value = ([], [], None, "")
             mp.run_phase6_risk_scoring.return_value = mock_risk
             mp.run_phase7_reporting.return_value = ("narrative", ["lim"], None)
             # Phase 5.5 returns a plain dict (AnalysisManifest.impersonation is a
@@ -239,11 +242,11 @@ class TestEnsureModelWarm(unittest.TestCase):
         the only thing that ever loaded the model was this function. preload_model()
         (called at startup to keep the multi-minute load off the request path) breaks
         that: it makes the model resident WITHOUT a same-prompt pass. So the guard is
-        now residency AND _warmed_since_load, and the test says so.
+        now residency AND membership of _warmed_models, and the test says so.
         """
         import app.reports.graphrag as g
         with patch.object(g, "_model_is_loaded", return_value=True), \
-             patch.object(g, "_warmed_since_load", True), \
+             patch.object(g, "_warmed_models", {settings.ollama_model}), \
              patch.object(g, "_post_native_chat") as mock_post:
             self.assertTrue(g.ensure_model_warm("prompt"))
 
@@ -1144,7 +1147,7 @@ class TestPreloadDoesNotFakeTheWarmup(unittest.TestCase):
              patch.object(g, "_post_native_chat") as mock_post:
             self.assertTrue(g.preload_model())
         self.assertFalse(
-            g._warmed_since_load,
+            settings.ollama_model in g._warmed_models,
             "preload_model must not mark the same-prompt warm-up as done",
         )
 
